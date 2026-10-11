@@ -227,7 +227,9 @@ fn main() -> AppExit {
                     primary_window: Some(game_window()),
                     ..default()
                 })
-                .set(task_pools()),
+                .set(task_pools())
+                // Options > Graphics > GPU (integrated / dedicated), read from settings.json before the renderer starts.
+                .set(gpu_render_plugin(&data_dir.join("settings.json"))),
         )
         // The game's own shaders for the scenery (fh1-render, docs/SHADERS.md).
         .add_plugins(fh1_render::Fh1RenderPlugin)
@@ -320,6 +322,16 @@ fn main() -> AppExit {
     // Quit at once (perf/writer.rs exit_now: saves flushed, no slow teardown).
     let code = app.run();
     perf::writer::exit_now(code)
+}
+
+/// Bevy's render plugin, with the saved GPU choice as the power preference (everything else stays Bevy's default).
+fn gpu_render_plugin(settings_path: &std::path::Path) -> bevy::render::RenderPlugin {
+    use bevy::render::settings::{RenderCreation, WgpuSettings};
+    let mut wgpu = WgpuSettings::default();
+    if let Some(p) = ui::graphics::startup_power_preference(settings_path) {
+        wgpu.power_preference = p;
+    }
+    bevy::render::RenderPlugin { render_creation: RenderCreation::Automatic(Box::new(wgpu)), ..default() }
 }
 
 /// Thread pools (2026-10-08 perf, e1): the render thread rose and fell with the main world's load (r = 0.92), because both

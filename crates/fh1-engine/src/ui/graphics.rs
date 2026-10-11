@@ -181,6 +181,8 @@ pub struct GraphicsSettings {
     /// [`migrate_aa`]). Absent in older files, so the field default is 0, not [`AA_REV`].
     #[serde(default)]
     pub aa_rev: u32,
+    /// Which GPU renders: read once at startup (the adapter is picked before the window exists), so a change needs a restart.
+    pub gpu: Gpu,
 }
 
 /// Current [`GraphicsSettings::aa_rev`].
@@ -188,8 +190,60 @@ const AA_REV: u32 = 1;
 
 impl Default for GraphicsSettings {
     fn default() -> Self {
-        Self { quality: Quality::High, aa: AntiAlias::Smaa2x, motion_blur: MotionBlur::Medium, render_scale: 1.0, aa_rev: AA_REV }
+        Self { quality: Quality::High, aa: AntiAlias::Smaa2x, motion_blur: MotionBlur::Medium, render_scale: 1.0, aa_rev: AA_REV, gpu: Gpu::Auto }
     }
+}
+
+/// Options > Graphics > GPU: which adapter wgpu picks on a machine with an integrated and a dedicated GPU. Maps onto
+/// wgpu's power preference; `WGPU_ADAPTER_NAME` / `WGPU_POWER_PREF` in the real environment still win.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Gpu {
+    /// wgpu's default: the high-performance (dedicated) GPU.
+    #[default]
+    Auto,
+    /// Integrated GPU (wgpu `LowPower`).
+    Integrated,
+    /// Dedicated GPU (wgpu `HighPerformance`).
+    Dedicated,
+}
+
+impl Gpu {
+    const ALL: [Gpu; 3] = [Gpu::Auto, Gpu::Integrated, Gpu::Dedicated];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Gpu::Auto => "Auto",
+            Gpu::Integrated => "Integrated",
+            Gpu::Dedicated => "Dedicated",
+        }
+    }
+
+    pub fn next(self, back: bool) -> Self {
+        cycle(&Self::ALL, self, back)
+    }
+}
+
+/// The saved GPU choice as a wgpu power preference, read straight from settings.json before the app (and its renderer)
+/// exists. None = leave wgpu's own choice (Auto, no file, or the environment already picks an adapter).
+pub fn startup_power_preference(settings_path: &std::path::Path) -> Option<bevy::render::settings::PowerPreference> {
+    use bevy::render::settings::PowerPreference;
+    if std::env::var_os("WGPU_ADAPTER_NAME").is_some() || std::env::var_os("WGPU_POWER_PREF").is_some() {
+        return None;
+    }
+    let text = std::fs::read_to_string(settings_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let gpu: Gpu = serde_json::from_value(json.get("graphics")?.get("gpu")?.clone()).ok()?;
+    match gpu {
+        Gpu::Auto => None,
+        Gpu::Integrated => Some(PowerPreference::LowPower),
+        Gpu::Dedicated => Some(PowerPreference::HighPerformance),
+    }
+}
+
+/// The row's value. The adapter is chosen once at startup, so say so (the log's `AdapterInfo` line names the GPU in use).
+pub fn gpu_value(g: &GraphicsSettings) -> String {
+    format!("{} (restart to apply)", g.gpu.name())
 }
 
 /// The renderer is Remaster + RTX (rtx.rs sets Msaa::Off everywhere and runs DLSS / TAA).
