@@ -202,7 +202,7 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
     let pvs = pvs::parse(&pvs_bytes)?;
     // Forza Motorsport 4 circuits (docs/FM4_RECON.md) have no .pgeo props, CollObjs/GameObjs placements, .pvsz zones or
     // .hex grid: every model goes into the tiles, which the engine streams by distance (index.json "zones": null).
-    let fm4 = pvs_bytes.get(4..8) == Some(&pvs::FM4_VERSION.to_be_bytes()[..]);
+    let fm4 = pvs::is_motorsport(&pvs_bytes);
     // Props (`.pgeo` placements of origin-centred `.rmb.bin` templates; fh1_formats::props, docs/PROPS.md).
     // Their template models are written once in local space, not into the tiles.
     let (mut placements, unresolved) = if fm4 { (Vec::new(), 0) } else { props::track_placements(&mut ar, &pvs_bytes)? };

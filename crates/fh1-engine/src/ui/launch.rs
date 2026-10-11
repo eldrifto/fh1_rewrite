@@ -129,22 +129,29 @@ pub struct MainMenu {
     repeat: super::browser::Repeat,
 }
 
-/// Motorsport groups: FM4 by track (maps.json `track`), rows = layouts with length / type.
+/// A menu game label (`FM4`) whose maps are circuits (MOTORSPORT) rather than open worlds (HORIZON).
+fn is_circuits_game(label: &str) -> bool {
+    crate::track::OPTIONAL_GAMES.iter().any(|g| g.circuits && g.label() == label)
+}
+
+/// Motorsport groups: every circuits game (FM4, FM3) by track (maps.json `track`), rows = layouts with length / type.
 fn motorsport_groups(assets: &Path, by_game: &[(String, Vec<(String, String)>)]) -> Vec<(String, Vec<(String, String)>)> {
     let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
     let mut meta: std::collections::HashMap<String, serde_json::Value> = Default::default();
-    if let Ok(b) = std::fs::read(assets.join("imported/fm4/maps.json")) {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
-            for m in v.as_array().or_else(|| v["maps"].as_array()).cloned().unwrap_or_default() {
-                if let Some(id) = m["id"].as_str() {
-                    meta.insert(id.to_owned(), m.clone());
+    for g in crate::track::OPTIONAL_GAMES.iter().filter(|g| g.circuits) {
+        if let Ok(b) = std::fs::read(assets.join("imported").join(g.folder).join("maps.json")) {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&b) {
+                for m in v.as_array().or_else(|| v["maps"].as_array()).cloned().unwrap_or_default() {
+                    if let Some(id) = m["id"].as_str() {
+                        meta.insert(id.to_owned(), m.clone());
+                    }
                 }
             }
         }
     }
     for (game, maps) in by_game {
         match game.as_str() {
-            "FM4" => {
+            game if is_circuits_game(game) => {
                 for (id, name) in maps {
                     let m = meta.get(id);
                     let track = m.and_then(|m| m["track"].as_str()).map(str::to_owned).unwrap_or_else(|| name.split(" - ").next().unwrap_or(name).to_owned());
@@ -157,9 +164,10 @@ fn motorsport_groups(assets: &Path, by_game: &[(String, Vec<(String, String)>)])
                         label.push_str(&format!("  ·  {t}"));
                     }
                     let label = format!("{label}  ");
-                    match out.iter_mut().find(|g| g.0 == format!("FM4  ·  {track}")) {
+                    let group = format!("{game}  ·  {track}");
+                    match out.iter_mut().find(|g| g.0 == group) {
                         Some(g) => g.1.push((id.clone(), label)),
-                        None => out.push((format!("FM4  ·  {track}"), vec![(id.clone(), label)])),
+                        None => out.push((group, vec![(id.clone(), label)])),
                     }
                 }
             }
@@ -218,7 +226,7 @@ impl MainMenu {
     pub fn new(assets: &Path) -> Self {
         let by_game = Track::maps_by_game(assets);
         let motorsport = motorsport_groups(assets, &by_game);
-        let horizon: Vec<(String, Vec<(String, String)>)> = by_game.into_iter().filter(|(g, _)| g != "FM4").collect();
+        let horizon: Vec<(String, Vec<(String, String)>)> = by_game.into_iter().filter(|(g, _)| !is_circuits_game(g)).collect();
         // Optional games that aren't imported: their worlds / circuits greyed.
         let (motorsport_locked, horizon_locked): (Vec<LockedMap>, Vec<LockedMap>) = crate::track::locked_maps(assets).into_iter().partition(|l| l.circuit);
         let motorsport_reason = crate::track::OPTIONAL_GAMES.iter().find(|g| g.circuits && !g.coming_soon).map_or_else(String::new, |g| g.requirement());

@@ -10,8 +10,13 @@
 //! - `StartGridPositions` holds one row per grid with up to 12 absolute slots (`PosX0..`, `PosY0..`, `PosZ0..`,
 //!   `HeadingX0..`): position = (x, height, z) of the collision space, heading = (x, z) of the direction of travel (VERIFIED
 //!   against the `.geo` centreline on four tracks: slot 0 is 2-3 m from a waypoint, the heading matches its tangent).
-//! - The scenery index (`.pvs`) is version 0x18 (FM4's is 0x1B): not converted yet, so a map without `scenery/` is drawn
-//!   as its collision mesh (the engine's fallback).
+//! - The scenery converts with the FM4 code after three small format changes, all in the headers: the track root `.pvs` is
+//!   version 0x18 (FM4's 0x1B; the same binding tables, found by the same validation), the `.rmb.bin` models are
+//!   CTrackModel version 4 (6 in FH1 / FM4; the submodel layout is the same) and the `.bix` textures start `BIX0` (FM4:
+//!   `BIX1`, the same header fields). A track whose scenery fails to convert is reported and drawn as its collision mesh.
+//!   KNOWN ISSUE: parts of the terrain-blend materials (`terr_blnd_spec_3`, `shldr_blnd_spec_3`, grass at mid distance)
+//!   render white; not the lightmap colours, specular, generated vs stored mips, the road-edge shader or the texture
+//!   formats (all tried), the cause is still open.
 //! - Amalfi, Fujimi Kaido and the Nurburgring (and their stages) aren't on the Play Disc: their `Ribbon_NN` folders are
 //!   missing and they are skipped ("no Ribbon" lines). Cars aren't imported yet (the `.carbin` models are another format).
 //!

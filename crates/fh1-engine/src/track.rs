@@ -199,7 +199,7 @@ pub const OPTIONAL_GAMES: [OptionalGame; 3] = [
     // fh1setup fh2.rs MAP_NAME.
     OptionalGame { folder: "fh2", name: "Forza Horizon 2", worlds: &[("fh2/anthem", "Southern Europe (FH2)")], circuits: false, cars: true, coming_soon: false },
     OptionalGame { folder: "fm4", name: "Forza Motorsport 4", worlds: &[], circuits: true, cars: true, coming_soon: false },
-    // `fh1setup import-fm3`: circuits (collision mesh, no scenery yet); its car models are a different .carbin format.
+    // `fh1setup import-fm3`: circuits with scenery; its car models are a different .carbin format.
     OptionalGame { folder: "fm3", name: "Forza Motorsport 3", worlds: &[], circuits: true, cars: false, coming_soon: false },
 ];
 

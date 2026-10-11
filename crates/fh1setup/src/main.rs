@@ -14,7 +14,7 @@
 //! - `fh2`: Forza Horizon 2 (Xbox 360) cars + map into the active install (`imported/fh2`, docs/FH2_RECON.md):
 //!   `fh1setup import-fh2 <FH2 disc.iso | extracted folder> [--data <dir>] [--only cars,map]`.
 //! - `fm4`: Forza Motorsport 4 cars + circuits (`imported/fm4`, docs/FM4_RECON.md): `fh1setup import-fm4 ...`.
-//! - `fm3`: Forza Motorsport 3 circuits (`imported/fm3`, collision mesh only so far; cars aren't imported yet): `fh1setup import-fm3 ...`.
+//! - `fm3`: Forza Motorsport 3 circuits with scenery (`imported/fm3`; cars aren't imported yet): `fh1setup import-fm3 ...`.
 //!
 //! `<id>` is derived from the SHA-256 of `default.xex`, so one edition maps to one install.
 //! A group is rebuilt only when its pipeline hash changes (or with `--force`).

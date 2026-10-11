@@ -94,10 +94,10 @@ pub fn parse(d: &[u8]) -> Result<Pvs, Error> {
         return Err(Error::BadMagic("FPVS"));
     }
     // 0x32 = FH1; 0x33 = Forza Horizon 2 (360), same layout to the end of the model table (docs/FH2_RECON.md).
-    // 0x1B = Forza Motorsport 4: different sections, see [`parse_fm4`].
+    // 0x1B = Forza Motorsport 4, 0x18 = Forza Motorsport 3: different sections, see [`parse_fm4`].
     match r.u32()? {
         0x32 | 0x33 => {}
-        FM4_VERSION => return parse_fm4(d),
+        FM4_VERSION | FM3_VERSION => return parse_fm4(d),
         _ => return Err(Error::Unsupported("pvs version".into())),
     }
     // hash, 0, 0, u16 + 2 x u8, 2 x u32, then a u32 list (Colorado: 33 increasing offsets).
@@ -140,6 +140,13 @@ pub fn parse(d: &[u8]) -> Result<Pvs, Error> {
 
 /// Forza Motorsport 4's PVS version.
 pub const FM4_VERSION: u32 = 0x1B;
+/// Forza Motorsport 3's: the same binding tables, found by the same validation (parsed on all 58 FM3 `.pvs`).
+pub const FM3_VERSION: u32 = 0x18;
+
+/// Whether `pvs_bytes` is a Forza Motorsport (FM3 / FM4) track root: no props, zones or .hex grid, every model in the tiles.
+pub fn is_motorsport(pvs_bytes: &[u8]) -> bool {
+    matches!(pvs_bytes.get(4..8).map(|b| u32::from_be_bytes(b.try_into().unwrap())), Some(FM4_VERSION | FM3_VERSION))
+}
 
 /// Forza Motorsport 4 (version 0x1B, docs/FM4_RECON.md). Only the binding tables are read; the sections around them
 /// (zone/visibility data, 72-byte atlas-tile records) are not decoded, so the tables are located by validation:
@@ -219,4 +226,24 @@ fn parse_fm4(d: &[u8]) -> Result<Pvs, Error> {
     }
     let models = single.ok_or(Error::BadMagic("pvs (FM4): model table not found"))?;
     Ok(Pvs { textures, shaders, models })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn head(version: u32) -> Vec<u8> {
+        let mut d = b"FPVS".to_vec();
+        d.extend(version.to_be_bytes());
+        d
+    }
+
+    #[test]
+    fn motorsport_roots_are_fm3_and_fm4_only() {
+        assert!(is_motorsport(&head(FM4_VERSION)));
+        assert!(is_motorsport(&head(FM3_VERSION)));
+        assert!(!is_motorsport(&head(0x32)), "FH1");
+        assert!(!is_motorsport(&head(0x33)), "FH2");
+        assert!(!is_motorsport(b"FPV"));
+    }
 }

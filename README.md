@@ -57,7 +57,7 @@ their content to the same game. Anything you don't own stays locked in the menus
 |---|---|
 | Forza Horizon 2 | 216 cars and the Southern Europe open world |
 | Forza Motorsport 4 | 501 cars and 83 circuit layouts (a MOTORSPORT mode with grid, pit and flying starts) |
-| Forza Motorsport 3 | 52 circuit layouts at 17 venues (drawn as their collision mesh for now; its cars and scenery come later) |
+| Forza Motorsport 3 | 52 circuit layouts at 17 venues with their scenery (some grass renders white for now; its cars come later) |
 
 ## Online
 
