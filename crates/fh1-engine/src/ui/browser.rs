@@ -228,7 +228,7 @@ impl CarCatalog {
             out.entries.push(entry);
         }
         // Optional games without imported cars: greyed tabs (FM3 isn't importable yet: not listed).
-        for g in crate::track::OPTIONAL_GAMES.iter().filter(|g| !g.coming_soon) {
+        for g in crate::track::OPTIONAL_GAMES.iter().filter(|g| !g.coming_soon && g.cars) {
             let label = g.label();
             if !out.games.contains(&label) && !g.cars_imported(assets) {
                 out.games.push(label.clone());

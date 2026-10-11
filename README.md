@@ -57,7 +57,7 @@ their content to the same game. Anything you don't own stays locked in the menus
 |---|---|
 | Forza Horizon 2 | 216 cars and the Southern Europe open world |
 | Forza Motorsport 4 | 501 cars and 83 circuit layouts (a MOTORSPORT mode with grid, pit and flying starts) |
-| Forza Motorsport 3 | coming later |
+| Forza Motorsport 3 | 52 circuit layouts at 17 venues (drawn as their collision mesh for now; its cars and scenery come later) |
 
 ## Online
 
@@ -119,6 +119,7 @@ The Xbox 360 retail XEX key is needed to read the shaders inside `default.xex`. 
 ```
 cargo run --release -p fh1setup --features fh2 -- import-fh2 "path/to/FH2.iso"
 cargo run --release -p fh1setup --features fm4 -- import-fm4 "path/to/FM4 Play Disc.iso" --content "path/to/FM4 Content Install Disc.iso"
+cargo run --release -p fh1setup --features fm3 -- import-fm3 "path/to/FM3 Play Disc.iso"
 ```
 
 `tools\release.ps1` builds the Windows release zip. Vendored crates keep their own licenses: `vendor/lzxd` (patched for

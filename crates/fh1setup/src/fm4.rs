@@ -98,7 +98,7 @@ pub fn run() -> Result<()> {
 /// English strings: the Play Disc's `EN.zip`, with each car pack's `Data_Car.str` merged into its `Data_Car` table
 /// (the game mounts the packs' StringTables zips over `game:\Media\StringTables\`; `fm4_merge` copies them to
 /// `media/stringtables/dlc/`).
-fn strings(disc: &Path) -> Option<fh1_ui::strtable::StringTables> {
+pub(crate) fn strings(disc: &Path) -> Option<fh1_ui::strtable::StringTables> {
     let mut s = fh1_ui::strtable::StringTables::load_language(disc, "EN").ok()?;
     let dlc = disc.join("media/stringtables/dlc");
     let mut zips: Vec<_> = std::fs::read_dir(&dlc).into_iter().flatten().flatten().map(|e| e.path()).collect();
@@ -198,19 +198,23 @@ fn cars(disc: &Path, private: &Path, out: &Path) -> Result<()> {
 }
 
 /// One drivable layout: a gamedb `Tracks` row (forward direction only) whose `Ribbon_NN` exists.
-struct Layout {
-    track: String,
-    ribbon: u32,
-    name: String,
-    length: f64,
-    grid: i64,
-    flying: i64,
+pub(crate) struct Layout {
+    pub(crate) track: String,
+    pub(crate) ribbon: u32,
+    pub(crate) name: String,
+    pub(crate) length: f64,
+    /// FM4: `StartGridPositions.id` (rows of metres back / right of the centreline).
+    pub(crate) grid: i64,
+    pub(crate) flying: i64,
     /// `Environments.DisplayName`: the venue ("Sebring International Raceway"), the map group.
-    venue: String,
+    pub(crate) venue: String,
     /// `Tracks.StartLine` / `FinishLine`: fractions of the `.geo` loop (0 / 1 = a full lap; stages and drag strips use
     /// part of the loop, e.g. Nurburgring 01-04, Fujimi Kaido 01-04, the 402 m strips).
-    start_line: f64,
-    finish_line: f64,
+    pub(crate) start_line: f64,
+    pub(crate) finish_line: f64,
+    /// FM3: the grid as absolute slots (position, heading) in collision space, pole first (`StartGridPositions` has one row
+    /// per grid with `PosX0..PosX11` etc.). None = FM4's relative rows by `grid`.
+    pub(crate) grid_slots: Option<Vec<([f32; 3], [f32; 3])>>,
 }
 
 /// Every FM4 circuit layout -> `imported/fm4/<track>_<NN>/` + `maps.json` (`FM4_TRACKS=sebring,...` limits the tracks).
@@ -224,8 +228,6 @@ struct Layout {
 /// Everything is in the collision's space (left-handed, before the engine's MIRROR_Z), like FH1's spawns.
 fn maps(disc: &Path, root: &Path) -> Result<()> {
     let db = Connection::open_with_flags(disc.join("media/db/gamedb.slt"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let strings = strings(disc);
-    let text = |r: &str| strings.as_ref().and_then(|s| s.resolve(r)).map(fh1_ui::strtable::strip_markup).unwrap_or_else(|| r.to_owned());
     let only: Option<Vec<String>> = std::env::var("FM4_TRACKS").ok().map(|v| v.split(',').map(|t| t.trim().to_ascii_lowercase()).collect());
     let mut layouts: Vec<Layout> = Vec::new();
     let mut stmt = db.prepare(
@@ -244,6 +246,7 @@ fn maps(disc: &Path, root: &Path) -> Result<()> {
             venue: r.get(6)?,
             start_line: r.get(7)?,
             finish_line: r.get(8)?,
+            grid_slots: None,
         })
     })?;
     for l in rows {
@@ -260,6 +263,14 @@ fn maps(disc: &Path, root: &Path) -> Result<()> {
         layouts.push(l);
     }
     drop(stmt);
+    build_maps(disc, root, "fm4", "FM4", layouts)
+}
+
+/// Builds `imported/<game>/<track>_<NN>/` for every layout and writes `maps.json` (the part of the circuit import that is
+/// the same for FM4 and FM3). `game` is the folder / map-id prefix (`fm4`), `label` the suffix in map names (`FM4`).
+pub(crate) fn build_maps(disc: &Path, root: &Path, game: &str, label: &str, layouts: Vec<Layout>) -> Result<()> {
+    let strings = strings(disc);
+    let text = |r: &str| strings.as_ref().and_then(|s| s.resolve(r)).map(fh1_ui::strtable::strip_markup).unwrap_or_else(|| r.to_owned());
     // Venue (map group) and layout names.
     let names: Vec<(String, String)> = layouts.iter().map(|l| (text(&l.venue), text(&l.name))).collect();
     let mut maps: Vec<Value> = std::fs::read(root.join("maps.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
@@ -271,32 +282,36 @@ fn maps(disc: &Path, root: &Path) -> Result<()> {
         let full = format!("{group} - {layout_name}");
         let dir = root.join(&id);
         let from = scenery_of.get(&l.track).cloned();
-        let res = swap(&dir, |stage| build_layout(disc, l, &full, &group, &layout_name, stage, from.as_deref()));
+        let res = swap(&dir, |stage| build_layout(disc, l, (game, label), &full, &group, &layout_name, stage, from.as_deref()));
         let kind = match res {
             Ok(()) => serde_json::from_slice::<Value>(&std::fs::read(dir.join("track.json"))?)?["type"].clone(),
             Err(e) => {
-                println!("[fm4] {id}: FAILED {e:#}");
+                println!("[{game}] {id}: FAILED {e:#}");
                 // Not listed (a previous run's folder and entry go too).
-                maps.retain(|m| m["id"].as_str() != Some(format!("fm4/{id}").as_str()));
+                maps.retain(|m| m["id"].as_str() != Some(format!("{game}/{id}").as_str()));
                 let _ = std::fs::remove_dir_all(dir.with_extension("staging"));
                 let _ = std::fs::remove_dir_all(&dir);
                 continue;
             }
         };
-        scenery_of.entry(l.track.clone()).or_insert_with(|| dir.join("scenery"));
-        let map_id = format!("fm4/{id}");
+        // A game whose scenery isn't converted has none to link into the track's other layouts.
+        if dir.join("scenery").exists() {
+            scenery_of.entry(l.track.clone()).or_insert_with(|| dir.join("scenery"));
+        }
+        let map_id = format!("{game}/{id}");
         maps.retain(|m| m["id"].as_str() != Some(map_id.as_str()));
         maps.push(json!({
-            "id": map_id, "name": format!("{full} (FM4)"), "track": group, "layout": layout_name, "length_m": l.length, "type": kind,
+            "id": map_id, "name": format!("{full} ({label})"), "track": group, "layout": layout_name, "length_m": l.length, "type": kind,
         }));
         std::fs::write(root.join("maps.json"), serde_json::to_vec_pretty(&maps)?)?;
     }
-    println!("[fm4] {} maps in maps.json", maps.len());
+    println!("[{game}] {} maps in maps.json", maps.len());
     Ok(())
 }
 
 /// One layout into `dir` (the swap stage).
-fn build_layout(disc: &Path, l: &Layout, name: &str, group: &str, layout_name: &str, dir: &Path, scenery_from: Option<&Path>) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn build_layout(disc: &Path, l: &Layout, (game, label): (&str, &str), name: &str, group: &str, layout_name: &str, dir: &Path, scenery_from: Option<&Path>) -> Result<()> {
     let track_dir = disc.join("media/tracks").join(&l.track);
     let ribbon = track_dir.join(format!("Ribbon_{:02}", l.ribbon));
     // Sub-section layouts (Nurburgring 01-04, Fujimi Kaido 01-04/10/11: sprint stages of the full course) have no
@@ -306,7 +321,7 @@ fn build_layout(disc: &Path, l: &Layout, name: &str, group: &str, layout_name: &
     };
     let col = find_col(&ribbon).or_else(|| find_col(&track_dir.join("Ribbon_00"))).with_context(|| format!("no .col in {} or Ribbon_00", ribbon.display()))?;
     let (world, stats) = fh1_world::World::from_col(disc, &l.track, &col)?;
-    println!("[fm4] {} {:02}: {} squares, {} triangles, {} surfaces", l.track, l.ribbon, stats.squares, world.tris.len(), world.surfaces.len());
+    println!("[{game}] {} {:02}: {} squares, {} triangles, {} surfaces", l.track, l.ribbon, stats.squares, world.tris.len(), world.surfaces.len());
     world.save(&dir.join("world"))?;
 
     // The AI centreline (`.geo`). Collision space = (x, height, z) = (X, Z, Y).
@@ -376,16 +391,29 @@ fn build_layout(disc: &Path, l: &Layout, name: &str, group: &str, layout_name: &
         }
     };
     let db = Connection::open_with_flags(disc.join("media/db/gamedb.slt"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let grid: Vec<(i64, f64, f64)> = db
-        .prepare("SELECT StartIndex, MetersBackFromStartLine, MetersRightOfCenterLine FROM StartGridPositions WHERE id = ?1 ORDER BY StartIndex")?
-        .query_map([l.grid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<Result<_, _>>()?;
-    for (index, back, right) in &grid {
-        let (p, k, nrm) = behind(*back as f32);
-        // The normal points left, so right of the centreline is along -normal.
-        let s = -(*right as f32) / flat(nrm);
-        push("grid", format!("grid_{index:02}"), [p[0] + nrm[0] * s, p[1], p[2] + nrm[2] * s], k, json!({ "index": index }));
-    }
+    let grid_count = match &l.grid_slots {
+        // FM3: absolute slots, pole first (heading = the direction of travel).
+        Some(slots) => {
+            for (index, (pos, head)) in slots.iter().enumerate() {
+                let h = flat(*head);
+                push("grid", format!("grid_{index:02}"), *pos, [head[0] / h, 0.0, head[2] / h], json!({ "index": index }));
+            }
+            slots.len()
+        }
+        None => {
+            let grid: Vec<(i64, f64, f64)> = db
+                .prepare("SELECT StartIndex, MetersBackFromStartLine, MetersRightOfCenterLine FROM StartGridPositions WHERE id = ?1 ORDER BY StartIndex")?
+                .query_map([l.grid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<Result<_, _>>()?;
+            for (index, back, right) in &grid {
+                let (p, k, nrm) = behind(*back as f32);
+                // The normal points left, so right of the centreline is along -normal.
+                let s = -(*right as f32) / flat(nrm);
+                push("grid", format!("grid_{index:02}"), [p[0] + nrm[0] * s, p[1], p[2] + nrm[2] * s], k, json!({ "index": index }));
+            }
+            grid.len()
+        }
+    };
     if let Some(v) = mlp(&ai.join(format!("{stem}.pit"))).ok().and_then(|p| p.get("pitparkout1").cloned()).filter(|v| v.len() >= 6) {
         let (a, b) = ([v[0], v[1], v[2]], [v[3], v[4], v[5]]);
         let d = [b[0] - a[0], 0.0, b[2] - a[2]];
@@ -399,7 +427,7 @@ fn build_layout(disc: &Path, l: &Layout, name: &str, group: &str, layout_name: &
         push("flying", "flying_start".into(), [px, py, pz], [hx / h, 0.0, hz / h], json!({ "speed_mph": mph }));
     }
     let on_road = spawns.iter().filter(|s| !s["ground_y"].is_null()).count();
-    println!("[fm4] {stem}: {} spawns ({} grid), {on_road} on the collision mesh, {kind}", spawns.len(), grid.len());
+    println!("[{game}] {stem}: {} spawns ({grid_count} grid), {on_road} on the collision mesh, {kind}", spawns.len());
     // The drag strips (Autopark 06-09) have no collision under their grid: not drivable from these files.
     anyhow::ensure!(spawns.iter().any(|s| s["kind"] == "grid" && !s["ground_y"].is_null()), "{stem}: no grid slot on the collision mesh");
     std::fs::write(dir.join("world/spawns.json"), serde_json::to_vec_pretty(&json!({ "spawns": spawns }))?)?;
@@ -428,11 +456,22 @@ fn build_layout(disc: &Path, l: &Layout, name: &str, group: &str, layout_name: &
     }))?)?;
 
     // Scenery (one build per track; later layouts link the first one's files) and the track's shaders.
-    match scenery_from {
-        Some(src) => link_tree(src, &dir.join("scenery"))?,
-        None => crate::scenery::build_track(&crate::scenery::TrackSrc::fm4(disc, &l.track, l.ribbon, "scenery")?, dir)?,
-    }
-    let shaders = crate::shaders::track_shaders(&track_dir.join("bin.zip"), &dir.join("shaders/track"))?;
+    let scenery = match scenery_from {
+        Some(src) => link_tree(src, &dir.join("scenery")),
+        None => crate::scenery::TrackSrc::fm4(disc, &l.track, l.ribbon, "scenery").and_then(|src| crate::scenery::build_track(&src, dir)),
+    };
+    let shaders = scenery.and_then(|()| crate::shaders::track_shaders(&track_dir.join("bin.zip"), &dir.join("shaders/track")));
+    let shaders = match shaders {
+        Ok(n) => n,
+        Err(e) if game != "fm4" => {
+            // A game whose scenery isn't converted yet: drive on its collision mesh.
+            println!("[{game}] {stem}: no scenery ({e:#}); the map shows its collision mesh");
+            let _ = std::fs::remove_dir_all(dir.join("scenery"));
+            let _ = std::fs::remove_dir_all(dir.join("shaders"));
+            0
+        }
+        Err(e) => return Err(e),
+    };
     std::fs::create_dir_all(dir.join("tracks"))?;
     if track_dir.join("TrackSettings.xml").exists() {
         std::fs::copy(track_dir.join("TrackSettings.xml"), dir.join("tracks/TrackSettings.xml"))?;
@@ -440,10 +479,10 @@ fn build_layout(disc: &Path, l: &Layout, name: &str, group: &str, layout_name: &
         std::fs::write(dir.join("tracks/fx_globals.json"), serde_json::to_vec_pretty(&fx_globals(&xml))?)?;
     }
     std::fs::write(dir.join("track.json"), serde_json::to_vec_pretty(&json!({
-        "name": format!("{name} (FM4)"), "game": "fm4", "track": group, "layout": layout_name, "length_m": l.length, "type": kind,
+        "name": format!("{name} ({label})"), "game": game, "track": group, "layout": layout_name, "length_m": l.length, "type": kind,
         "timing": timing, "ai_line": "ai/line.json",
     }))?)?;
-    println!("[fm4] {stem}: {shaders} track shaders");
+    println!("[{game}] {stem}: {shaders} track shaders");
     Ok(())
 }
 

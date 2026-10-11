@@ -14,6 +14,7 @@
 //! - `fh2`: Forza Horizon 2 (Xbox 360) cars + map into the active install (`imported/fh2`, docs/FH2_RECON.md):
 //!   `fh1setup import-fh2 <FH2 disc.iso | extracted folder> [--data <dir>] [--only cars,map]`.
 //! - `fm4`: Forza Motorsport 4 cars + circuits (`imported/fm4`, docs/FM4_RECON.md): `fh1setup import-fm4 ...`.
+//! - `fm3`: Forza Motorsport 3 circuits (`imported/fm3`, collision mesh only so far; cars aren't imported yet): `fh1setup import-fm3 ...`.
 //!
 //! `<id>` is derived from the SHA-256 of `default.xex`, so one edition maps to one install.
 //! A group is rebuilt only when its pipeline hash changes (or with `--force`).
@@ -43,6 +44,8 @@ mod fmv;
 mod fh2;
 #[cfg(feature = "fm4")]
 mod fm4;
+#[cfg(feature = "fm3")]
+mod fm3;
 #[cfg(feature = "fm4")]
 mod fm4_merge;
 mod grass;
@@ -114,8 +117,10 @@ fn main() -> Result<()> {
         Some("import-fh2") => return fh2::run(),
         #[cfg(feature = "fm4")]
         Some("import-fm4") => return fm4::run(),
+        #[cfg(feature = "fm3")]
+        Some("import-fm3") => return fm3::run(),
         #[allow(unreachable_patterns)]
-        Some(c @ ("import-fh2" | "import-fm4")) => bail!("{c}: rebuild fh1setup with `--features {}`", &c[7..]),
+        Some(c @ ("import-fh2" | "import-fm4" | "import-fm3")) => bail!("{c}: rebuild fh1setup with `--features {}`", &c[7..]),
         _ => {}
     }
     let args = parse_args()?;

@@ -1,12 +1,12 @@
 //! FH1 Rewrite launcher: the exe release users open. First run = a short install wizard (pick the Forza Horizon
 //! disc: ISO, a .zip holding it, or the folder it's in; optionally Forza Horizon 2 / Forza Motorsport 4 discs), which
-//! runs `fh1setup` (and its `import-fh2` / `import-fm4`) as child processes; afterwards it is the Play button.
+//! runs `fh1setup` (and its `import-fh2` / `import-fm4` / `import-fm3`) as child processes; afterwards it is the Play button.
 //!
 //! Release layout (tools/release.ps1):
 //! ```text
 //! <root>/FH1 Rewrite.exe        this launcher
 //! <root>/bin/fh1-engine.exe     the game
-//! <root>/bin/fh1setup.exe       asset converter (built with --features fh2,fm4)
+//! <root>/bin/fh1setup.exe       asset converter (built with --features fh2,fm4,fm3)
 //! <root>/bin/extract-xiso.exe   ISO extraction (fh1setup finds it next to itself)
 //! <root>/bin/ffmpeg.exe         XMA audio decoding during setup, FMV playback in the game (FH1_FFMPEG)
 //! <root>/data/                  converted assets (installation.json, installations/<id>/...), launcher.json, logs/
@@ -89,6 +89,11 @@ impl Paths {
     fn imported(&self, game: &str) -> bool {
         self.private().is_some_and(|p| p.join("imported").join(game).join("cars/index.json").is_file())
     }
+
+    /// A game imported as circuits only (FM3 so far: `imported/<game>/maps.json`, no car list yet).
+    fn imported_maps(&self, game: &str) -> bool {
+        self.private().is_some_and(|p| p.join("imported").join(game).join("maps.json").is_file())
+    }
 }
 
 /// The user's choices, kept in `<data>/launcher.json` so "Update" can re-run setup without asking again.
@@ -102,6 +107,8 @@ struct Saved {
     own_fm4: bool,
     fm4_play: String,
     fm4_content: String,
+    own_fm3: bool,
+    fm3_play: String,
     /// Release whose setup last finished (empty = never).
     release: String,
     /// Multiplayer display name (the game's `FH1_NAME`, docs/MULTIPLAYER.md "Player name"); empty = the game's default.
@@ -249,8 +256,11 @@ impl Launcher {
             if !s.fm4_content.is_empty() {
                 args.extend(["--content".into(), s.fm4_content.clone()]);
             }
-            args.extend(["--data".into(), data]);
+            args.extend(["--data".into(), data.clone()]);
             steps.push(Step { title: "Forza Motorsport 4".into(), args });
+        }
+        if s.own_fm3 && !s.fm3_play.is_empty() && !(current && self.paths.imported_maps("fm3")) {
+            steps.push(Step { title: "Forza Motorsport 3".into(), args: vec!["import-fm3".into(), s.fm3_play.clone(), "--data".into(), data] });
         }
         steps
     }
@@ -299,7 +309,7 @@ impl Launcher {
                 send(Msg::Line("removing extracted disc files...".into()));
                 // The FM4 merge holds junctions into the extracted Play Disc: remove it first (junctions are removed,
                 // not followed).
-                for d in ["work_fm4", "work_fm4_disc1", "work_fm4_disc2", "work_fh2", "work"] {
+                for d in ["work_fm4", "work_fm4_disc1", "work_fm4_disc2", "work_fm3_disc1", "work_fh2", "work"] {
                     let _ = std::fs::remove_dir_all(data.join(d));
                 }
             }
@@ -491,8 +501,13 @@ impl Launcher {
                     path_row(ui, "fm4b", &mut self.saved.fm4_content);
                 });
             }
-            let mut no = false;
-            ui.add_enabled(false, egui::Checkbox::new(&mut no, RichText::new("FORZA MOTORSPORT 3  ·  coming soon").strong()));
+            ui.checkbox(&mut self.saved.own_fm3, RichText::new("FORZA MOTORSPORT 3  ·  52 circuit layouts (cars coming later)").strong());
+            if self.saved.own_fm3 {
+                ui.indent("fm3", |ui| {
+                    ui.label(RichText::new("Play Disc (Disc 1)").color(style::DIM));
+                    path_row(ui, "fm3a", &mut self.saved.fm3_play);
+                });
+            }
         });
         ui.add_space(10.0);
         ui.checkbox(&mut self.delete_work, "Delete the extracted disc files afterwards (your disc images are never touched)");
@@ -505,6 +520,9 @@ impl Launcher {
         }
         if self.saved.own_fm4 {
             gb += 42 + 15;
+        }
+        if self.saved.own_fm3 {
+            gb += 8 + 3;
         }
         ui.label(RichText::new(format!("Needs about {gb} GB free next to this program while installing; up to an hour on slower PCs.")).color(style::DIM));
         ui.add_space(12.0);
@@ -539,6 +557,9 @@ impl Launcher {
         }
         if s.own_fm4 && !s.fm4_content.is_empty() && bad(&s.fm4_content) {
             return Some("The FM4 Content Install Disc path doesn't exist.");
+        }
+        if s.own_fm3 && bad(&s.fm3_play) {
+            return Some("Choose your Forza Motorsport 3 Play Disc, or untick it.");
         }
         if !self.paths.bin.join(format!("fh1setup{EXE}")).is_file() {
             return Some("fh1setup is missing from the bin folder next to this program. Re-extract the release.");
@@ -656,7 +677,7 @@ impl Launcher {
                 ("Forza Horizon", fh1, ""),
                 ("Forza Horizon 2", self.paths.imported("fh2"), "locked"),
                 ("Forza Motorsport 4", self.paths.imported("fm4"), "locked"),
-                ("Forza Motorsport 3", false, "coming soon"),
+                ("Forza Motorsport 3", self.paths.imported_maps("fm3"), "circuits only"),
             ] {
                 let (mark, color) = if ok { ("✔", style::OK) } else { ("—", style::DIM) };
                 let text = if ok || note.is_empty() { format!("{mark}  {name}") } else { format!("{mark}  {name}  ·  {note}") };
