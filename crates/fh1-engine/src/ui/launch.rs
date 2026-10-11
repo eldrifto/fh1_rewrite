@@ -24,11 +24,15 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use bevy::asset::RenderAssetUsages;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use fh1_ui::vfont::{Font as VFont, Mesh as VMesh};
+
 use bevy::input::gamepad::{Gamepad, GamepadButton};
 use bevy::prelude::*;
 
 use super::browser::{catalog_for, BrowserRow, CarBrowser, CarCatalog, MapBrowser, Pick, LOCKED, LOCKED_ON};
-use super::loading::{shadow, Fade, FadeBg, Loading};
+use super::loading::{shadow, Fade, FadeBg, Loading, LoadingRoot};
 use super::world_load::{Mode, PendingWorld, WorldChoice};
 
 // ONLINE (server browser). Declared here so ui.rs stays untouched; the file is ui/online.rs.
@@ -47,9 +51,17 @@ pub struct LaunchPart;
 #[derive(Component)]
 pub struct PressPrompt;
 
-/// Menu panel (hidden on the title).
+/// Menu panel (hidden on the title). Also the centred logo and the backdrop dimmer, which only the menu screens use.
 #[derive(Component)]
 pub struct MenuBox;
+
+/// Marks the title images that pulse like the prompt text (the rasterised "PRESS START"; not the logo).
+#[derive(Component)]
+pub struct PressPulse;
+
+/// The plain-text "PRESS START / ENTER" shown until the game's own font has drawn the real one ([`fill_press_text`]).
+#[derive(Component)]
+pub struct PressFallback;
 
 #[derive(Component)]
 pub struct MenuTitle;
@@ -284,7 +296,7 @@ fn map_name(groups: &[(String, Vec<(String, String)>)], id: &str) -> String {
 }
 
 /// Builds the main menu widgets under the loading root: logo (or a text title), prompt, menu panel, legal line.
-pub fn spawn(commands: &mut Commands, root: Entity, font: &UiFont, logo: Option<Handle<Image>>) {
+pub fn spawn(commands: &mut Commands, root: Entity, font: &UiFont, logo: Option<Handle<Image>>, title_logo: Option<Handle<Image>>) {
     let col = commands
         .spawn((
             LaunchPart,
@@ -304,13 +316,41 @@ pub fn spawn(commands: &mut Commands, root: Entity, font: &UiFont, logo: Option<
     // Darken the backdrop a little behind the title.
     commands.spawn((
         LaunchPart,
+        MenuBox,
         ChildOf(col),
         Node { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.3)),
         FadeBg(0.3),
     ));
-    match logo {
-        Some(img) => {
+    // The title screen: the game's own 120_p_pre_splash layout (UI units in the 1280 x 720 space, from the centre, y up):
+    // `Logo` = logomedium.png, 420 x 150 centred on (357, -187). Menu screens keep the logo centred above the panel.
+    match (title_logo, logo) {
+        (Some(img), _) => {
+            commands.spawn((
+                LaunchPart,
+                PressPrompt,
+                ChildOf(root),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent((640.0 + 357.0 - 210.0) / 12.8),
+                    top: Val::Percent((360.0 + 187.0 - 75.0) / 7.2),
+                    width: Val::Percent(420.0 / 12.8),
+                    aspect_ratio: Some(2.8),
+                    ..default()
+                },
+                ImageNode { image: img.clone(), image_mode: NodeImageMode::Stretch, ..default() },
+                Fade(1.0),
+            ));
+            commands.spawn((
+                LaunchPart,
+                MenuBox,
+                ChildOf(col),
+                Node { width: Val::Percent(26.0), aspect_ratio: Some(2.8), ..default() },
+                ImageNode { image: img, image_mode: NodeImageMode::Stretch, ..default() },
+                Fade(1.0),
+            ));
+        }
+        (None, Some(img)) => {
             commands.spawn((
                 LaunchPart,
                 ChildOf(col),
@@ -318,12 +358,13 @@ pub fn spawn(commands: &mut Commands, root: Entity, font: &UiFont, logo: Option<
                 ImageNode { image: img, image_mode: NodeImageMode::Stretch, ..default() },
                 Fade(1.0),
             ));
+            commands.spawn((LaunchPart, ChildOf(col), Text::new("REWRITE"), font.text(22.0), TextColor(Color::srgba(1.0, 1.0, 1.0, 0.8)), shadow(), Fade(0.8)));
         }
-        None => {
+        (None, None) => {
             commands.spawn((LaunchPart, ChildOf(col), Text::new("FORZA HORIZON"), font.text(96.0), TextColor(Color::WHITE), shadow(), Fade(1.0)));
+            commands.spawn((LaunchPart, ChildOf(col), Text::new("REWRITE"), font.text(22.0), TextColor(Color::srgba(1.0, 1.0, 1.0, 0.8)), shadow(), Fade(0.8)));
         }
     }
-    commands.spawn((LaunchPart, ChildOf(col), Text::new("REWRITE"), font.text(22.0), TextColor(Color::srgba(1.0, 1.0, 1.0, 0.8)), shadow(), Fade(0.8)));
     // Menu panel.
     let panel = commands
         .spawn((
@@ -354,14 +395,21 @@ pub fn spawn(commands: &mut Commands, root: Entity, font: &UiFont, logo: Option<
         commands.spawn((LaunchPart, RowValue(i), ChildOf(row), Text::new(""), font.text(17.0), TextColor(Color::srgba(1.0, 1.0, 1.0, 0.6)), Fade(0.6)));
     }
     commands.spawn((LaunchPart, MenuHint, ChildOf(panel), Node { margin: UiRect::top(Val::Px(10.0)), ..default() }, Text::new(""), font.text(14.0), TextColor(Color::srgba(1.0, 1.0, 1.0, 0.5)), Fade(0.5)));
-    // Prompt near the bottom (title only).
+    // "PRESS START": the scene's TitleTapeText is right-aligned at x = 527, y = -260. Plain text until the game's own font
+    // has drawn it (fill_press_text), which also leaves a small keyboard hint here.
     commands
         .spawn((
             LaunchPart,
+            PressFallback,
             ChildOf(root),
-            Node { position_type: PositionType::Absolute, bottom: Val::Percent(16.0), width: Val::Percent(100.0), justify_content: JustifyContent::Center, ..default() },
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Percent((640.0 - 527.0) / 12.8),
+                top: Val::Percent((360.0 + 260.0 - 16.0) / 7.2),
+                ..default()
+            },
         ))
-        .with_child((PressPrompt, LaunchPart, Text::new("PRESS START / ENTER"), font.text(30.0), TextColor(Color::WHITE), shadow(), Fade(1.0)));
+        .with_child((LaunchPart, PressPrompt, Text::new("PRESS START / ENTER"), font.text(26.0), TextColor(Color::WHITE), shadow(), Fade(1.0)));
     commands
         .spawn((
             LaunchPart,
@@ -679,4 +727,146 @@ pub fn draw_main_menu(
     for (mut t, RowValue(i)) in &mut texts.p3() {
         t.0 = rows.get(first + i).and_then(|r| r.value.clone()).unwrap_or_default();
     }
+}
+
+/// "PRESS START" in the game's own vector font (the scene's `TitleTapeText`, font `horizon_e`): rasterised once on the CPU into a
+/// white-on-transparent image, since Bevy UI text can't use the game's .dt fonts. Runs until the ui group is loaded, then
+/// replaces the plain-text prompt and leaves a small keyboard hint under it.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_press_text(
+    mut done: Local<bool>,
+    mut commands: Commands,
+    data: Option<Res<super::scene::UiData>>,
+    root: Query<Entity, With<LoadingRoot>>,
+    mut fallback: Query<&mut Node, With<PressFallback>>,
+    mut images: ResMut<Assets<Image>>,
+    font: Res<UiFont>,
+) {
+    if *done {
+        return;
+    }
+    let (Some(data), Ok(root)) = (data, root.single()) else { return };
+    *done = true;
+    let Some((image, size)) = data.font("Horizon_E").and_then(|f| raster(f, "PRESS START", RASTER_EM)) else { return };
+    for mut n in &mut fallback {
+        n.display = Display::None;
+    }
+    // The raster is RASTER_EM px per em for a 24 px (design units) em: shown at half size. Right-aligned at x = 527, centred on
+    // y = -260 of the 1280 x 720 space.
+    let (w, h) = (size.x as f32 / 2.0, size.y as f32 / 2.0);
+    commands.spawn((
+        LaunchPart,
+        PressPrompt,
+        PressPulse,
+        ChildOf(root),
+        Node {
+            position_type: PositionType::Absolute,
+            right: Val::Percent((640.0 - 527.0) / 12.8),
+            top: Val::Percent((360.0 + 260.0 - h / 2.0) / 7.2),
+            width: Val::Percent(w / 12.8),
+            aspect_ratio: Some(size.x as f32 / size.y as f32),
+            ..default()
+        },
+        ImageNode { image: images.add(image), image_mode: NodeImageMode::Stretch, ..default() },
+        Fade(1.0),
+    ));
+    commands.spawn((
+        LaunchPart,
+        PressPrompt,
+        ChildOf(root),
+        Node { position_type: PositionType::Absolute, right: Val::Percent((640.0 - 527.0) / 12.8), top: Val::Percent((360.0 + 260.0 + h / 2.0 + 4.0) / 7.2), ..default() },
+        Text::new("ENTER / SPACE / CLICK"),
+        font.text(13.0),
+        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.7)),
+        shadow(),
+        Fade(0.7),
+    ));
+}
+
+/// Pixels per em of the prompt raster (the scene's 36 pt text at node scale 0.5 is an 18 pt = 24 px em in the 1280 x 720 space;
+/// drawn at twice that and shown at half size).
+const RASTER_EM: f32 = 48.0;
+
+/// Draws `s` in a vector font into a white image whose alpha is the glyph coverage (3 x 3 supersampled), with the Loop-Blinn
+/// curve rules of fh1-ui's vfont: inner meshes fill where u² - v <= 0, the outer (negated-x) curve triangles where it is > 0.
+fn raster(font: &VFont, s: &str, em: f32) -> Option<(Image, UVec2)> {
+    const SS: usize = 3;
+    let mut pen = 0.0f32;
+    let mut glyphs = Vec::new();
+    let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+    for c in s.chars() {
+        if c == ' ' {
+            pen += font.metrics.space_width;
+            continue;
+        }
+        let g = font.glyph(c)?;
+        for v in g.inner.verts.iter().chain(&g.outer.verts) {
+            let p = Vec2::new(pen + g.offset[0] + v[0].abs() * g.scale, g.offset[1] + v[1] * g.scale);
+            min = min.min(p);
+            max = max.max(p);
+        }
+        glyphs.push((g, pen));
+        pen += g.advance;
+    }
+    if glyphs.is_empty() || max.x <= min.x {
+        return None;
+    }
+    let pad = 3.0;
+    let (w, h) = (((max.x - min.x) * em + 2.0 * pad).ceil() as usize, ((max.y - min.y) * em + 2.0 * pad).ceil() as usize);
+    let (sw, sh) = (w * SS, h * SS);
+    let mut mask = vec![0u8; sw * sh];
+    let to_px = |g_pen: f32, g: &fh1_ui::vfont::Glyph, v: &[f32; 4]| {
+        let x = g_pen + g.offset[0] + v[0].abs() * g.scale;
+        let y = g.offset[1] + v[1] * g.scale;
+        Vec2::new(((x - min.x) * em + pad) * SS as f32, ((max.y - y) * em + pad) * SS as f32)
+    };
+    let fill = |mask: &mut Vec<u8>, mesh: &VMesh, outer: bool, g: &fh1_ui::vfont::Glyph, g_pen: f32| {
+        for t in mesh.indices.chunks_exact(3) {
+            let v: Vec<[f32; 4]> = t.iter().map(|&i| mesh.verts[i as usize]).collect();
+            let (a, b, c) = (to_px(g_pen, g, &v[0]), to_px(g_pen, g, &v[1]), to_px(g_pen, g, &v[2]));
+            let den = (b.y - c.y) * (a.x - c.x) + (c.x - b.x) * (a.y - c.y);
+            if den.abs() < 1e-9 {
+                continue;
+            }
+            let curve = v.iter().any(|q| q[2] != 0.0);
+            let (x0, x1) = (a.x.min(b.x).min(c.x).floor().max(0.0) as usize, (a.x.max(b.x).max(c.x).ceil() as usize).min(sw - 1));
+            let (y0, y1) = (a.y.min(b.y).min(c.y).floor().max(0.0) as usize, (a.y.max(b.y).max(c.y).ceil() as usize).min(sh - 1));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                    let l1 = ((b.y - c.y) * (px - c.x) + (c.x - b.x) * (py - c.y)) / den;
+                    let l2 = ((c.y - a.y) * (px - c.x) + (a.x - c.x) * (py - c.y)) / den;
+                    let l3 = 1.0 - l1 - l2;
+                    if l1 < 0.0 || l2 < 0.0 || l3 < 0.0 {
+                        continue;
+                    }
+                    let u = l1 * v[0][2] + l2 * v[1][2] + l3 * v[2][2];
+                    let vv = l1 * v[0][3] + l2 * v[1][3] + l3 * v[2][3];
+                    let f = u * u - vv;
+                    let on = if outer { curve && f > 0.0 } else { !curve || f <= 0.0 };
+                    if on {
+                        mask[y * sw + x] = 1;
+                    }
+                }
+            }
+        }
+    };
+    for (g, g_pen) in &glyphs {
+        fill(&mut mask, &g.inner, false, g, *g_pen);
+        fill(&mut mask, &g.outer, true, g, *g_pen);
+    }
+    let mut data = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let mut n = 0u32;
+            for dy in 0..SS {
+                for dx in 0..SS {
+                    n += mask[(y * SS + dy) * sw + x * SS + dx] as u32;
+                }
+            }
+            data.extend_from_slice(&[255, 255, 255, (n * 255 / (SS * SS) as u32) as u8]);
+        }
+    }
+    let image = Image::new(Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 }, TextureDimension::D2, data, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default());
+    Some((image, UVec2::new(w as u32, h as u32)))
 }

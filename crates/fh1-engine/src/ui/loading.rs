@@ -43,7 +43,7 @@ use bevy::input::gamepad::Gamepad;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use super::launch::{self, LaunchPart, PressPrompt};
+use super::launch::{self, LaunchPart, PressPrompt, PressPulse};
 use super::{UiFont, ACCENT};
 use crate::race::{Events, RacePhase, RaceState};
 use crate::track::Track;
@@ -133,13 +133,15 @@ pub fn world_audio_allowed() -> bool {
 #[derive(Resource, Default)]
 pub struct LoadingImages {
     pub logo: Option<Handle<Image>>,
+    /// The title screen's real logo (`horizon/e3/logomedium.png`, the game's 120_p_pre_splash `Logo`).
+    pub title_logo: Option<Handle<Image>>,
     pub spinner: Option<Handle<Image>>,
     pub backdrops: Vec<Handle<Image>>,
 }
 
 impl LoadingImages {
     fn all(&self) -> impl Iterator<Item = &Handle<Image>> {
-        self.logo.iter().chain(self.spinner.iter()).chain(self.backdrops.iter())
+        self.logo.iter().chain(self.title_logo.iter()).chain(self.spinner.iter()).chain(self.backdrops.iter())
     }
 }
 
@@ -399,6 +401,8 @@ impl Plugin for LoadingPlugin {
         })
         .add_systems(Startup, spawn_overlay)
         .add_systems(Update, make_visible)
+        // The title's "PRESS START" in the game's own font (launch.rs), once the ui group's fonts are loaded.
+        .add_systems(Update, launch::fill_press_text)
         .add_systems(
             Update,
             (
@@ -491,12 +495,14 @@ fn track_title(track: &Track) -> String {
 fn spawn_overlay(mut commands: Commands, font: Res<UiFont>, garage: Res<Garage>, assets: Res<AssetServer>, loading: Res<Loading>) {
     let logo_path = "ui/textures/horizon/loading/masks/ld_gamelogo.png";
     let logo = garage.assets.join(logo_path).exists().then(|| assets.load(logo_path));
+    let title_logo_path = "ui/textures/horizon/e3/logomedium.png";
+    let title_logo = garage.assets.join(title_logo_path).exists().then(|| assets.load::<Image>(title_logo_path));
     let spin_path = "ui/textures/horizon/loading/largeloadingspinner.png";
     let spinner = garage.assets.join(spin_path).exists().then(|| assets.load::<Image>(spin_path));
     // Every backdrop up front (FH1_LOADING_PRELOAD=0: one at a time, when a cover picks it).
     let backdrops: Vec<Handle<Image>> = if preload_on() { (1..=BACKDROPS).filter_map(|n| backdrop_path(&garage, n)).map(|p| assets.load(p)).collect() } else { Vec::new() };
-    info!("loading: preloading {} loading-screen images", logo.iter().count() + spinner.iter().count() + backdrops.len());
-    commands.insert_resource(LoadingImages { logo: logo.clone(), spinner: spinner.clone(), backdrops });
+    info!("loading: preloading {} loading-screen images", logo.iter().count() + title_logo.iter().count() + spinner.iter().count() + backdrops.len());
+    commands.insert_resource(LoadingImages { logo: logo.clone(), title_logo: title_logo.clone(), spinner: spinner.clone(), backdrops });
     let root = commands
         .spawn((
             LoadingRoot,
@@ -582,7 +588,7 @@ fn spawn_overlay(mut commands: Commands, font: Res<UiFont>, garage: Res<Garage>,
         ))
         .id();
     commands.spawn((CardPart, ProgressFill, ChildOf(track_bar), Node { width: Val::Percent(0.0), height: Val::Percent(100.0), ..default() }, BackgroundColor(ACCENT), FadeBg(1.0)));
-    launch::spawn(&mut commands, root, &font, logo);
+    launch::spawn(&mut commands, root, &font, logo, title_logo);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -799,7 +805,7 @@ fn draw_overlay(
     mut texts: Query<(&mut Text, Has<CardTitle>, Has<CardSub>, Has<CardTip>)>,
     mut bgs: Query<(&FadeBg, &mut BackgroundColor, Has<LoadingRoot>)>,
     mut shadows: Query<(&Fade, &mut TextShadow)>,
-    mut imgs: Query<(&Fade, &mut ImageNode), Without<Backdrop>>,
+    mut imgs: Query<(&Fade, &mut ImageNode, Has<PressPulse>), Without<Backdrop>>,
     mut colors: Query<(&Fade, &mut TextColor, Has<PressPrompt>)>,
     mut shown: Local<Option<Option<Cover>>>,
 ) {
@@ -890,8 +896,10 @@ fn draw_overlay(
     }
     // Contents (not the opaque root) wait for the first reveal.
     let a = a * ld.reveal;
-    for (f, mut i) in &mut imgs {
-        i.color = Color::WHITE.with_alpha(f.0 * a);
+    let pulse = 0.55 + 0.45 * (now * 3.0).sin().abs();
+    for (f, mut i, prompt) in &mut imgs {
+        let k = if prompt && !ld.fading_out { pulse } else { 1.0 };
+        i.color = Color::WHITE.with_alpha(f.0 * a * k);
     }
     let has_img = super::fmv::backdrop().is_some() || ld.backdrop.as_ref().is_some_and(|h| assets.is_loaded_with_dependencies(h.id()));
     for (f, mut i, _) in &mut backdrop {
@@ -900,7 +908,6 @@ fn draw_overlay(
     for (f, mut sh) in &mut shadows {
         sh.color.set_alpha(SHADOW_A * f.0.min(1.0) * a);
     }
-    let pulse = 0.55 + 0.45 * (now * 3.0).sin().abs();
     for (f, mut c, prompt) in &mut colors {
         let k = if prompt && !ld.fading_out { pulse } else { 1.0 };
         c.0.set_alpha(f.0 * a * k);
