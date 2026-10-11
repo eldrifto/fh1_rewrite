@@ -30,6 +30,8 @@ pub(super) struct Follow {
     pub near_clip: f32,
     /// Degrees.
     pub fov: f32,
+    /// `FOVRatio`: how much of the speed FOV effect the radius compensates for (see [`dolly_strength`]).
+    pub fov_ratio: f32,
     pub yaw_k: f32,
     pub yaw_d: f32,
     pub yaw_car_damp: f32,
@@ -50,6 +52,7 @@ impl Follow {
         height_max: 1.8,
         near_clip: 0.3,
         fov: 48.5,
+        fov_ratio: 0.5,
         yaw_k: 4.5,
         yaw_d: 4.4,
         yaw_car_damp: 0.67,
@@ -82,6 +85,7 @@ impl Follow {
             height_max: g("HeightMaxAboveGround", d.height_max),
             near_clip: g("CamNearClip", d.near_clip),
             fov: g("FOV", d.fov),
+            fov_ratio: g("FOVRatio", d.fov_ratio),
             yaw_k: g("Spring\\YRotSpringK", d.yaw_k),
             yaw_d: g("Spring\\YRotSpringD", d.yaw_d),
             yaw_car_damp: g("Spring\\YRotCarDampScale", d.yaw_car_damp),
@@ -212,7 +216,7 @@ pub(super) fn update(ct: &mut Transform, pose: &CarPose, car: &CarInputs, rig: &
     // effect widens the view (tan ratio; INFERRED half-angles). Effect layers: camera/effects.rs.
     let fx = st.fx.as_mut().map_or_else(Effects::default, |s| s.step(&car.fx, dt));
     let fov = cfg.fov.to_radians();
-    let dolly = if fx.fov != 0.0 { (0.5 * fov).tan() / (0.5 * (fov + fx.fov)).tan() } else { 1.0 };
+    let dolly = if fx.fov != 0.0 { ((0.5 * fov).tan() / (0.5 * (fov + fx.fov)).tan()).powf(dolly_strength(cfg.fov_ratio)) } else { 1.0 };
     let radius = (rear + cfg.base_radius + cfg.radius_offset) * dolly;
     // Orbit angle = yaw + look yaw (+ mouse orbit, our extra). Game heading = -ours, so a look to the right subtracts.
     let look = st.look.get_or_insert_with(super::views::Look::smooth);
@@ -280,6 +284,16 @@ pub(super) fn update(ct: &mut Transform, pose: &CarPose, car: &CarInputs, rig: &
         ));
     }
     fov + fx.fov
+}
+
+/// How much of the FOV dolly applies (radius scaled by the tan ratio^strength). 1 keeps the car's screen size while the
+/// speed effect widens the view; 0 = none, the car shrinks. Strength = the camera's `FOVRatio` (CameraSettings.ini, 0.5 on
+/// the disc for every gameplay camera). INFERRED: footage of the original at 107 mph shows the car roughly halfway between
+/// full dolly and none, which matches 0.5, but how the game uses FOVRatio isn't decoded. FH1_CAM_DOLLY=0..1 overrides.
+fn dolly_strength(fov_ratio: f32) -> f32 {
+    static OVERRIDE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    let o = *OVERRIDE.get_or_init(|| std::env::var("FH1_CAM_DOLLY").ok().and_then(|v| v.parse::<f32>().ok()));
+    o.unwrap_or(fov_ratio).clamp(0.0, 1.0)
 }
 
 /// FH1_CAM_LOG=<file.csv>: one row per chase-camera update (debug / Pinyon comparison). Rows go through a channel to a
