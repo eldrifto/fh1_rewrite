@@ -14,9 +14,10 @@
 //!   version 0x18 (FM4's 0x1B; the same binding tables, found by the same validation), the `.rmb.bin` models are
 //!   CTrackModel version 4 (6 in FH1 / FM4; the submodel layout is the same) and the `.bix` textures start `BIX0` (FM4:
 //!   `BIX1`, the same header fields). A track whose scenery fails to convert is reported and drawn as its collision mesh.
-//!   KNOWN ISSUE: parts of the terrain-blend materials (`terr_blnd_spec_3`, `shldr_blnd_spec_3`, grass at mid distance)
-//!   render white; not the lightmap colours, specular, generated vs stored mips, the road-edge shader or the texture
-//!   formats (all tried), the cause is still open.
+//!   FM3 generates its grass texture in game code (the `grass_*` overlay materials' diffuse is a runtime texture, PVS flags
+//!   bit 0, and FM3's discs have no `.bundle` previews either), so those overlay pieces are skipped (a "grass-overlay
+//!   submodels skipped" line per track): drawn with the default white texture they were the white patches over the terrain.
+//!   The terrain-blend materials under them carry the grass colour.
 //! - Amalfi, Fujimi Kaido and the Nurburgring (and their stages) aren't on the Play Disc: their `Ribbon_NN` folders are
 //!   missing and they are skipped ("no Ribbon" lines). Cars aren't imported yet (the `.carbin` models are another format).
 //!

@@ -302,6 +302,7 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
     let zones = if fm4 { Zones::none() } else { read_zones(&mut ar, &by_name, &ribbon, &src.stem, &pvs_bytes)? };
     let keep_fm4_sky = std::env::var("FH1_FM4_SKYDOME").is_ok_and(|v| v == "1");
     let mut skipped_sky = 0usize;
+    let mut skipped_grass = 0usize;
     let zone_models: HashSet<u16> = zones.lists.iter().flatten().copied().filter(|n| !templates.contains(n)).collect();
     let dir = out.join(&src.name);
     std::fs::create_dir_all(dir.join("models"))?;
@@ -360,6 +361,14 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
             // sky, and FH1's own sky already fills it. Skipped; FH1_FM4_SKYDOME=1 (setup) keeps them.
             if fm4 && !keep_fm4_sky && model.submodel_shader(s).is_some_and(|sh| sh.rsplit([char::from(92), '/']).next().is_some_and(|f| f.to_ascii_uppercase().starts_with("SKY_"))) {
                 skipped_sky += 1;
+                continue;
+            }
+            // Grass overlays (`grass_*` shaders) whose diffuse is a runtime texture (PVS flags bit 0) with no bundle preview on
+            // the disc: FM3 generates its grass texture in game code (its discs have no .bundle files), so these would draw
+            // with the default white texture as white patches over the terrain. The terrain blend materials under them are
+            // textured; skipped. (FM4's grass overlay has a real texture: kept.)
+            if fm4 && number.is_some_and(|n| runtime_grass(&model, s, &pvs, n)) {
+                skipped_grass += 1;
                 continue;
             }
             if in_model && model_group.is_none() {
@@ -634,6 +643,7 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
     );
     if fm4 {
         println!("[scenery] {}: {skipped_sky} FM4 sky-dome submodels skipped (FH1_FM4_SKYDOME=1 keeps them)", src.name);
+        println!("[scenery] {}: {skipped_grass} grass-overlay submodels skipped (runtime diffuse, no file on the disc)", src.name);
     }
     Ok(())
 }
@@ -706,6 +716,17 @@ fn write_props(
         index.push(json!({"x": x, "z": z, "file": file, "count": list.len()}));
     }
     Ok((n, index))
+}
+
+/// A `grass_*` submodel whose every material's diffuse (rmb texture slot 0) is a runtime texture: PVS flags bit 0, no `.bix` /
+/// CAFF file on the disc. See the skip in [`build_track`].
+fn runtime_grass(model: &rmb::TrackModel, s: &rmb::SubModel, pvs: &pvs::Pvs, number: usize) -> bool {
+    let grass = model.submodel_shader(s).is_some_and(|sh| sh.rsplit([char::from(92), '/']).next().is_some_and(|f| f.to_ascii_lowercase().starts_with("grass_")));
+    grass
+        && !s.meshes.is_empty()
+        && s.meshes.iter().filter_map(|m| model.materials.get(m.material as usize)).all(|mat| {
+            mat.texture_slots.first().is_some_and(|&slot| slot >= 0 && pvs.texture(number, slot).is_some_and(|t| t.flags & 1 != 0))
+        })
 }
 
 /// Runtime textures (PVS flags bit 0) -> DDS from their `.bundle` previews (keyed by PVS texture index).
