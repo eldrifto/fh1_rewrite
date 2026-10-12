@@ -98,6 +98,9 @@ pub struct Draw {
     pub indices: Vec<u32>,
     /// Index into the model's PVS texture list per sampler.
     pub items: Vec<u32>,
+    /// Pixel-shader float constants set for the draw (`0x06` records: word 1 = start register << 16 | count, then `count` vec4s),
+    /// by register. A road draw sets c0..c3 (`c_constant0..3`) and c5.
+    pub constants: std::collections::BTreeMap<u32, [f32; 4]>,
 }
 
 impl Draw {
@@ -238,6 +241,7 @@ pub fn parse_model(d: &[u8]) -> Result<Model> {
     let start = be(stream, 0).unwrap_or(0x24) as usize;
     let mut model = Model::default();
     let (mut vb, mut items): (Option<usize>, Vec<u32>) = (None, Vec::new());
+    let mut constants: std::collections::BTreeMap<u32, [f32; 4]> = Default::default();
     let mut o = start;
     while o + 4 <= stream.len() {
         let (len, ty) = (stream[o + 1] as usize, stream[o + 2]);
@@ -258,10 +262,19 @@ pub fn parse_model(d: &[u8]) -> Result<Model> {
                     items = (0..n).filter_map(|k| w(2 + 2 * k)).collect();
                 }
             }
+            0x06 => {
+                let (start, count) = (w(1).unwrap_or(0) >> 16, (w(1).unwrap_or(0) & 0xffff) as usize);
+                for k in 0..count {
+                    let f = |j: usize| w(2 + 4 * k + j).map(f32::from_bits);
+                    if let (Some(a), Some(b), Some(c), Some(d)) = (f(0), f(1), f(2), f(3)) {
+                        constants.insert(start + k as u32, [a, b, c, d]);
+                    }
+                }
+            }
             0x01 => {
                 let (count, key) = (w(1).unwrap_or(0) as usize, w(2).unwrap_or(0));
                 if let (Some(vo), true) = (vb, count > 0 && w(0) == Some(4)) {
-                    match build_draw(gpu, data, vo, count, key, std::mem::take(&mut items)) {
+                    match build_draw(gpu, data, vo, count, key, std::mem::take(&mut items), constants.clone()) {
                         Ok(draw) => model.draws.push(draw),
                         Err(why) => model.skipped.push(why),
                     }
@@ -276,7 +289,7 @@ pub fn parse_model(d: &[u8]) -> Result<Model> {
     Ok(model)
 }
 
-fn build_draw(gpu: &[u8], data: &[u8], vb: usize, count: usize, key: u32, items: Vec<u32>) -> std::result::Result<Draw, String> {
+fn build_draw(gpu: &[u8], data: &[u8], vb: usize, count: usize, key: u32, items: Vec<u32>, constants: std::collections::BTreeMap<u32, [f32; 4]>) -> std::result::Result<Draw, String> {
     let (stride, goff, size) = match (be(data, vb), be(data, vb + 8), be(data, vb + 12)) {
         (Some(a), Some(b), Some(c)) => (a as usize, b as usize, c as usize),
         _ => return Err("vertex record outside .data".into()),
@@ -303,7 +316,7 @@ fn build_draw(gpu: &[u8], data: &[u8], vb: usize, count: usize, key: u32, items:
             [f(0), f(1), f(2)]
         })
         .collect();
-    Ok(Draw { stride, positions, vertices, indices, items })
+    Ok(Draw { stride, positions, vertices, indices, items, constants })
 }
 
 #[cfg(test)]
