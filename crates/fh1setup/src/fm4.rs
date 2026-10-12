@@ -86,7 +86,7 @@ pub fn run() -> Result<()> {
     std::fs::create_dir_all(&root)?;
     let want = |p: &str| only.as_ref().is_none_or(|o| o.iter().any(|x| x == p));
     if want("cars") {
-        swap(&root.join("cars"), |stage| cars(&disc, &private, stage))?;
+        swap(&root.join("cars"), |stage| cars(&disc, &private, stage, "fm4"))?;
     }
     if want("maps") {
         maps(&disc, &root)?;
@@ -122,7 +122,8 @@ pub(crate) fn strings(disc: &Path) -> Option<fh1_ui::strtable::StringTables> {
     Some(s)
 }
 
-fn cars(disc: &Path, private: &Path, out: &Path) -> Result<()> {
+/// Cars of an FM3 / FM4 root into `out` (`imported/<game>/cars`).
+pub(crate) fn cars(disc: &Path, private: &Path, out: &Path, game: &str) -> Result<()> {
     crate::cars::build(disc, out)?;
     let db = Connection::open_with_flags(disc.join("media/db/gamedb.slt"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let strings = strings(disc);
@@ -162,7 +163,7 @@ fn cars(disc: &Path, private: &Path, out: &Path) -> Result<()> {
             }
         }
         let car = phys["car"].clone();
-        phys["imported_from"] = json!("fm4");
+        phys["imported_from"] = json!(game);
         if let Some(d) = donors.pick(&media, &car) {
             phys["sound_donor"] = json!(d);
             donated += 1;
@@ -193,7 +194,7 @@ fn cars(disc: &Path, private: &Path, out: &Path) -> Result<()> {
         }));
     }
     std::fs::write(out.join("index.json"), serde_json::to_vec_pretty(&rows)?)?;
-    println!("[fm4] {} cars ({models} with a model), {donated} with an FH1 sound donor", rows.len());
+    println!("[{game}] {} cars ({models} with a model), {donated} with an FH1 sound donor", rows.len());
     Ok(())
 }
 

@@ -90,10 +90,6 @@ impl Paths {
         self.private().is_some_and(|p| p.join("imported").join(game).join("cars/index.json").is_file())
     }
 
-    /// A game imported as circuits only (FM3 so far: `imported/<game>/maps.json`, no car list yet).
-    fn imported_maps(&self, game: &str) -> bool {
-        self.private().is_some_and(|p| p.join("imported").join(game).join("maps.json").is_file())
-    }
 }
 
 /// The user's choices, kept in `<data>/launcher.json` so "Update" can re-run setup without asking again.
@@ -260,7 +256,7 @@ impl Launcher {
             args.extend(["--data".into(), data.clone()]);
             steps.push(Step { title: "Forza Motorsport 4".into(), args });
         }
-        if s.own_fm3 && !s.fm3_play.is_empty() && !(current && self.paths.imported_maps("fm3")) {
+        if s.own_fm3 && !s.fm3_play.is_empty() && !(current && self.paths.imported("fm3")) {
             let mut args = vec!["import-fm3".into(), s.fm3_play.clone()];
             if !s.fm3_content.is_empty() {
                 args.extend(["--disc2".into(), s.fm3_content.clone()]);
@@ -507,7 +503,7 @@ impl Launcher {
                     path_row(ui, "fm4b", &mut self.saved.fm4_content);
                 });
             }
-            ui.checkbox(&mut self.saved.own_fm3, RichText::new("FORZA MOTORSPORT 3  ·  52 circuit layouts, 69 with Disc 2 (cars coming later)").strong());
+            ui.checkbox(&mut self.saved.own_fm3, RichText::new("FORZA MOTORSPORT 3  ·  311 cars + 52 circuit layouts (415 cars + 69 with Disc 2)").strong());
             if self.saved.own_fm3 {
                 ui.indent("fm3", |ui| {
                     ui.label(RichText::new("Play Disc (Disc 1)").color(style::DIM));
@@ -530,7 +526,7 @@ impl Launcher {
             gb += 42 + 15;
         }
         if self.saved.own_fm3 {
-            gb += 8 + 3;
+            gb += 8 + 3 + 18;
         }
         ui.label(RichText::new(format!("Needs about {gb} GB free next to this program while installing; up to an hour on slower PCs.")).color(style::DIM));
         ui.add_space(12.0);
@@ -688,7 +684,7 @@ impl Launcher {
                 ("Forza Horizon", fh1, ""),
                 ("Forza Horizon 2", self.paths.imported("fh2"), "locked"),
                 ("Forza Motorsport 4", self.paths.imported("fm4"), "locked"),
-                ("Forza Motorsport 3", self.paths.imported_maps("fm3"), "circuits only"),
+                ("Forza Motorsport 3", self.paths.imported("fm3"), "locked"),
             ] {
                 let (mark, color) = if ok { ("✔", style::OK) } else { ("—", style::DIM) };
                 let text = if ok || note.is_empty() { format!("{mark}  {name}") } else { format!("{mark}  {name}  ·  {note}") };

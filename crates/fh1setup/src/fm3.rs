@@ -38,8 +38,15 @@
 //!   `.pvs` / `.crowd` / camera files, and one `<Track>_pri_65.zip` per track (the Play Disc's `bin.zip`: models, textures,
 //!   shaders; `zipmount.xml` says where each mounts). [`merge_content`] lays all of that over the Play Disc's `media` as
 //!   `work_fm3_disc2/merged` and the importer runs on it unchanged (69 layouts instead of 52; the reverse layouts are skipped
-//!   as before). The three car packs on the disc (Asian / European / American) hold `.carbin` cars: not imported yet.
-//!   Cars aren't imported yet (the `.carbin` models are another format).
+//!   as before). The three car packs on the disc (Asian / European / American) add 104 cars: their zips hold `media/cars/<CAR>/` and
+//!   `media/wheels/<RIM>/` folders, repacked to one zip each in the merged root ([`repack_cars`]).
+//! - **Cars** (`imported/fm3/cars`, through the FM4 code, [`crate::fm4::cars`]): the gamedb tables are FM4's minus a few columns (the
+//!   stock ride heights are in `Data_CarBody`); the shared textures / ShaderSettings / driver are loose folders and are packed into
+//!   `Shared.zip` / `Driver.zip` ([`shared_zip`]). The `.carbin` is another vertex format, converted at parse time into FM4's
+//!   (`fh1_formats::carbin`, "FM3"): same framing and section / subsection records with a shorter section head and tail, no LOD0 pool in
+//!   the body (the `_lod0` file has it), 40-byte (rims 44, brakes 16) vertices of half floats where FM4 has integers: `unit direction x
+//!   w` position (remapped onto the section bounds as in FM4), uv0 half2, an 11:11:10 normal at +16 and tangent at +36. Brakes are a
+//!   single section without the marker / bounds block.
 //!
 //! Paths are matched as the disc spells them (`Media/DB/gamedb.slt` vs FM4's `media/db`), which only works on a
 //! case-insensitive filesystem (Windows) for now.
@@ -66,7 +73,7 @@ pub fn run() -> Result<()> {
             _ => source = Some(PathBuf::from(a)),
         }
     }
-    let source = source.context("usage: fh1setup import-fm3 <Play Disc ISO|zip|folder> [--disc2 <Content Install Disc>] [--data <dir>] [--only maps]")?;
+    let source = source.context("usage: fh1setup import-fm3 <Play Disc ISO|zip|folder> [--disc2 <Content Install Disc>] [--data <dir>] [--only cars,maps]")?;
     let inst: Value = serde_json::from_slice(&std::fs::read(data.join("installation.json")).context("installation.json: run fh1setup on the FH1 disc first")?)?;
     println!("[fm3] Play Disc: {}", source.display());
     let disc = crate::extract::resolve_any(&source, &data.join("work_fm3_disc1"))?;
@@ -74,6 +81,9 @@ pub fn run() -> Result<()> {
     let private = data.join("installations").join(inst["id"].as_str().context("installation.json id")?).join("assets/private");
     let root = private.join("imported/fm3");
     std::fs::create_dir_all(&root)?;
+    // The cars' shared textures / ShaderSettings / driver live in loose folders: pack them into the zips the importers read, next to
+    // the extracted Play Disc (before the merge so the merged root links them).
+    shared_zip(&disc)?;
     let disc = match &disc2 {
         Some(d2) => {
             let work = data.join("work_fm3_disc2");
@@ -83,6 +93,9 @@ pub fn run() -> Result<()> {
         None => disc,
     };
     let want = |p: &str| only.as_ref().is_none_or(|o| o.iter().any(|x| x == p));
+    if want("cars") {
+        crate::fh2::swap(&root.join("cars"), |stage| crate::fm4::cars(&disc, &private, stage, "fm3"))?;
+    }
     if want("maps") {
         let layouts = layouts(&disc)?;
         build_maps(&disc, &root, "fm3", "FM3", layouts)?;
@@ -243,7 +256,7 @@ fn merge_content(disc1: &std::path::Path, content: &std::path::Path, work: &std:
     };
     for n in sorted_names(&src)? {
         let lower = n.to_ascii_lowercase();
-        if lower != "tracks" && lower != "ai" {
+        if !matches!(lower.as_str(), "tracks" | "ai" | "cars" | "wheels") {
             link(&src.join(&n), &m.join(&n))?;
         }
     }
@@ -255,6 +268,10 @@ fn merge_content(disc1: &std::path::Path, content: &std::path::Path, work: &std:
         Ok(())
     };
     link_children(&child_ci(&src, "tracks"), &m.join("tracks"))?;
+    // The pack cars and rims are added to these folders as zips of their own.
+    for name in ["cars", "wheels"] {
+        link_children(&child_ci(&src, name), &m.join(name))?;
+    }
     let (ai_src, ai_dst) = (child_ci(&src, "ai"), m.join("ai"));
     std::fs::create_dir_all(&ai_dst)?;
     for n in sorted_names(&ai_src)? {
@@ -285,7 +302,7 @@ fn merge_content(disc1: &std::path::Path, content: &std::path::Path, work: &std:
         }
         Ok(n)
     }
-    let (mut loose, mut zipped, mut bins) = (0, 0, 0);
+    let (mut loose, mut zipped, mut bins, mut packs) = (0, 0, 0, 0);
     for pkg in sorted_names(content)? {
         let dlc = child_ci(&child_ci(&content.join(&pkg), "media"), "dlczips");
         if !dlc.is_dir() {
@@ -321,6 +338,12 @@ fn merge_content(disc1: &std::path::Path, content: &std::path::Path, work: &std:
                 }
             }
         }
+        // The car packs' zips: one folder per car / rim under `media/cars` / `media/wheels`, repacked to a zip each.
+        for n in &names {
+            if n.to_ascii_lowercase().ends_with("_pri_65.zip") {
+                packs += repack_cars(&dlc.join(n), &m)?;
+            }
+        }
         // The pack's own zip: its `media/Tracks/...` files.
         for n in &names {
             if !n.to_ascii_lowercase().ends_with("_pri_65.zip") || !dlc.join(n.trim_end_matches(".zip")).is_dir() {
@@ -340,6 +363,89 @@ fn merge_content(disc1: &std::path::Path, content: &std::path::Path, work: &std:
             }
         }
     }
-    println!("[fm3] merged root {} (Content Install Disc: {loose} loose files, {zipped} from the pack zip, {bins} track bin.zip)", root.display());
+    println!("[fm3] merged root {} (Content Install Disc: {loose} loose files, {zipped} from the pack zip, {bins} track bin.zip, {packs} car / rim zips)", root.display());
     Ok(root)
+}
+
+/// The importers read the cars' shared textures and ShaderSettings from `media/cars/Shared.zip` and the driver from `Driver.zip`;
+/// FM3 keeps them as loose `Media/Cars/Shared/`, `Media/Cars/ShaderSettings/` and `Media/Cars/Driver/` folders. Packs them
+/// (stored) into those zips, next to the extracted disc.
+fn shared_zip(disc: &std::path::Path) -> Result<()> {
+    let cars = disc.join("media/cars");
+    pack(&cars.join("Shared.zip"), &[(&cars.join("Shared"), ""), (&cars.join("ShaderSettings"), "ShaderSettings/")])?;
+    pack(&cars.join("Driver.zip"), &[(&cars.join("Driver"), "")])
+}
+
+fn pack(zip_path: &std::path::Path, dirs: &[(&std::path::Path, &str)]) -> Result<()> {
+    use std::io::Write;
+    if zip_path.exists() {
+        return Ok(());
+    }
+    let tmp = zip_path.with_extension("zip.tmp");
+    let mut zw = zip::ZipWriter::new(std::io::BufWriter::new(std::fs::File::create(&tmp)?));
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    fn walk(zw: &mut zip::ZipWriter<std::io::BufWriter<std::fs::File>>, opts: zip::write::SimpleFileOptions, dir: &std::path::Path, prefix: &str) -> Result<()> {
+        use std::io::Write;
+        let mut names: Vec<_> = std::fs::read_dir(dir)?.flatten().collect();
+        names.sort_by_key(|e| e.file_name());
+        for e in names {
+            let name = format!("{prefix}{}", e.file_name().to_string_lossy());
+            if e.path().is_dir() {
+                walk(zw, opts, &e.path(), &format!("{name}/"))?;
+            } else {
+                zw.start_file(name, opts)?;
+                zw.write_all(&std::fs::read(e.path())?)?;
+            }
+        }
+        Ok(())
+    }
+    for (dir, prefix) in dirs {
+        if dir.is_dir() {
+            walk(&mut zw, opts, dir, prefix)?;
+        }
+    }
+    zw.finish()?.flush()?;
+    std::fs::rename(&tmp, zip_path)?;
+    println!("[fm3] packed {}", zip_path.display());
+    Ok(())
+}
+
+/// A car pack's `media/cars/<CAR>/...` and `media/wheels/<RIM>/...` folders -> `<m>/cars/<CAR>.zip` and `<m>/wheels/<RIM>.zip` (stored),
+/// the layout the Play Disc has. Folders that already have a zip are left alone. Returns how many zips were written.
+fn repack_cars(pack: &std::path::Path, m: &std::path::Path) -> Result<usize> {
+    use std::collections::BTreeMap;
+    use std::io::Write;
+    let mut ar = fh1_formats::zip::Archive::open(pack).with_context(|| pack.display().to_string())?;
+    let mut written = 0;
+    for kind in ["cars", "wheels"] {
+        let mut folders: BTreeMap<String, Vec<(String, fh1_formats::zip::Entry)>> = BTreeMap::new();
+        for e in &ar.entries {
+            let name = e.name.replace('\\', "/");
+            let mut parts = name.splitn(4, '/');
+            let (Some(media), Some(k), Some(folder), Some(rest)) = (parts.next(), parts.next(), parts.next(), parts.next()) else { continue };
+            if !media.eq_ignore_ascii_case("media") || !k.eq_ignore_ascii_case(kind) || rest.is_empty() || rest.ends_with('/') {
+                continue;
+            }
+            folders.entry(folder.to_owned()).or_default().push((rest.to_owned(), e.clone()));
+        }
+        std::fs::create_dir_all(m.join(kind))?;
+        for (folder, files) in folders {
+            let zpath = m.join(kind).join(format!("{folder}.zip"));
+            if folder.to_ascii_lowercase().contains("slod") || zpath.exists() {
+                continue;
+            }
+            let tmp = m.join(kind).join(format!("{folder}.zip.tmp"));
+            let mut zw = zip::ZipWriter::new(std::io::BufWriter::new(std::fs::File::create(&tmp)?));
+            let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            for (name, e) in &files {
+                let data = ar.read(e).with_context(|| format!("{}: {}", pack.display(), e.name))?;
+                zw.start_file(name.as_str(), opts)?;
+                zw.write_all(&data)?;
+            }
+            zw.finish()?.flush()?;
+            std::fs::rename(&tmp, &zpath)?;
+            written += 1;
+        }
+    }
+    Ok(written)
 }

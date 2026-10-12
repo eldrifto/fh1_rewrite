@@ -189,7 +189,7 @@ pub struct OptionalGame {
     pub worlds: &'static [(&'static str, &'static str)],
     /// Has circuits (MOTORSPORT).
     pub circuits: bool,
-    /// The setup imports its cars too (FM3 is circuits only so far): without cars its car tab isn't listed.
+    /// The setup imports its cars too: without cars its car tab isn't listed.
     pub cars: bool,
     /// The setup can't import it yet.
     pub coming_soon: bool,
@@ -199,8 +199,8 @@ pub const OPTIONAL_GAMES: [OptionalGame; 3] = [
     // fh1setup fh2.rs MAP_NAME.
     OptionalGame { folder: "fh2", name: "Forza Horizon 2", worlds: &[("fh2/anthem", "Southern Europe (FH2)")], circuits: false, cars: true, coming_soon: false },
     OptionalGame { folder: "fm4", name: "Forza Motorsport 4", worlds: &[], circuits: true, cars: true, coming_soon: false },
-    // `fh1setup import-fm3`: circuits with scenery; its car models are a different .carbin format.
-    OptionalGame { folder: "fm3", name: "Forza Motorsport 3", worlds: &[], circuits: true, cars: false, coming_soon: false },
+    // `fh1setup import-fm3`: circuits with scenery and (`--only cars`) its cars.
+    OptionalGame { folder: "fm3", name: "Forza Motorsport 3", worlds: &[], circuits: true, cars: true, coming_soon: false },
 ];
 
 impl OptionalGame {
