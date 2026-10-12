@@ -71,7 +71,7 @@ fn layouts(disc: &std::path::Path) -> Result<Vec<Layout>> {
                 length: r.get(3)?,
                 grid: r.get(4)?,
                 flying: r.get(5)?,
-                venue: r.get(6)?,
+                venue: venue_name(&r.get::<_, String>(6)?),
                 start_line: 0.0,
                 finish_line: 1.0,
                 grid_slots: None,
@@ -111,4 +111,22 @@ fn grid_slots(db: &Connection, id: i64) -> Result<Vec<([f32; 3], [f32; 3])>> {
         .filter(|s| s[0] != 0.0 || s[1] != 0.0 || s[2] != 0.0)
         .map(|s| ([s[0] as f32, s[1] as f32, s[2] as f32], [s[3] as f32, 0.0, s[4] as f32]))
         .collect())
+}
+
+/// The venue shown for a track folder name (FM2's gamedb has no venue table): `LagunaSeca` -> `Laguna Seca`, with the venues whose
+/// folder name is not the in-game one spelled out.
+fn venue_name(media: &str) -> String {
+    match media.to_ascii_lowercase().as_str() {
+        "sunsetinfield" => return "Sunset Peninsula".into(),
+        "testtrackinfield" => return "Test Track".into(),
+        _ => {}
+    }
+    let mut out = String::new();
+    for (i, c) in media.chars().enumerate() {
+        if i > 0 && c.is_ascii_uppercase() {
+            out.push(' ');
+        }
+        out.push(c);
+    }
+    out
 }

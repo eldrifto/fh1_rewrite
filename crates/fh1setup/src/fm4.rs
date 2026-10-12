@@ -100,6 +100,8 @@ pub fn run() -> Result<()> {
 /// `media/stringtables/dlc/`).
 pub(crate) fn strings(disc: &Path) -> Option<fh1_ui::strtable::StringTables> {
     let mut s = fh1_ui::strtable::StringTables::load_language(disc, "EN").ok()?;
+    // FM2: the Tracks rows' `_&n` keys carry file hash 6547, which is no table's stem hash (see `alias_hash`).
+    s.alias_hash(6547, "Tracks");
     let dlc = disc.join("media/stringtables/dlc");
     let mut zips: Vec<_> = std::fs::read_dir(&dlc).into_iter().flatten().flatten().map(|e| e.path()).collect();
     zips.sort();
@@ -280,7 +282,8 @@ pub(crate) fn build_maps(disc: &Path, root: &Path, game: &str, label: &str, layo
     for (i, l) in layouts.iter().enumerate() {
         let id = format!("{}_{:02}", l.track.to_ascii_lowercase(), l.ribbon);
         let (group, layout_name) = names[i].clone();
-        let full = format!("{group} - {layout_name}");
+        // FM2's layout names already start with the venue ("Silverstone Grand Prix Circuit").
+        let full = if game == "fm2" && layout_name.to_lowercase().replace(' ', "").starts_with(&group.to_lowercase().replace(' ', "")) { layout_name.clone() } else { format!("{group} - {layout_name}") };
         let dir = root.join(&id);
         let from = scenery_of.get(&l.track).cloned();
         let res = swap(&dir, |stage| build_layout(disc, l, (game, label), &full, &group, &layout_name, stage, from.as_deref()));

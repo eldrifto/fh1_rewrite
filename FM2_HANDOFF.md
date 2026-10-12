@@ -135,7 +135,10 @@ reading texture items past a model's PVS list as direct PVS indices (added wrong
   (e.g. model 41's `[12, 13, 0, 1]`) are the road patches.
 - 3-layer blends / multi-mask draws still show one texture (`h_blnd3_*` exists in FH1). Real winding (render-state `0x08` cull records) and normals instead
   of the up-facing-majority heuristic. Brightness defaults are by eye; grass reads yellow-ochre (FM2 TrackSettings v27 is warm).
-- Fix the P12 static world for FM2; props / LODs / zones are not handled; layout names show as unresolved `_&NNN` string keys; **FM2 cars**.
+- Fix the P12 static world for FM2; props / LODs / zones are not handled; **FM2 cars**.
+- Layout names are done: FM2's gamedb `_&n` keys carry file hash 6547 (no table's stem hash) and the low 16 bits are the id in `Tracks.str`;
+  `StringTables::alias_hash(6547, "Tracks")` in `fm4::strings`, venue names from `fm2::venue_name`, the venue prefix is dropped when the layout name already starts with it.
+  Probe: `cargo run -p fh1-ui --example gamedb_str -- data/work_fm2/disc EN <n>...`.
 - Pit apron on Nurburgring is a see-through grid (its texture is partly transparent: probably real, unverified).
 
 ## Gotchas
