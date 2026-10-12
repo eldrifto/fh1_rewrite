@@ -249,9 +249,14 @@ pub fn parse_model(d: &[u8]) -> Result<Model> {
             // Draws after the first of a vertex buffer reuse its fetch constants (no new record).
             0x2e => vb = w(1).map(|v| v as usize),
             0x2d => {
-                let n = (w(1).unwrap_or(0) >> 16) as usize + (w(1).unwrap_or(0) & 0xffff) as usize;
-                // The pairs (item, slot << 16 | slot) start at word 2.
-                items = (0..n).filter_map(|k| w(2 + 2 * k)).collect();
+                // A draw can carry several of these; the first one binds its pixel-shader samplers (a road draw: `[12, 13, 0, 1,
+                // 2, 3]` = two system textures (the shadow maps, items past the model's list) then lightmap + three colours), a
+                // later one re-binds slot 0 (`[0]`): keeping the last one made every road a lightmap-only draw.
+                if items.is_empty() {
+                    let n = (w(1).unwrap_or(0) >> 16) as usize + (w(1).unwrap_or(0) & 0xffff) as usize;
+                    // The pairs (item, slot << 16 | slot) start at word 2.
+                    items = (0..n).filter_map(|k| w(2 + 2 * k)).collect();
+                }
             }
             0x01 => {
                 let (count, key) = (w(1).unwrap_or(0) as usize, w(2).unwrap_or(0));

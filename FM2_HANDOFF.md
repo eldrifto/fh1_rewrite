@@ -131,8 +131,14 @@ Cut-outs: `h_diff_opac_1(_lm)` for black-keyed DXT1 foliage (`black_keyed`, >=35
 reading texture items past a model's PVS list as direct PVS indices (added wrong textures to blends, 928 blends on Silverstone, black infield).
 
 ## Other open work (lower priority)
-- **Roads** are flat grey: their colour is a shader constant in the `.stream` `0x06` records; decode and bind it. Draws bound to items past the PVS list
-  (e.g. model 41's `[12, 13, 0, 1]`) are the road patches.
+- **Roads (partly understood):** a road draw's `.stream` has TWO `0x2d` records; the first binds the pixel shader's samplers
+  (`[12, 13, 0, 1, 2, 3]` = two system textures (the shadow maps, items past the model's list), then lightmap + three textures), a second re-binds
+  slot 0 (`[0]`). The parser used to keep the last, which made every road lightmap-only; it now keeps the FIRST (`parse_model`). Silverstone's start
+  road (model 41) then binds three **BC4 masks** and no colour texture: 114 (2048x512 racing-line / tyre-wear streaks laid over the whole road, uv at x1),
+  105 (512x512 fine asphalt grain, tiling) and 106. Its colours are the PS constants of the first `0x06` record (`0 4`: c0 = (1,1,1,1), c1 = 0.039 grey,
+  c2 = 0.3, c3 = 0.7; shader `c_constant0..4`). So a road is a 3-colour blend driven by those masks. The importer still draws these as a flat
+  grey (118,118,124), which happens to be about the mid of c1 and c2; a faithful road needs the constants parsed per draw (`Draw` doesn't keep `0x06`
+  yet) and a road material (FH1's `h_road_*` / the remaster Road layering use vertex colours, which FM2 doesn't have, so probably a baked texture in mask space).
 - 3-layer blends / multi-mask draws still show one texture (`h_blnd3_*` exists in FH1). Real winding (render-state `0x08` cull records) and normals instead
   of the up-facing-majority heuristic. Brightness defaults are by eye; grass reads yellow-ochre (FM2 TrackSettings v27 is warm).
 - Fix the P12 static world for FM2; props / LODs / zones are not handled; **FM2 cars**.
