@@ -109,6 +109,7 @@ struct Saved {
     fm4_content: String,
     own_fm3: bool,
     fm3_play: String,
+    fm3_content: String,
     /// Release whose setup last finished (empty = never).
     release: String,
     /// Multiplayer display name (the game's `FH1_NAME`, docs/MULTIPLAYER.md "Player name"); empty = the game's default.
@@ -260,7 +261,12 @@ impl Launcher {
             steps.push(Step { title: "Forza Motorsport 4".into(), args });
         }
         if s.own_fm3 && !s.fm3_play.is_empty() && !(current && self.paths.imported_maps("fm3")) {
-            steps.push(Step { title: "Forza Motorsport 3".into(), args: vec!["import-fm3".into(), s.fm3_play.clone(), "--data".into(), data] });
+            let mut args = vec!["import-fm3".into(), s.fm3_play.clone()];
+            if !s.fm3_content.is_empty() {
+                args.extend(["--disc2".into(), s.fm3_content.clone()]);
+            }
+            args.extend(["--data".into(), data]);
+            steps.push(Step { title: "Forza Motorsport 3".into(), args });
         }
         steps
     }
@@ -309,7 +315,7 @@ impl Launcher {
                 send(Msg::Line("removing extracted disc files...".into()));
                 // The FM4 merge holds junctions into the extracted Play Disc: remove it first (junctions are removed,
                 // not followed).
-                for d in ["work_fm4", "work_fm4_disc1", "work_fm4_disc2", "work_fm3_disc1", "work_fh2", "work"] {
+                for d in ["work_fm4", "work_fm4_disc1", "work_fm4_disc2", "work_fm3_disc1", "work_fm3_disc2", "work_fh2", "work"] {
                     let _ = std::fs::remove_dir_all(data.join(d));
                 }
             }
@@ -501,11 +507,13 @@ impl Launcher {
                     path_row(ui, "fm4b", &mut self.saved.fm4_content);
                 });
             }
-            ui.checkbox(&mut self.saved.own_fm3, RichText::new("FORZA MOTORSPORT 3  ·  52 circuit layouts (cars coming later)").strong());
+            ui.checkbox(&mut self.saved.own_fm3, RichText::new("FORZA MOTORSPORT 3  ·  52 circuit layouts, 69 with Disc 2 (cars coming later)").strong());
             if self.saved.own_fm3 {
                 ui.indent("fm3", |ui| {
                     ui.label(RichText::new("Play Disc (Disc 1)").color(style::DIM));
                     path_row(ui, "fm3a", &mut self.saved.fm3_play);
+                    ui.label(RichText::new("Content Install Disc (Disc 2, optional: Amalfi, Fujimi Kaido, Nürburgring)").color(style::DIM));
+                    path_row(ui, "fm3b", &mut self.saved.fm3_content);
                 });
             }
         });
@@ -560,6 +568,9 @@ impl Launcher {
         }
         if s.own_fm3 && bad(&s.fm3_play) {
             return Some("Choose your Forza Motorsport 3 Play Disc, or untick it.");
+        }
+        if s.own_fm3 && !s.fm3_content.is_empty() && bad(&s.fm3_content) {
+            return Some("The FM3 Content Install Disc path doesn't exist.");
         }
         if !self.paths.bin.join(format!("fh1setup{EXE}")).is_file() {
             return Some("fh1setup is missing from the bin folder next to this program. Re-extract the release.");

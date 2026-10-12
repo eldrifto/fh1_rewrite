@@ -22,6 +22,11 @@ use crate::Error;
 pub struct Texture {
     pub file_id: u32,
     pub flags: u32,
+    /// FM3 / FM4 lightmap atlas tiles (flags 9): the PVS index of the atlas page (`.stx.bin` entry on FM3); its own index for
+    /// every other record (FH1: the record's index field).
+    pub object: u32,
+    /// `[scale u, scale v, offset u, offset v]` of the tile inside the atlas page (1, 1, 0, 0 for ordinary textures).
+    pub uv: [f32; 4],
 }
 
 impl Texture {
@@ -43,6 +48,9 @@ pub struct ModelBinding {
     pub textures: Vec<u32>,
     /// Indices into [`Pvs::shaders`], addressed by the model's local shader index.
     pub shaders: Vec<u32>,
+    /// FM3 / FM4: the model's 4x4 matrix (16 f32 as stored, row-major; identity for world-space models, the placement for
+    /// origin-centred ones). Zero for FH1 / FH2, whose `.pvs` hold it elsewhere.
+    pub matrix: [f32; 16],
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +122,7 @@ pub fn parse(d: &[u8]) -> Result<Pvs, Error> {
             return Err(Error::Unsupported(format!("pvs texture {i}: index mismatch")));
         }
         r.bytes(16)?;
-        textures.push(Texture { file_id, flags: r.u32()? });
+        textures.push(Texture { file_id, flags: r.u32()?, object: i as u32, uv: [1.0, 1.0, 0.0, 0.0] });
     }
 
     let n = r.count(4)?;
@@ -133,7 +141,7 @@ pub fn parse(d: &[u8]) -> Result<Pvs, Error> {
         let textures = r.u32_list()?;
         let shaders = r.u32_list()?;
         r.bytes(60)?;
-        models.push(ModelBinding { textures, shaders });
+        models.push(ModelBinding { textures, shaders, matrix: [0.0; 16] });
     }
     Ok(Pvs { textures, shaders, models })
 }
@@ -148,17 +156,9 @@ pub fn is_motorsport(pvs_bytes: &[u8]) -> bool {
     matches!(pvs_bytes.get(4..8).map(|b| u32::from_be_bytes(b.try_into().unwrap())), Some(FM4_VERSION | FM3_VERSION))
 }
 
-/// Forza Motorsport 4 (version 0x1B, docs/FM4_RECON.md). Only the binding tables are read; the sections around them
-/// (zone/visibility data, 72-byte atlas-tile records) are not decoded, so the tables are located by validation:
-/// - **textures**: `u32 n` + the FH1 28-byte records, except that `+4` is the texture object index (a lightmap atlas
-///   object's tiles, flags 9, repeat it with their uv scale / offset in the floats), so `+4 <= position`.
-/// - **shaders**: right after, as in FH1.
-/// - **models**: `u32 n` (= highest `<track>out.NNNNN` + 1), then per model `u32 n` texture indices, `u32 m` shader
-///   indices and 80 bytes (a 4x4 matrix with `[15] = 1.0`, then 4 floats). Located as the first offset after the
-///   shaders where the whole table validates (every index in range, every matrix ending in 1.0); a one-model table
-///   is only taken when no larger one validates (false hits).
-/// Verified on all 77 FM4 `.pvs` (the model count equals the highest model number + 1 on every track).
-fn parse_fm4(d: &[u8]) -> Result<Pvs, Error> {
+/// The leading tables of an FM3 / FM4 `.pvs`: textures, shaders, and the offset right after them (found by validation, see
+/// [`parse_fm4`]).
+fn fm4_head(d: &[u8]) -> Result<(Vec<Texture>, Vec<String>, usize), Error> {
     let be = |o: usize| d.get(o..o + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
     const ONE: u32 = 0x3F80_0000;
     // Textures.
@@ -178,8 +178,9 @@ fn parse_fm4(d: &[u8]) -> Result<Pvs, Error> {
     let mut textures = Vec::with_capacity(n);
     for _ in 0..n {
         let file_id = r.u32()?;
-        r.bytes(20)?;
-        textures.push(Texture { file_id, flags: r.u32()? });
+        let object = r.u32()?;
+        let uv = [r.u32()?, r.u32()?, r.u32()?, r.u32()?].map(f32::from_bits);
+        textures.push(Texture { file_id, flags: r.u32()?, object, uv });
     }
     let ns = r.count(4)?;
     let mut shaders = Vec::with_capacity(ns);
@@ -187,6 +188,25 @@ fn parse_fm4(d: &[u8]) -> Result<Pvs, Error> {
         let len = r.count(1)?;
         shaders.push(String::from_utf8_lossy(r.bytes(len)?).trim_end_matches('\0').to_owned());
     }
+    Ok((textures, shaders, r.p))
+}
+
+/// Forza Motorsport 4 (version 0x1B, docs/FM4_RECON.md). Only the binding tables are read; the sections around them
+/// (zone/visibility data, 72-byte atlas-tile records) are not decoded, so the tables are located by validation:
+/// - **textures**: `u32 n` + the FH1 28-byte records, except that `+4` is the texture object index (a lightmap atlas
+///   object's tiles, flags 9, repeat it with their uv scale / offset in the floats), so `+4 <= position`.
+/// - **shaders**: right after, as in FH1.
+/// - **models**: `u32 n` (= highest `<track>out.NNNNN` + 1), then per model `u32 n` texture indices, `u32 m` shader
+///   indices and 80 bytes (a 4x4 matrix with `[15] = 1.0`, then 4 floats). Located as the first offset after the
+///   shaders where the whole table validates (every index in range, every matrix ending in 1.0); a one-model table
+///   is only taken when no larger one validates (false hits).
+/// Verified on all 77 FM4 `.pvs` (the model count equals the highest model number + 1 on every track).
+fn parse_fm4(d: &[u8]) -> Result<Pvs, Error> {
+    let be = |o: usize| d.get(o..o + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
+    const ONE: u32 = 0x3F80_0000;
+    let (textures, shaders, tables) = fm4_head(d)?;
+    let (n_textures, n_shaders) = (textures.len(), shaders.len());
+    let r = R { d, p: tables };
     // Models.
     let table = |s: usize| -> Option<Vec<ModelBinding>> {
         let m = be(s)? as usize;
@@ -205,13 +225,17 @@ fn parse_fm4(d: &[u8]) -> Result<Pvs, Error> {
             l.iter().all(|&v| (v as usize) < max).then_some(l)
         };
         for _ in 0..m {
-            let textures = list(&mut p, n, 256)?;
-            let shaders = list(&mut p, ns, 64)?;
+            let textures = list(&mut p, n_textures, 256)?;
+            let shaders = list(&mut p, n_shaders, 64)?;
             if be(p + 60)? != ONE {
                 return None;
             }
+            let mut matrix = [0.0f32; 16];
+            for (i, f) in matrix.iter_mut().enumerate() {
+                *f = f32::from_bits(be(p + i * 4)?);
+            }
             p += 80;
-            models.push(ModelBinding { textures, shaders });
+            models.push(ModelBinding { textures, shaders, matrix });
         }
         Some(models)
     };
@@ -226,6 +250,55 @@ fn parse_fm4(d: &[u8]) -> Result<Pvs, Error> {
     }
     let models = single.ok_or(Error::BadMagic("pvs (FM4): model table not found"))?;
     Ok(Pvs { textures, shaders, models })
+}
+
+/// One entry of the FM3 instance table: the placement of a model in the world. The table follows the shader list of the `.pvs`
+/// (`u32 count`, then `count` byte-packed 56-byte records) and is followed by the model table. Fields (VERIFIED on Fujimi
+/// Kaido: the origin-centred templates, houses, poles, signs, trees, parked cars, appear at plausible road-side positions;
+/// the 3x3 is a scaled mirror-yaw matrix): `u16 model number` at +0, `f32 x, y, z` at +26 (the same space as the `.rmb.bin`
+/// vertices), nine half floats at +38: the rows of the 3x3, scale included (row-vector convention).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Instance {
+    pub model: u16,
+    pub position: [f32; 3],
+    /// Rows: the images of the model's X, Y, Z axes.
+    pub axes: [[f32; 3]; 3],
+}
+
+/// The FM3 instance table of a track root (empty when it does not validate).
+pub fn fm3_instances(d: &[u8]) -> Result<Vec<Instance>, Error> {
+    const STRIDE: usize = 56;
+    if d.get(4..8).map(|b| u32::from_be_bytes(b.try_into().unwrap())) != Some(FM3_VERSION) {
+        return Err(Error::Unsupported("not an FM3 pvs".into()));
+    }
+    let (_, _, p) = fm4_head(d)?;
+    let be = |o: usize| d.get(o..o + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
+    let count = be(p).ok_or(Error::Truncated("pvs instances"))? as usize;
+    let end = p + 4 + count * STRIDE;
+    // The model table (u32 model count) follows the records.
+    if end + 4 > d.len() || !be(end).is_some_and(|m| (1..=100_000).contains(&m)) {
+        return Err(Error::BadMagic("pvs (FM3): instance table does not validate"));
+    }
+    let half = |o: usize| half_to_f32(u16::from_be_bytes([d[o], d[o + 1]]));
+    let f = |o: usize| f32::from_bits(u32::from_be_bytes(d[o..o + 4].try_into().unwrap()));
+    Ok((0..count)
+        .map(|i| {
+            let r = p + 4 + i * STRIDE;
+            let axes = std::array::from_fn(|row| std::array::from_fn(|c| half(r + 38 + (row * 3 + c) * 2)));
+            Instance { model: u16::from_be_bytes([d[r], d[r + 1]]), position: [f(r + 26), f(r + 30), f(r + 34)], axes }
+        })
+        .collect())
+}
+
+fn half_to_f32(h: u16) -> f32 {
+    let s = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let e = ((h >> 10) & 0x1F) as i32;
+    let m = (h & 0x3FF) as f32;
+    s * match e {
+        0 => m * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        _ => (1.0 + m / 1024.0) * 2f32.powi(e - 15),
+    }
 }
 
 #[cfg(test)]

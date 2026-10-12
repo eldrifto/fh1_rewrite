@@ -203,6 +203,7 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
     // Forza Motorsport 4 circuits (docs/FM4_RECON.md) have no .pgeo props, CollObjs/GameObjs placements, .pvsz zones or
     // .hex grid: every model goes into the tiles, which the engine streams by distance (index.json "zones": null).
     let fm4 = pvs::is_motorsport(&pvs_bytes);
+    let fm3 = pvs_bytes.get(4..8).is_some_and(|b| u32::from_be_bytes(b.try_into().unwrap()) == pvs::FM3_VERSION);
     // Props (`.pgeo` placements of origin-centred `.rmb.bin` templates; fh1_formats::props, docs/PROPS.md).
     // Their template models are written once in local space, not into the tiles.
     let (mut placements, unresolved) = if fm4 { (Vec::new(), 0) } else { props::track_placements(&mut ar, &pvs_bytes)? };
@@ -212,6 +213,10 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
     let mut by_name = HashMap::new();
     for e in &ar.entries {
         by_name.entry(e.name.to_ascii_lowercase().replace(char::from(92), "/")).or_insert_with(|| e.clone());
+    }
+    // FM3: the PVS instance table places the origin-centred templates (houses, poles, trees, signs, parked cars...).
+    if fm3 {
+        placements = fm3_placements(&mut ar, &by_name, src, &pvs_bytes)?;
     }
     // CollObjs.xml smashables (signs, armco, bins, benches...) mapped to their templates through the PVS.
     let objs = if fm4 { Vec::new() } else { props::parse_obj_xml(&std::fs::read_to_string(ribbon.join("CollObjs.xml"))?) };
@@ -257,6 +262,9 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
         distances.entry(t).or_insert(d);
     }
     // Smashables (docs/SMASH.md): whole-object template -> its shard templates (written as templates too).
+    // FM3: the runtime textures (PVS flags 1) are in the track's `.stx.bin` (fh1_formats::caff::parse_stx).
+    let stx = if fm3 { read_stx(&mut ar, &by_name) } else { None };
+    let in_stx = |i: usize| stx.as_ref().is_some_and(|(_, e)| e.len() > i) && pvs.textures.get(i).is_some_and(|t| t.flags == 1);
     let smash = smash_table(&mut ar, &by_name, &objs, &collobj_map, src)?;
     // Event-only objects (the races' barriers, cones and sponsor boards; fh1setup events.rs lists their placements, the engine
     // places them at race start through `Scenery::spawn_template`): their templates are written too, though nothing is placed
@@ -367,7 +375,7 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
             // the disc: FM3 generates its grass texture in game code (its discs have no .bundle files), so these would draw
             // with the default white texture as white patches over the terrain. The terrain blend materials under them are
             // textured; skipped. (FM4's grass overlay has a real texture: kept.)
-            if fm4 && number.is_some_and(|n| runtime_grass(&model, s, &pvs, n)) {
+            if fm4 && number.is_some_and(|n| runtime_grass(&model, s, &pvs, n, &in_stx)) {
                 skipped_grass += 1;
                 continue;
             }
@@ -529,13 +537,19 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
     }
     let mut textures = convert_textures(&mut ar, &by_name, &wanted, &dir.join("textures"))?;
     // PVS runtime textures (flags bit 0, no file): the disc only has their .bundle previews (docs/LIGHTMAPS.md).
-    let runtime: HashSet<u32> = materials
+    let mut runtime: HashSet<u32> = materials
         .list
         .iter()
         .flat_map(|m| m["textures"].as_array().cloned().unwrap_or_default())
         .filter(|t| t["flags"].as_u64().is_some_and(|f| f & 1 != 0))
         .filter_map(|t| t["id"].as_u64().map(|v| v as u32))
         .collect();
+    if let Some((d, ents)) = &stx {
+        let from_stx = convert_stx(d, ents, &pvs, &runtime, &dir.join("textures"))?;
+        println!("[scenery] {} runtime textures converted from the .stx.bin", from_stx.len());
+        runtime.retain(|id| !from_stx.contains_key(id));
+        textures.extend(from_stx);
+    }
     textures.extend(convert_previews(&mut ar, &pvs, &runtime, &dir.join("textures"))?);
     // Per-instance night lightmaps of the zone placements (props::TrackPlacement::lightmaps; docs/LIGHTMAPS.md
     // "Per-instance lightmaps"). Only those with a file on the disc: the runtime ones' previews are blank 4x4s.
@@ -626,6 +640,10 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
                       "collision": collision_table(&smash, &template_names, &template_bounds, physics.as_ref()), "glows": glow_index},
         });
     // FM4: tf7 is the daytime lightmap and its runtime atlas tiles have no file -> white in fh1-render, not FH1's black.
+    if fm3 {
+        // FM3's road shaders lerp RoadSkid -> RoadSkid2 (~1.5) by tf11, the skid-mark render target: no marks = black.
+        index_json["skid_mask"] = json!("black");
+    }
     if fm4 {
         index_json["runtime_lightmap"] = json!("white");
         // FM4 samples its DXT5A (BC4) masks through .y/.w: fh1-render replicates the channel.
@@ -720,13 +738,139 @@ fn write_props(
 
 /// A `grass_*` submodel whose every material's diffuse (rmb texture slot 0) is a runtime texture: PVS flags bit 0, no `.bix` /
 /// CAFF file on the disc. See the skip in [`build_track`].
-fn runtime_grass(model: &rmb::TrackModel, s: &rmb::SubModel, pvs: &pvs::Pvs, number: usize) -> bool {
+fn runtime_grass(model: &rmb::TrackModel, s: &rmb::SubModel, pvs: &pvs::Pvs, number: usize, in_stx: &dyn Fn(usize) -> bool) -> bool {
     let grass = model.submodel_shader(s).is_some_and(|sh| sh.rsplit([char::from(92), '/']).next().is_some_and(|f| f.to_ascii_lowercase().starts_with("grass_")));
     grass
         && !s.meshes.is_empty()
         && s.meshes.iter().filter_map(|m| model.materials.get(m.material as usize)).all(|mat| {
-            mat.texture_slots.first().is_some_and(|&slot| slot >= 0 && pvs.texture(number, slot).is_some_and(|t| t.flags & 1 != 0))
+            mat.texture_slots.first().is_some_and(|&slot| {
+                let i = usize::try_from(slot).ok().and_then(|s| pvs.models.get(number)?.textures.get(s).copied());
+                i.is_some_and(|i| pvs.textures.get(i as usize).is_some_and(|t| t.flags & 1 != 0) && !in_stx(i as usize))
+            })
         })
+}
+
+/// FM3 prop placements from the `.pvs` instance table (`pvs::fm3_instances`): every instance of an origin-centred model whose
+/// lowest drawable LOD is 0 (the LOD1 / LOD2 variants of a tree have an instance at the same spot as the LOD0 one, so they are
+/// left out). World-space models (the rest of the table) are in the tiles already.
+fn fm3_placements(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>, src: &TrackSrc, pvs_bytes: &[u8]) -> Result<Vec<props::TrackPlacement>> {
+    let instances = match pvs::fm3_instances(pvs_bytes) {
+        Ok(i) => i,
+        Err(e) => {
+            println!("[scenery] {}: {e}", src.name);
+            return Ok(Vec::new());
+        }
+    };
+    let mut template: HashMap<u16, bool> = HashMap::new();
+    let (mut out, mut seen) = (Vec::new(), HashSet::new());
+    for i in &instances {
+        if !template.contains_key(&i.model) {
+            let ok = by_name.get(&src.model_file(i.model)).cloned().and_then(|e| ar.read(&e).ok()).and_then(|d| rmb::parse(&d).ok()).is_some_and(|m| {
+                let (lo, hi) = (m.bounds_min, m.bounds_max);
+                let local = (lo[0] + hi[0]).abs() < 2.0 && (lo[2] + hi[2]).abs() < 2.0 && hi[0] - lo[0] < 400.0;
+                let lod = m.submodels.iter().filter(|s| s.class() == rmb::Class::Normal && !s.positions.is_empty()).map(|s| s.lod()).min();
+                local && lod == Some(0)
+            });
+            template.insert(i.model, ok);
+        }
+        if !template[&i.model] || !seen.insert((i.model, i.position.map(|v| (v * 100.0).round() as i64))) {
+            continue;
+        }
+        let p = props::Placement {
+            model: 0,
+            x_axis: i.axes[0],
+            y_axis: i.axes[1],
+            z_axis: i.axes[2],
+            position: i.position,
+            full: true,
+            normal: props::DEFAULT_NORMAL,
+            tint: props::DEFAULT_TINT,
+        };
+        out.push(props::TrackPlacement {
+            model_number: i.model,
+            lod1: None,
+            matrix: p.engine_matrix(),
+            full: true,
+            normal: props::DEFAULT_NORMAL,
+            tint: props::DEFAULT_TINT,
+            lightmaps: [props::NO_LIGHTMAP; 2],
+        });
+    }
+    println!("[scenery] {}: {} FM3 instances of {} origin-centred templates ({} table entries)", src.name, out.len(), template.values().filter(|&&t| t).count(), instances.len());
+    Ok(out)
+}
+
+/// The track's `.stx.bin` and its parsed descriptors (FM3). None when the track has none or it doesn't parse.
+fn read_stx(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>) -> Option<(Vec<u8>, Vec<fh1_formats::caff::CaffTexture>)> {
+    let e = by_name.iter().find(|(n, _)| n.ends_with(".stx.bin")).map(|(_, e)| e.clone())?;
+    let d = match ar.read(&e) {
+        Ok(d) => d,
+        Err(err) => {
+            println!("[scenery] {}: {err}", e.name);
+            return None;
+        }
+    };
+    match fh1_formats::caff::parse_stx(&d) {
+        Ok(ents) => Some((d, ents)),
+        Err(err) => {
+            println!("[scenery] {}: {err}", e.name);
+            None
+        }
+    }
+}
+
+/// PVS runtime textures (flags exactly 1) of `ids` -> DDS from the `.stx.bin` entry of the same PVS index. File id -> (alpha, word).
+fn convert_stx(
+    d: &[u8],
+    ents: &[fh1_formats::caff::CaffTexture],
+    pvs: &pvs::Pvs,
+    ids: &HashSet<u32>,
+    dir: &Path,
+) -> Result<BTreeMap<u32, (bool, u32)>> {
+    let mut done = BTreeMap::new();
+    // Decoded atlas pages (PVS index -> RGBA8), shared by their tiles.
+    let mut pages: HashMap<u32, Option<(u32, u32, Vec<u8>)>> = HashMap::new();
+    for (i, t) in pvs.textures.iter().enumerate() {
+        if !matches!(t.flags, 1 | 9) || !ids.contains(&t.file_id) || done.contains_key(&t.file_id) {
+            continue;
+        }
+        let converted = if t.flags == 1 {
+            let Some(&ct) = ents.get(i) else { continue };
+            crate::textures::caff_texture_to_dds(d, ct)
+        } else {
+            // A lightmap atlas tile (flags 9): its rectangle of the `.stx.bin` page, as a texture of its own. The mesh's
+            // lightmap uv runs 0..1 over the tile.
+            let page = pages.entry(t.object).or_insert_with(|| {
+                let ct = *ents.get(t.object as usize)?;
+                let (_, faces) = fh1_formats::caff::decode_faces_of(d, ct).ok()?;
+                let img = faces.into_iter().next()?;
+                Some((img.width, img.height, fh1_formats::xds::to_rgba8(&img).ok()?))
+            });
+            let (Some((pw, ph, rgba)), Some(&ct)) = (page.as_ref(), ents.get(t.object as usize)) else { continue };
+            let [su, sv, ou, ov] = t.uv;
+            let (x0, y0) = ((ou * *pw as f32).round() as usize, (ov * *ph as f32).round() as usize);
+            let (w, h) = (((su * *pw as f32).round() as usize).max(1), ((sv * *ph as f32).round() as usize).max(1));
+            if x0 + w > *pw as usize || y0 + h > *ph as usize {
+                continue;
+            }
+            let mut tile = Vec::with_capacity(w * h * 4);
+            for y in y0..y0 + h {
+                tile.extend_from_slice(&rgba[(y * *pw as usize + x0) * 4..(y * *pw as usize + x0 + w) * 4]);
+            }
+            crate::textures::rgba_to_dds(tile, w as u32, h as u32).map(|mut c| {
+                c.word = ct.raw_format;
+                c
+            })
+        };
+        match converted {
+            Ok(c) => {
+                std::fs::write(dir.join(format!("{:08x}.dds", t.file_id)), &c.dds)?;
+                done.insert(t.file_id, (c.alpha, c.word));
+            }
+            Err(e) => println!("[scenery] stx texture {i} (_0x{:08X}): {e}", t.file_id),
+        }
+    }
+    Ok(done)
 }
 
 /// Runtime textures (PVS flags bit 0) -> DDS from their `.bundle` previews (keyed by PVS texture index).
