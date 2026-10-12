@@ -473,6 +473,21 @@ fn build_layout(disc: &Path, l: &Layout, (game, label): (&str, &str), name: &str
         }
         Err(e) => return Err(e),
     };
+    // FM2's scenery is drawn with FH1's plain diffuse shader (crate::fm2_scenery): it has no shader files of its own.
+    let shaders = if game == "fm2" && dir.join("scenery/materials.json").exists() {
+        let from = dir.parent().and_then(|p| p.parent()).and_then(|p| p.parent()).map(|p| p.join("shaders/track"));
+        let mut n = 0;
+        for name in ["h_diff_1.fxobj", "h_blnd2_ao.fxobj", "h_blnd2_ao_lm.fxobj", "h_diff_1_lm.fxobj", "h_diff_opac_1.fxobj", "h_diff_opac_1_lm.fxobj"] {
+            if let Some(f) = from.as_ref().map(|d| d.join(name)).filter(|f| f.exists()) {
+                std::fs::create_dir_all(dir.join("shaders/track"))?;
+                std::fs::copy(f, dir.join("shaders/track").join(name))?;
+                n += 1;
+            }
+        }
+        if n > 0 { n } else { shaders }
+    } else {
+        shaders
+    };
     std::fs::create_dir_all(dir.join("tracks"))?;
     if track_dir.join("TrackSettings.xml").exists() {
         std::fs::copy(track_dir.join("TrackSettings.xml"), dir.join("tracks/TrackSettings.xml"))?;

@@ -66,34 +66,89 @@ pub fn parse_stx(d: &[u8]) -> Result<Vec<CaffTexture>, Error> {
         Ok(u32::from_be_bytes(d.get(o..o + 4).ok_or(Error::Truncated("stx"))?.try_into().unwrap()))
     };
     let (count, first, gpu_len) = (be(0x18)? as usize, be(0x48)? as usize, be(0x88)? as usize);
-    let mut gpu = d.len().checked_sub(gpu_len).ok_or(Error::Truncated("stx .gpu"))?;
-    let gpu_start = gpu;
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let p = first + i * 0x80;
-        if d.get(p..p + 8) != Some(b"texture\0") {
+    let gpu_start = d.len().checked_sub(gpu_len).ok_or(Error::Truncated("stx .gpu"))?;
+    // Descriptors are `b"texture\0"` records; their stride is 0x80 on most tracks but some entries are longer (NewYork:
+    // 0x80 / 0xA0 / 0xE0), so scan the markers instead of stepping by 0x80. The marker count equals the header count on
+    // every track checked.
+    let mut positions = Vec::with_capacity(count);
+    let mut p = first;
+    while positions.len() < count {
+        if p + 8 > gpu_start || d.get(p..p + 8) != Some(b"texture\0") {
             return Err(Error::BadMagic("stx: texture descriptor"));
         }
+        positions.push(p);
+        p += 8;
+        match d.get(p..gpu_start).and_then(|s| s.windows(8).position(|w| w == b"texture\0")) {
+            Some(k) => p += k,
+            None => p = gpu_start,
+        }
+    }
+    // Two passes: read every descriptor, size what we can, then give the leftover bytes to entries whose format has no
+    // block size (a track can carry one, e.g. Mugello's `Other(10)` 32x32 texture). Without this a single unknown format
+    // would reject the whole file, losing the lightmap pages and runtime textures with it.
+    struct Desc {
+        format: Format,
+        endian: u32,
+        cube: bool,
+        raw_format: u32,
+        mip_count: u32,
+        width: u32,
+        height: u32,
+    }
+    let mut descs = Vec::with_capacity(count);
+    let mut sizes: Vec<Option<usize>> = Vec::with_capacity(count);
+    let mut known = 0usize;
+    let mut stacked = false;
+    for &p in &positions {
         let o = p + 0x18;
-        let (word, dims) = (be(o)?, be(o + 12)?);
+        let (word, dims, kind) = (be(o)?, be(o + 12)?, be(o + 4)?);
         let format = Format::from_raw(word & 0x3F);
-        let (cube, mips) = (be(o + 4)? == 2, be(o + 24)? >> 24);
+        let mips = be(o + 24)? >> 24;
         let (width, height) = (dims >> 16, dims & 0xFFFF);
-        let len = chain_size(format, width, height, mips.max(1), if cube { 6 } else { 1 })?;
+        // Descriptor kind: 0 = 2D, 2 = cube (6 faces), 4 / 5 = a stacked / array texture (NewYork) whose sub-image count
+        // is the field at +0x20. Sizing these closes the `.gpu` length (a fixed single-layer size leaves it short).
+        let layers = match kind {
+            2 => 6,
+            4 | 5 => be(o + 0x20)?.max(1),
+            _ => 1,
+        };
+        if matches!(kind, 4 | 5) {
+            stacked = true;
+        }
+        let len = chain_size(format, width, height, mips.max(1), layers).ok();
+        known += len.unwrap_or(0);
+        sizes.push(len);
+        descs.push(Desc { format, endian: (word >> 6) & 3, cube: kind == 2, raw_format: word, mip_count: mips, width, height });
+    }
+    let unknown: Vec<usize> = (0..count).filter(|&i| sizes[i].is_none()).collect();
+    match unknown.len() {
+        0 => {}
+        1 => {
+            let residual = gpu_len.checked_sub(known).filter(|&r| r > 0).ok_or(Error::SizeMismatch { expected: gpu_len, got: known })?;
+            sizes[unknown[0]] = Some(residual);
+        }
+        _ => return Err(Error::Unsupported(format!("stx: {} entries with no block size", unknown.len()))),
+    }
+    let mut out = Vec::with_capacity(count);
+    let mut gpu = gpu_start;
+    for (i, desc) in descs.into_iter().enumerate() {
+        let len = sizes[i].unwrap();
         out.push(CaffTexture {
-            width,
-            height,
-            format,
-            endian: (word >> 6) & 3,
-            cube,
-            raw_format: word,
-            mip_count: mips,
+            width: desc.width,
+            height: desc.height,
+            format: desc.format,
+            endian: desc.endian,
+            cube: desc.cube,
+            raw_format: desc.raw_format,
+            mip_count: desc.mip_count,
             gpu_offset: gpu,
             gpu_len: len,
         });
         gpu += len;
     }
-    if gpu - gpu_start != gpu_len {
+    // A stacked / array texture's sub-image size is not fully pinned down (NewYork's `.gpu` is a few KB longer than the
+    // sum), so a shortfall is tolerated when the file has one; overflow is always an error.
+    if gpu - gpu_start > gpu_len || (gpu - gpu_start != gpu_len && !stacked) {
         return Err(Error::SizeMismatch { expected: gpu_len, got: gpu - gpu_start });
     }
     Ok(out)

@@ -68,15 +68,15 @@ pub const ATTR_UV3: u32 = 32;
 pub const ATTR_BINORMAL: u32 = 64;
 
 #[derive(Default, Clone)]
-struct Batch {
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    tangents: Vec<[f32; 3]>,
-    uvs: [Vec<[f32; 2]>; 3],
-    colours: Vec<[u8; 4]>,
-    uv3: Vec<[f32; 2]>,
-    binormals: Vec<[f32; 3]>,
-    indices: Vec<u32>,
+pub(crate) struct Batch {
+    pub(crate) positions: Vec<[f32; 3]>,
+    pub(crate) normals: Vec<[f32; 3]>,
+    pub(crate) tangents: Vec<[f32; 3]>,
+    pub(crate) uvs: [Vec<[f32; 2]>; 3],
+    pub(crate) colours: Vec<[u8; 4]>,
+    pub(crate) uv3: Vec<[f32; 2]>,
+    pub(crate) binormals: Vec<[f32; 3]>,
+    pub(crate) indices: Vec<u32>,
 }
 
 /// Global materials, deduplicated by content.
@@ -199,6 +199,10 @@ pub fn build_track(src: &TrackSrc, out: &Path) -> Result<()> {
     let mut ar = Archive::open(track.join("bin.zip"))?;
     let ribbon = src.ribbon_dir();
     let pvs_bytes = std::fs::read(ribbon.join(format!("{}.pvs", src.stem)))?;
+    // Forza Motorsport 2 (version 0xB): its own model and PVS layouts (crate::fm2_scenery).
+    if pvs_bytes.get(4..8).is_some_and(|b| u32::from_be_bytes(b.try_into().unwrap()) == pvs::FM2_VERSION) {
+        return crate::fm2_scenery::build_track(src, out, &mut ar, &pvs_bytes);
+    }
     let pvs = pvs::parse(&pvs_bytes)?;
     // Forza Motorsport 4 circuits (docs/FM4_RECON.md) have no .pgeo props, CollObjs/GameObjs placements, .pvsz zones or
     // .hex grid: every model goes into the tiles, which the engine streams by distance (index.json "zones": null).
@@ -801,7 +805,7 @@ fn fm3_placements(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Ent
 }
 
 /// The track's `.stx.bin` and its parsed descriptors (FM3). None when the track has none or it doesn't parse.
-fn read_stx(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>) -> Option<(Vec<u8>, Vec<fh1_formats::caff::CaffTexture>)> {
+pub(crate) fn read_stx(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>) -> Option<(Vec<u8>, Vec<fh1_formats::caff::CaffTexture>)> {
     let e = by_name.iter().find(|(n, _)| n.ends_with(".stx.bin")).map(|(_, e)| e.clone())?;
     let d = match ar.read(&e) {
         Ok(d) => d,
@@ -899,7 +903,7 @@ fn convert_previews(ar: &mut Archive<std::fs::File>, pvs: &pvs::Pvs, ids: &HashS
 }
 
 /// Converts the wanted textures (id -> is `.bix`) to DDS, in parallel. Returns file id -> (has alpha, format word).
-fn convert_textures(
+pub(crate) fn convert_textures(
     ar: &mut Archive<std::fs::File>,
     by_name: &HashMap<String, Entry>,
     ids: &BTreeMap<u32, bool>,
@@ -944,7 +948,7 @@ fn convert_textures(
 }
 
 /// Area-weighted vertex normals, oriented upwards where ambiguous (strip winding varies).
-fn smooth_normals(pos: &[[f32; 3]], idx: &[u32]) -> Vec<[f32; 3]> {
+pub(crate) fn smooth_normals(pos: &[[f32; 3]], idx: &[u32]) -> Vec<[f32; 3]> {
     let mut n = vec![[0.0f32; 3]; pos.len()];
     for t in idx.chunks_exact(3) {
         let [a, b, c] = [t[0], t[1], t[2]].map(|i| pos[i as usize]);
@@ -986,7 +990,7 @@ fn append_batches(dst: &mut BTreeMap<(u32, u32, u32), Batch>, src: BTreeMap<(u32
 }
 
 /// Writes one `FH1TILE4` file (format in the module docs). Returns (min, max, vertices, indices).
-fn write_tile(path: &Path, t: &BTreeMap<(u32, u32, u32), Batch>) -> Result<([f32; 3], [f32; 3], usize, usize)> {
+pub(crate) fn write_tile(path: &Path, t: &BTreeMap<(u32, u32, u32), Batch>) -> Result<([f32; 3], [f32; 3], usize, usize)> {
     let mut b = Vec::new();
     let v5 = t.keys().any(|k| k.2 & (ATTR_UV3 | ATTR_BINORMAL) != 0);
     b.extend_from_slice(if v5 { b"FH1TILE5" } else { b"FH1TILE4" });

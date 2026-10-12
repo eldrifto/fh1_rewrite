@@ -6,6 +6,7 @@ pub mod caff;
 pub mod camera;
 pub mod carbin;
 pub mod crowd;
+pub mod fm2;
 pub mod fxobj;
 pub mod granny;
 pub mod grass;

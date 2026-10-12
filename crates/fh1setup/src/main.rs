@@ -46,12 +46,15 @@ mod fh2;
 mod fm4;
 #[cfg(feature = "fm3")]
 mod fm3;
+#[cfg(feature = "fm2")]
+mod fm2;
 #[cfg(feature = "fm4")]
 mod fm4_merge;
 mod grass;
 mod install;
 mod model;
 mod remaster;
+mod fm2_scenery;
 mod scenery;
 mod shaders;
 mod sky;
@@ -119,8 +122,10 @@ fn main() -> Result<()> {
         Some("import-fm4") => return fm4::run(),
         #[cfg(feature = "fm3")]
         Some("import-fm3") => return fm3::run(),
+        #[cfg(feature = "fm2")]
+        Some("import-fm2") => return fm2::run(),
         #[allow(unreachable_patterns)]
-        Some(c @ ("import-fh2" | "import-fm4" | "import-fm3")) => bail!("{c}: rebuild fh1setup with `--features {}`", &c[7..]),
+        Some(c @ ("import-fh2" | "import-fm4" | "import-fm3" | "import-fm2")) => bail!("{c}: rebuild fh1setup with `--features {}`", &c[7..]),
         _ => {}
     }
     let args = parse_args()?;

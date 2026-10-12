@@ -195,12 +195,14 @@ pub struct OptionalGame {
     pub coming_soon: bool,
 }
 
-pub const OPTIONAL_GAMES: [OptionalGame; 3] = [
+pub const OPTIONAL_GAMES: [OptionalGame; 4] = [
     // fh1setup fh2.rs MAP_NAME.
     OptionalGame { folder: "fh2", name: "Forza Horizon 2", worlds: &[("fh2/anthem", "Southern Europe (FH2)")], circuits: false, cars: true, coming_soon: false },
     OptionalGame { folder: "fm4", name: "Forza Motorsport 4", worlds: &[], circuits: true, cars: true, coming_soon: false },
     // `fh1setup import-fm3`: circuits with scenery and (`--only cars`) its cars.
     OptionalGame { folder: "fm3", name: "Forza Motorsport 3", worlds: &[], circuits: true, cars: true, coming_soon: false },
+    // `fh1setup import-fm2`: circuits as collision meshes (its scenery isn't converted yet), no cars.
+    OptionalGame { folder: "fm2", name: "Forza Motorsport 2", worlds: &[], circuits: true, cars: false, coming_soon: false },
 ];
 
 impl OptionalGame {
