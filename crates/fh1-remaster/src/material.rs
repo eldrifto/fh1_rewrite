@@ -445,6 +445,14 @@ fn wgsl() -> String {
         .replace("RM_WATER_BUMP", &format!("{:.3}", wenv("FH1_RM_WATER_BUMP", 0.35)))
         .replace("RM_WATER_OPACITY", &format!("{:.3}", wenv("FH1_RM_WATER_OPACITY", 1.0).clamp(0.0, 1.0)))
         .replace("RM_WATER_MIN_ALPHA", &format!("{:.3}", wenv("FH1_RM_WATER_MIN_ALPHA", 0.55).clamp(0.0, 1.0)))
+        // FM2 baked lightmap as lighting (`FLAG_LM_LIGHT`): albedo x (lightmap * gain + bias). This approximates FM2's
+        // `lerp(c_lightMapDarkColour, c_lightMapLightColour, lm)` (its TrackSettings has dark ~0.03, light ~1.3) folded
+        // into the remaster's exposure; `FH1_RM_LM_LIGHT_*` tunes it.
+        .replace("RM_LM_LIGHT_GAIN", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_GAIN", 3.0)))
+        .replace("RM_LM_LIGHT_BIAS", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_BIAS", 0.5)))
+        .replace("RM_LM_LIGHT_NOLM", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_NOLM", 0.75)))
+        .replace("RM_LM_LIGHT_FLOOR", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_FLOOR", 0.12)))
+        .replace("RM_LM_LIGHT_EXPOSURE", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_EXPOSURE", 1.0)))
         .replace("//BINDLESS_DECL", &decl_bindless).replace("//PLAIN_DECL", &decl_plain).replace("//SAMPLERS", &samplers)
 }
 
@@ -729,6 +737,9 @@ const FLAG_VB_DECAL: u32 = 2048u;
 const FLAG_VB_DECAL_A: u32 = 4096u;
 const FLAG_VB_DECAL_DIRECT: u32 = 8192u;
 const FLAG_DECAL_MASK: u32 = 0x8000u;
+/// FM2: the tf7 lightmap is the whole lighting (the map is `albedo * (lightmap * gain + bias)`, output unlit), not the
+/// occlusion multiplier of FM4's `FLAG_LM_BAKED`.
+const FLAG_LM_LIGHT: u32 = 16384u;
 
 fn has(p: SceneryParams, role: u32) -> bool {
     return (p.info.y & (1u << role)) != 0u;
@@ -999,6 +1010,26 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     } else if has(p, 8u) && lm_w > 0.0 {
         emissive += col * sample_lightmap(slot, ulm, dxl, dyl).rgb * lm_w;
     }
+    // FM2 (FLAG_LM_LIGHT): the baked lightmap IS the lighting (it already contains the baked sun), so multiply the
+    // albedo by it and output unlit below rather than adding Bevy's sun/ambient, which double-counts.
+    let lm_light = (flags & FLAG_LM_LIGHT) != 0u;
+    if lm_light {
+        // A draw without a lightmap tile (fences, trunks, signs, tree cards) gets a mid lightmap value: lit by the sun it would
+        // go black wherever its (smoothed, up-biased) normal faces away from it.
+        var lm = vec3<f32>(RM_LM_LIGHT_NOLM);
+        if has(p, 8u) {
+            lm = sample_lightmap(slot, ulm, dxl, dyl).rgb;
+        }
+        // Setup carries the map's own lerp(DarkColor, LightColor, lightmap) as p1.xyz = dark, p3.yzw = light - dark (the
+        // TrackSettings values, `fx_globals.json` V2LightmapColor1/2); tables built without it use the tuned gain / bias.
+        if any(p.p[3].yzw != vec3<f32>(0.0)) {
+            // FLOOR: the game also lights shadow with the sky / bounce light (TrackSettings SH ambient), which its lightmap colours
+            // do not include: without it fully shadowed faces draw black.
+            col = col * max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR)) * RM_LM_LIGHT_EXPOSURE;
+        } else {
+            col = col * (lm * RM_LM_LIGHT_GAIN + RM_LM_LIGHT_BIAS);
+        }
+    }
     if has(p, 9u) && (flags & FLAG_NIGHT_EMISSIVE) != 0u && p.night.y >= 0.5 {
         emissive += sample_emissive(slot, uem, dxe, dye).rgb * (p.night.w / max(p.night.z, 1e-4));
     }
@@ -1063,7 +1094,7 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     }
 
     var out: FragmentOutput;
-    if cls == CLASS_UNLIT || cls == CLASS_ADDITIVE {
+    if cls == CLASS_UNLIT || cls == CLASS_ADDITIVE || lm_light {
         out.color = vec4<f32>(col, alpha);
     } else {
         out.color = pbr_functions::apply_pbr_lighting(pbr);
