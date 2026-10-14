@@ -398,17 +398,31 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     // Colour + wear mask (road strips with a separate mask uv): the mask's dark layer is the colour texture darkened (rubber).
     let wear_dark: f32 = std::env::var("FM2_WEAR_DARK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.55);
     let mut dark_of: HashMap<u32, u32> = HashMap::new();
-    let mut dark_ids: Vec<Option<u32>> = Vec::with_capacity(pending.len());
+    let mut dark_ids: Vec<Option<(u32, u32)>> = Vec::with_capacity(pending.len());
     let mut dark_new: Vec<u32> = Vec::new();
+    let mut pi_dark = 0usize;
     for p in &pending {
         let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0);
         let cols: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| !mask(t.0)).map(|t| t.0).collect();
-        let nmask = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).count();
-        if p.mask_raw.is_none() || cols.len() != 1 || nmask != 1 || std::env::var_os("FM2_NO_WEAR").is_some() {
+        let mask_ids: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).map(|t| t.0).collect();
+        // The base: the draw's one colour texture, or the baked road. The wear mask: the largest mask (>= 512x512; a small square
+        // 512x512 shared by many models is the asphalt grain, a 2048x512 / 512x1024 one the wear).
+        let area = |id: u32| {
+            let b = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).unwrap_or_default();
+            let u = |o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+            u(12) * u(16)
+        };
+        let wear_mask = mask_ids.iter().copied().max_by_key(|&m| area(m)).filter(|&m| area(m) >= 512 * 512);
+        let base = if cols.len() == 1 { Some(cols[0]) } else if cols.is_empty() { road_ids[pi_dark].map(|r| r.0) } else { None };
+        pi_dark += 1;
+        let (Some(a), Some(wm)) = (base, wear_mask) else {
+            dark_ids.push(None);
+            continue;
+        };
+        if std::env::var_os("FM2_NO_WEAR").is_some() || (cols.len() == 1 && mask_ids.len() == 1 && p.mask_raw.is_none() && p.candidates.len() < 3) {
             dark_ids.push(None);
             continue;
         }
-        let a = cols[0];
         let id = *dark_of.entry(a).or_insert_with(|| {
             let id = 0xFFFF_3000 + dark_new.len() as u32;
             let path = dir.join("textures").join(format!("{a:08x}.dds"));
@@ -437,7 +451,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             dark_new.push(id);
             id
         });
-        dark_ids.push(Some(id));
+        dark_ids.push(Some((id, wm)));
     }
     for id in dark_new {
         textures.insert(id, (false, 0x3F00));
@@ -522,7 +536,15 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                         hi[k] = hi[k].max(v[k]);
                     }
                 }
-                let ids: Vec<String> = p.candidates.iter().map(|c| format!("{:#x}/{}", c.0, c.1)).collect();
+                let ids: Vec<String> = p
+                    .candidates
+                    .iter()
+                    .map(|c| {
+                        let d = std::fs::read(dir.join("textures").join(format!("{:08x}.dds", c.0))).unwrap_or_default();
+                        let u = |o: usize| u32::from_le_bytes(d.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap());
+                        format!("{:#x}/{}/{}x{}", c.0, c.1, u(16), u(12))
+                    })
+                    .collect();
                 println!("[fm2] {want} model {} tris {} tex {ids:?} bbox x {:.0}..{:.0} y {:.0}..{:.0} z {:.0}..{:.0} uv0 span {:.2}x{:.2}", p.model, p.indices.len() / 3, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
                     p.raw.iter().map(|v| v[0]).fold(f32::MIN, f32::max) - p.raw.iter().map(|v| v[0]).fold(f32::MAX, f32::min),
                     p.raw.iter().map(|v| v[1]).fold(f32::MIN, f32::max) - p.raw.iter().map(|v| v[1]).fold(f32::MAX, f32::min));
@@ -532,9 +554,12 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             let pat: String = p.candidates.iter().map(|c| if matches!(c.1, 8 | 9 | 12) { 'L' } else if !textures.contains_key(&c.0) { '?' } else if mask(c.0) { 'M' } else { 'C' }).collect();
             *patterns.entry(pat).or_default() += 1;
         }
-        let mut colours = colours;
-        if let (Some(d), 1) = (dark_ids[pi], colours.len()) {
-            colours.push((d, 0));
+        let (mut colours, mut masks) = (colours, masks);
+        if let Some((d, wm)) = dark_ids[pi] {
+            // Wear blend: the colour (or the baked road) and its darkened copy, by the wear mask.
+            let base = colours.first().copied().or(road_ids[pi]).unwrap_or((ASPHALT, 0));
+            colours = vec![base, (d, 0)];
+            masks = vec![(wm, 4)];
         }
         let blend = masks.len() == 1 && colours.len() >= 2 && std::env::var_os("FM2_NO_BLEND").is_none();
         // A decoded lightmap atlas tile that isn't used by the blend path (its shader shares the mask's uv, so the two
