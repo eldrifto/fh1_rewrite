@@ -37,6 +37,8 @@ const WHITE: u32 = 0xFFFF_0002;
 
 /// A draw waiting for its texture decision: the candidate (file id, flags) per sampler, in order.
 struct Pending {
+    /// A separate mask uv (`Draw::separate_mask`), unscaled; None = the mask shares `raw`.
+    mask_raw: Option<Vec<[f32; 2]>>,
     /// Pixel-shader constants of the draw by register (`Draw::constants`).
     consts: std::collections::BTreeMap<u32, [f32; 4]>,
         model: usize,
@@ -103,6 +105,18 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         }
         let list = pvs.models.get(number).cloned().unwrap_or_default();
         for d in &model.draws {
+            if std::env::var("FM2_PAIRS_MODEL").ok().and_then(|v| v.parse::<usize>().ok()) == Some(number) {
+                let mut line = format!("[fm2] pairs model {number} stride {} tris {}:", d.stride, d.indices.len() / 3);
+                let mut o = 12;
+                while o + 4 <= d.stride {
+                    let sgn = d.uv_at(o);
+                    let un = d.uv_unorm(o);
+                    let span = |v: &Vec<[f32; 2]>, k: usize| v.iter().map(|p| p[k]).fold(f32::MIN, f32::max) - v.iter().map(|p| p[k]).fold(f32::MAX, f32::min);
+                    line += &format!(" @{o}: signed {:.3}x{:.3} unorm {:.3}x{:.3};", span(&sgn, 0), span(&sgn, 1), span(&un, 0), span(&un, 1));
+                    o += 4;
+                }
+                println!("{line}");
+            }
             let (uv0, _) = d.uv_offsets();
             let raw = d.uv_at(uv0);
             let scale = fixed_scale.unwrap_or_else(|| tiling_scale(&d.positions, &raw, &d.indices));
@@ -117,7 +131,9 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 .filter_map(|&it| list.get(it as usize).and_then(|&t| pvs.textures.get(t as usize).map(|x| (x.file_id, x.flags, t as usize))))
                 .collect();
             let has_tile = candidates.iter().any(|t| matches!(t.1, 8 | 9 | 12));
-            let lightmap_at = has_tile.then(|| d.lightmap_offset(uv0)).flatten();
+            let sep = if has_tile { d.separate_mask(uv0) } else { None };
+            let lightmap_at = if let Some((lm, _)) = sep { Some(lm) } else { has_tile.then(|| d.lightmap_offset(uv0)).flatten() };
+            let mask_raw = sep.map(|(_, mk)| d.uv_at(mk));
             let lm_uv = lightmap_at.map(|o| d.uv_unorm(o)).unwrap_or_default();
             if std::env::var_os("FM2_UNRES").is_some() {
                 let beyond: Vec<u32> = d.items.iter().copied().filter(|&it| it as usize >= list.len()).collect();
@@ -146,6 +162,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 positions: d.positions.clone(),
                 uv,
                 raw: raw_uv,
+                mask_raw,
                 lightmap,
                 lm_uv,
                 indices: d.indices.clone(),
@@ -378,6 +395,53 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     for id in baked_new {
         textures.insert(id, (false, 0x3F00));
     }
+    // Colour + wear mask (road strips with a separate mask uv): the mask's dark layer is the colour texture darkened (rubber).
+    let wear_dark: f32 = std::env::var("FM2_WEAR_DARK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.55);
+    let mut dark_of: HashMap<u32, u32> = HashMap::new();
+    let mut dark_ids: Vec<Option<u32>> = Vec::with_capacity(pending.len());
+    let mut dark_new: Vec<u32> = Vec::new();
+    for p in &pending {
+        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0);
+        let cols: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| !mask(t.0)).map(|t| t.0).collect();
+        let nmask = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).count();
+        if p.mask_raw.is_none() || cols.len() != 1 || nmask != 1 || std::env::var_os("FM2_NO_WEAR").is_some() {
+            dark_ids.push(None);
+            continue;
+        }
+        let a = cols[0];
+        let id = *dark_of.entry(a).or_insert_with(|| {
+            let id = 0xFFFF_3000 + dark_new.len() as u32;
+            let path = dir.join("textures").join(format!("{a:08x}.dds"));
+            let made = (|| {
+                let dds = std::fs::read(&path).ok()?;
+                let u = |o: usize| u32::from_le_bytes(dds.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap());
+                let fmt = match u(128) {
+                    71 => texpresso::Format::Bc1,
+                    74 => texpresso::Format::Bc2,
+                    77 => texpresso::Format::Bc3,
+                    _ => return None,
+                };
+                let (h, w) = (u(12) as usize, u(16) as usize);
+                let mut rgba = vec![0u8; w * h * 4];
+                fmt.decompress(dds.get(148..148 + fmt.compressed_size(w, h))?, w, h, &mut rgba);
+                for px in rgba.chunks_exact_mut(4) {
+                    for c in &mut px[..3] {
+                        *c = (255.0 * (*c as f32 / 255.0).powf(2.2).mul_add(wear_dark, 0.0).powf(1.0 / 2.2)).round() as u8;
+                    }
+                }
+                crate::textures::rgba_to_dds(rgba, w as u32, h as u32).ok()
+            })();
+            if let Some(c) = made {
+                let _ = std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds);
+            }
+            dark_new.push(id);
+            id
+        });
+        dark_ids.push(Some(id));
+    }
+    for id in dark_new {
+        textures.insert(id, (false, 0x3F00));
+    }
     for (pi, p) in pending.into_iter().enumerate() {
         if std::env::var_os("FM2_DEBUG").is_some() {
             let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
@@ -448,9 +512,29 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             let c: Vec<String> = p.consts.iter().map(|(r, v)| format!("c{r}=({:.3},{:.3},{:.3},{:.3})", v[0], v[1], v[2], v[3])).collect();
             println!("[fm2] road model {} tris {} masks {ids:?} {}", p.model, p.indices.len() / 3, c.join(" "));
         }
+        if let Ok(want) = std::env::var("FM2_PATTERN_AT") {
+            let pat: String = p.candidates.iter().map(|c| if matches!(c.1, 8 | 9 | 12) { 'L' } else if !textures.contains_key(&c.0) { '?' } else if mask(c.0) { 'M' } else { 'C' }).collect();
+            if pat == want {
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for v in &p.positions {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(v[k]);
+                        hi[k] = hi[k].max(v[k]);
+                    }
+                }
+                let ids: Vec<String> = p.candidates.iter().map(|c| format!("{:#x}/{}", c.0, c.1)).collect();
+                println!("[fm2] {want} model {} tris {} tex {ids:?} bbox x {:.0}..{:.0} y {:.0}..{:.0} z {:.0}..{:.0} uv0 span {:.2}x{:.2}", p.model, p.indices.len() / 3, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2],
+                    p.raw.iter().map(|v| v[0]).fold(f32::MIN, f32::max) - p.raw.iter().map(|v| v[0]).fold(f32::MAX, f32::min),
+                    p.raw.iter().map(|v| v[1]).fold(f32::MIN, f32::max) - p.raw.iter().map(|v| v[1]).fold(f32::MAX, f32::min));
+            }
+        }
         if std::env::var_os("FM2_PATTERNS").is_some() {
             let pat: String = p.candidates.iter().map(|c| if matches!(c.1, 8 | 9 | 12) { 'L' } else if !textures.contains_key(&c.0) { '?' } else if mask(c.0) { 'M' } else { 'C' }).collect();
             *patterns.entry(pat).or_default() += 1;
+        }
+        let mut colours = colours;
+        if let (Some(d), 1) = (dark_ids[pi], colours.len()) {
+            colours.push((d, 0));
         }
         let blend = masks.len() == 1 && colours.len() >= 2 && std::env::var_os("FM2_NO_BLEND").is_none();
         // A decoded lightmap atlas tile that isn't used by the blend path (its shader shares the mask's uv, so the two
@@ -535,7 +619,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         b.normals.extend(normals);
         b.uvs[0].extend_from_slice(&p.uv);
         if blend {
-            b.uvs[1].extend_from_slice(&p.raw);
+            b.uvs[1].extend_from_slice(p.mask_raw.as_ref().unwrap_or(&p.raw));
             if attrs & ATTR_UV2 != 0 {
                 b.uvs[2].extend_from_slice(&p.lm_uv);
             }

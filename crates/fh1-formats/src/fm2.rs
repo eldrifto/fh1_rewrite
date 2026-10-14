@@ -133,6 +133,21 @@ impl Draw {
             .collect()
     }
 
+    /// A draw with a **separate mask uv**: `(lightmap offset, mask offset)`. Seen on stride-24 road strips (colour texture + wear mask):
+    /// `@12` colour tiling uv (a tiny span), `@16` the lightmap (unorm, reaches ~1.0 on the long axis) and `@20` the mask uv (signed,
+    /// 0..1 across the strip, which read as unorm only reaches 0.5). Only claimed when `@20` is signed-positive over a full span and `@16`
+    /// is a genuine unorm pair; otherwise the usual layout (lightmap last) applies.
+    pub fn separate_mask(&self, uv0: usize) -> Option<(usize, usize)> {
+        if self.stride != 24 || uv0 == 16 || uv0 == 20 {
+            return None;
+        }
+        let span = |v: &[[f32; 2]], k: usize| v.iter().map(|p| p[k]).fold(f32::MIN, f32::max) - v.iter().map(|p| p[k]).fold(f32::MAX, f32::min);
+        let (sg20, un20, un16) = (self.uv_at(20), self.uv_unorm(20), self.uv_unorm(16));
+        let max = |v: &[[f32; 2]]| v.iter().flat_map(|p| *p).fold(f32::MIN, f32::max);
+        let signed_full = span(&sg20, 0) >= 0.5 && span(&sg20, 1) >= 0.5 && max(&un20) <= 0.52 && sg20.iter().all(|p| p[0] >= -0.01 && p[1] >= -0.01);
+        (signed_full && max(&un16) >= 0.9).then_some((16, 20))
+    }
+
     /// Offset of the lightmap uv pair (unorm, see [`Self::uv_unorm`]) of a draw that binds a lightmap tile, `uv0` being the
     /// diffuse / mask pair. Layouts seen: stride 20 = position, uv0, lightmap; 24 = position, normal, uv0, lightmap (and the
     /// terrain's position, uv0, ?, lightmap); both end with it. Longer vertices (28+) have more sets, so the pair (a whole word,
