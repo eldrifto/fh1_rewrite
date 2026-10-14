@@ -1,4 +1,8 @@
-//! FMOD Ex sample banks (`.fsb`, version 4) as shipped on the FH1 disc.
+//! FMOD Ex sample banks (`.fsb`, version 4 on the FH1 disc, version 3 on the Forza Motorsport 2 disc) as shipped on the FH1 disc.
+//!
+//! FSB3 (FM2, `"FSB3"`, version 0x00030001) has the same sample headers but a 24-byte file header (`"FSB3"`, sample count, header bytes,
+//! data bytes, version, mode) instead of FSB4's 48 bytes; its headers carry 0x54 extra bytes of XMA seek table per sample (VERIFIED on
+//! `ACU_NSXStock_91_092305_6A0.fsb`: header size 164 = 0x50 + 0x54, data starts at 24 + header bytes).
 //!
 //! Layout (little-endian, verified against the disc's banks):
 //! - 48-byte header: `"FSB4"`, sample count, sample-header bytes, data bytes, version
@@ -31,7 +35,9 @@ pub struct Sample {
 }
 
 pub fn parse(buf: &[u8]) -> Result<Vec<Sample>> {
-    ensure!(buf.len() >= 48 && &buf[..4] == b"FSB4", "not an FSB4 bank");
+    let fsb3 = buf.len() >= 24 && &buf[..4] == b"FSB3";
+    ensure!(fsb3 || (buf.len() >= 48 && &buf[..4] == b"FSB4"), "not an FSB3 / FSB4 bank");
+    let head = if fsb3 { 24 } else { 48 };
     let u32_at = |o: usize| -> Result<u32> {
         Ok(u32::from_le_bytes(buf.get(o..o + 4).context("truncated FSB")?.try_into()?))
     };
@@ -41,8 +47,8 @@ pub fn parse(buf: &[u8]) -> Result<Vec<Sample>> {
     let count = u32_at(4)? as usize;
     let headers_len = u32_at(8)? as usize;
     let bank_mode = u32_at(20)?;
-    let mut off = 48;
-    let mut data = 48 + headers_len;
+    let mut off = head;
+    let mut data = head + headers_len;
     let mut out: Vec<Sample> = Vec::with_capacity(count);
     for i in 0..count {
         let s = if i > 0 && bank_mode & BANK_BASIC_HEADERS != 0 {

@@ -52,6 +52,34 @@ pub fn run() -> Result<()> {
     }
     if want("cars") {
         crate::fh2::swap(&root.join("cars"), |stage| crate::fm2_cars::cars(&disc, &private, stage))?;
+        // The cars' own engine sounds (FM2 DSP / harmonic tuning + FSB3 banks) instead of an FH1 donor's: written to the shared audio folder as
+        // `cars/FM2_<MEDIA>.json` + `banks/`, and each car's `sound_donor` points at it. Needs ffmpeg (XMA); without it the donors stay.
+        if std::env::var("FM2_NO_AUDIO").is_err() {
+            let index: Vec<Value> = serde_json::from_slice(&std::fs::read(root.join("cars/index.json"))?)?;
+            let media: Vec<String> = index.iter().filter_map(|c| c["media_name"].as_str().map(str::to_owned)).collect();
+            let db = Connection::open_with_flags(disc.join("media/db/gamedb.slt"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let mut infos = std::collections::BTreeMap::new();
+            let mut st = db.prepare(
+                "SELECT d.MediaName,                  (SELECT t.Level FROM List_UpgradeTransmission t WHERE t.Ordinal = d.Id AND t.IsStock = 1 LIMIT 1),                  (SELECT b.Level FROM List_UpgradeEngine u JOIN List_UpgradeEngineTurbo b ON b.EngineID = u.EngineID AND b.IsStock = 1                   WHERE u.Ordinal = d.Id AND u.IsStock = 1 LIMIT 1) FROM Data_Car d",
+            )?;
+            for r in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<i64>>(2)?)))? {
+                let (m, trans, turbo) = r?;
+                infos.insert(m, fh1_audio::install_fm2::CarInfo { trans_level: trans.unwrap_or(0), turbo_level: turbo });
+            }
+            drop(st);
+            match fh1_audio::install_fm2::build(&disc, &private.join("audio"), &media, &infos) {
+                Ok(done) => {
+                    for (m, name) in &done {
+                        let path = root.join("cars").join(m).join("physics.json");
+                        let mut p: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+                        p["sound_donor"] = serde_json::json!(name);
+                        std::fs::write(&path, serde_json::to_vec_pretty(&p)?)?;
+                    }
+                    println!("[fm2] {} cars use their own engine sounds", done.len());
+                }
+                Err(e) => println!("[fm2] car audio skipped: {e:#}"),
+            }
+        }
     }
     println!("[fm2] done: {}", root.display());
     Ok(())

@@ -234,17 +234,69 @@ fn build_car(db: &Connection, disc: &Path, donors: &[WheelDonor], car: &Row, med
     let (mut bmin, mut bmax) = ([f32::MAX; 3], [f32::MIN; 3]);
     // Textures (VERIFIED uv = value / 1280 on lights.xds for the lamp parts and on nodamage.xds for the interior): the lamp atlas, the
     // exterior / interior detail atlas and the shared bumper frame, bound to their materials by name.
+    let race_key = crate::cars::rows(db, "SELECT RGB FROM Combo_Colors WHERE Ordinal = ?1 ORDER BY Sequence LIMIT 1", [id])?.into_iter().next().and_then(|c| c["RGB"].as_i64()).map(|v| v as u32 & 0xFF_FFFF) == Some(0xFF0090);
+    let mut paint_bound = false;
     for (file, png, mats) in [
         (
             "lights.xds",
             "lights.png",
             &["textured_reflector", "detail_glass_red", "detail_glass_clear", "detail_glass_amber", "reflector", "head_light", "tail_light", "tail_light_on", "reverse_light", "red_glass"][..],
         ),
-        ("nodamage.xds", "exterior.png", &["interior"][..]),
+        // Materials whose uv land on the exterior / interior detail atlas (fm2_mat_survey: 82-92% of their vertices on opaque texels, ~15% for random uv).
+        (
+            "nodamage.xds",
+            "exterior.png",
+            &["interior", "weatherstrip", "frame", "plastic2", "plastic_2", "plastic", "matte_colors", "misc", "black", "body2", "rubber_trim", "dullplastic"][..],
+        ),
     ] {
-        if let Some(d) = read(file)? {
+        // Liveried cars ship `nodamageUncomp.xds`, the same atlas at 2048 x 2048 uncompressed (the game draws that one; the 1024 DXT version
+        // blocks up the livery's thin swooshes when magnified).
+        let hi = if file == "nodamage.xds" { read("nodamageuncomp.xds")? } else { None };
+        if let Some(d) = hi.or(read(file)?) {
             if let Ok((_, img)) = fh1_formats::xds::decode_base(&d) {
-                if let Ok(rgba) = fh1_formats::xds::to_rgba8(&img) {
+                if let Ok(mut rgba) = fh1_formats::xds::to_rgba8(&img) {
+                    // The detail atlas keeps stray colour (lime, magenta) under alpha 0, where the game draws the paint colour instead; the glTF
+                    // ignores the alpha, so those texels become dark plastic.
+                    if file == "nodamage.xds" {
+                        for px in rgba.chunks_exact_mut(4) {
+                            if px[3] < 128 {
+                                px.copy_from_slice(&[22, 22, 22, 255]);
+                            }
+                        }
+                    }
+                    // Paint materials: the engine's car paint draws lerp(paint, atlas, atlas alpha). Normal cars have alpha 0 over their paint areas
+                    // (the atlas only carries small decals there); race cars ship the whole livery in the atlas with alpha 1 and the team colour baked in
+                    // (their `Combo_Colors` colour is the magenta 0xFF0090 key, which never shows), so binding the atlas as it is gives each car its livery.
+                    if file == "nodamage.xds" {
+                        if let Ok(mut orig) = fh1_formats::xds::to_rgba8(&img) {
+                            // A race car's `Combo_Colors` colour is the magenta key 0xFF0090; the atlas keeps the team colour in the RGB under its
+                            // transparent texels (C6.R: yellow), so the key must never show: make the atlas opaque.
+                            if race_key {
+                                for px in orig.chunks_exact_mut(4) {
+                                    px[3] = 255;
+                                }
+                            }
+                            crate::model::write_png(&dir.join("paint.png"), img.width, img.height, &orig)?;
+                            let tp = g.add_texture("paint.png");
+                            for m in ["body", "body_2", "badge", "race_kit_red"] {
+                                g.mat_texture.insert(m.to_owned(), tp);
+                            }
+                            paint_bound = true;
+                        }
+                    }
+                    // Emblems are logos on a transparent plate: they keep the atlas alpha (a cut-out) in a copy of the atlas.
+                    if file == "nodamage.xds" {
+                        let mut cut = fh1_formats::xds::to_rgba8(&img).unwrap_or_default();
+                        for px in cut.chunks_exact_mut(4) {
+                            if px[3] < 128 {
+                                px[3] = 0;
+                            }
+                        }
+                        crate::model::write_png(&dir.join("emblem.png"), img.width, img.height, &cut)?;
+                        let te = g.add_texture("emblem.png");
+                        g.mat_texture.insert("emblem".into(), te);
+                        g.cutout.insert("emblem".into());
+                    }
                     crate::model::write_png(&dir.join(png), img.width, img.height, &rgba)?;
                     let t = g.add_texture(png);
                     for m in mats {
@@ -262,6 +314,15 @@ fn build_car(db: &Connection, disc: &Path, donors: &[WheelDonor], car: &Row, med
         let t = g.add_texture(png);
         for m in mats {
             g.mat_texture.insert((*m).to_owned(), t);
+        }
+    }
+    // The engine's car-paint shading draws lerp(paint, atlas, atlas alpha): a paint material needs a texture whose alpha is 0 to show the paint
+    // (FH1 bodies carry the exterior atlas for that), so the paint materials get a 1 x 1 transparent texture.
+    if !paint_bound {
+        crate::model::write_png(&dir.join("paint.png"), 1, 1, &[0, 0, 0, 0])?;
+        let paint_tex = g.add_texture("paint.png");
+        for m in ["body", "body_2", "badge", "race_kit_red"] {
+            g.mat_texture.insert(m.to_owned(), paint_tex);
         }
     }
     let flip = signed_volume(&stock) < 0.0;
@@ -286,6 +347,16 @@ fn build_car(db: &Connection, disc: &Path, donors: &[WheelDonor], car: &Row, med
             crate::model::write_png(&dir.join("wheel.png"), w.png.0, w.png.1, &w.png.2)?;
             let t = g.add_texture("wheel.png");
             g.mat_texture.insert("wheel_tire".into(), t);
+            if let Some((aw, ah, argba)) = &w.atlas_png {
+                crate::model::write_png(&dir.join("wheel_atlas.png"), *aw, *ah, argba)?;
+                let ta = g.add_texture("wheel_atlas.png");
+                g.mat_texture.insert("wheel_atlas".into(), ta);
+            }
+            if let Some((tw, th, trgba)) = &w.tyre_png {
+                crate::model::write_png(&dir.join("tyre.png"), *tw, *th, trgba)?;
+                let tt = g.add_texture("tyre.png");
+                g.mat_texture.insert("wheel_tyre".into(), tt);
+            }
             let flip_w = signed_volume(&[&w.part]) < 0.0;
             let (mut a, mut b) = ([0.0; 3], [0.0; 3]);
             g.part_mesh(&w.part, [0.0; 3], flip_w, paint, &mut a, &mut b)
@@ -330,6 +401,9 @@ fn build_car(db: &Connection, disc: &Path, donors: &[WheelDonor], car: &Row, med
     g.write(dir, root)?;
 
     // ---- model.json
+    // The driver's eye for the cockpit camera (the engine reads `cockpit_eye` when a car has no cockpit model): the steering wheel part's centre
+    // plus the game's default offset from the wheel (0, 0.21, 0.51 in mesh space: up and back), like fh1-render car.rs `cockpit_eye`.
+    let cockpit_eye = stock.iter().find(|p| p.name.eq_ignore_ascii_case("steering_wheel")).and_then(|p| p.centre).map(|c| [c[0], c[1] + 0.21, c[2] + 0.51]);
     let rim_in = |k: &str| car[k].as_f64().unwrap_or(17.0) * 0.0254 * 0.5;
     let model = json!({
         "media_name": media,
@@ -350,6 +424,7 @@ fn build_car(db: &Connection, disc: &Path, donors: &[WheelDonor], car: &Row, med
         "triangles": triangles,
         "imported_from": "fm2",
         "wheels_from": donor.media,
+        "cockpit_eye": cockpit_eye,
     });
     std::fs::write(dir.join("model.json"), serde_json::to_vec_pretty(&model)?)?;
 
@@ -442,6 +517,8 @@ fn build_car(db: &Connection, disc: &Path, donors: &[WheelDonor], car: &Row, med
     sp["List_UpgradeCarBodyTireWidthRear"]["RearTireWidth"] = car["StockTire-RearWidth-mm"].clone();
     sp["List_UpgradeRimSizeFront"]["FrontWheelDiameter"] = car["StockTire-FrontWheel-in"].clone();
     sp["List_UpgradeRimSizeRear"]["RearWheelDiameter"] = car["StockTire-RearWheel-in"].clone();
+    // Every Combo_Colors row (the donor's would paint the car with another car's colours).
+    p["colors"] = Value::Array(crate::cars::rows(db, "SELECT Sequence, RGB, Metallic FROM Combo_Colors WHERE Ordinal = ?1 ORDER BY Sequence", [id])?.into_iter().map(Value::Object).collect());
     p["torque_curve"] = json!({"id": full["TorqueCurveID"], "torque_scale_nm": tq_scale, "zero_throttle_nm": Value::Null, "max_rpm": max_rpm, "samples": samples});
     p["engine"]["EngineID"] = json!(engine_id);
     for k in ["EngineMass-kg", "MomentInertia", "GasTankSize"] {
@@ -530,6 +607,9 @@ struct Wheel {
     radius: f32,
     width: f32,
     png: (u32, u32, Vec<u8>),
+    /// The shared tread / sidewall texture (`tirea0.xds`) when it decoded.
+    tyre_png: Option<(u32, u32, Vec<u8>)>,
+    atlas_png: Option<(u32, u32, Vec<u8>)>,
 }
 
 fn load_wheel(db: &Connection, disc: &Path, car: &Row) -> Option<Wheel> {
@@ -545,16 +625,63 @@ fn load_wheel(db: &Connection, disc: &Path, car: &Row) -> Option<Wheel> {
     // `wheel0.xds` is the face-on rim picture the mesh's planar uv expects (VERIFIED in game); `wheel.xds` is a strip atlas the mesh does not use.
     let tex = fh1_formats::xds::decode_base(&read("wheel0.xds").or_else(|| read("wheel.xds"))?).ok()?;
     let rgba = fh1_formats::xds::to_rgba8(&tex.1).ok()?;
-    for m in &mut part.materials {
-        *m = "wheel_tire".into();
+    // The first index run of each LOD is the tyre (r 0.22..0.32 m, u runs 0..25 around the circumference: needs a repeating sampler); the rest is the rim.
+    // Texture family by the stock compound (INFERRED, the gamedb has no link): street / classic = A (grooved tread), L1-L2 dry sport = B (hatched
+    // lettering), L3 dry and race = C (smooth slick); wear steps 0..4 exist, 0 is used.
+    let compound = car.get("Id").and_then(Value::as_i64).and_then(|id| stock_row(db, "List_UpgradeTireCompound", "Ordinal", id).ok().flatten()).and_then(|r| r.get("TireCompoundID")?.as_i64());
+    let family = match compound {
+        Some(5 | 6) => "tireB0.xds",
+        Some(7 | 8) => "tireC0.xds",
+        _ => "tirea0.xds",
+    };
+    let tyre_png = std::fs::read(disc.join("media/cars/shared").join(family)).ok().and_then(|d| {
+        let (_, img) = fh1_formats::xds::decode_base(&d).ok()?;
+        Some((img.width, img.height, fh1_formats::xds::to_rgba8(&img).ok()?))
+    });
+    // Wheel materials (names verified on all 400+ wheel carbins): `tire` = tread + sidewall (the shared tyre texture, uv u repeats ~25x around),
+    // `rim` / `inner_rim` = the 3D wheel, uv into the `wheel.xds` atlas (fitted: not planar), `blur_rim` = a flat disc with exactly planar uv for the
+    // motion-blur pictures wheel0 (sharp) .. wheel3 (fast), which would cover the 3D rim: not drawn.
+    let atlas_png = read("wheel.xds").and_then(|d| {
+        let (_, img) = fh1_formats::xds::decode_base(&d).ok()?;
+        Some((img.width, img.height, fh1_formats::xds::to_rgba8(&img).ok()?))
+    });
+    let names = std::mem::take(&mut part.materials);
+    let mut out: Vec<String> = Vec::new();
+    let mut map: Vec<Option<usize>> = Vec::new();
+    for n in &names {
+        let l = n.to_ascii_lowercase();
+        let new = if l.contains("blur") {
+            None
+        } else if l.contains("tire") || l.contains("tyre") {
+            Some(if tyre_png.is_some() { "wheel_tyre" } else { "wheel_tire" })
+        } else if (l.contains("rim") || l.contains("lip")) && atlas_png.is_some() {
+            Some("wheel_atlas")
+        } else {
+            Some("wheel_tire")
+        };
+        map.push(new.map(|nm| match out.iter().position(|o| o == nm) {
+            Some(i) => i,
+            None => {
+                out.push(nm.to_owned());
+                out.len() - 1
+            }
+        }));
     }
+    part.runs.retain_mut(|r| match map.get(r.material).copied().flatten() {
+        Some(i) => {
+            r.material = i;
+            true
+        }
+        None => false,
+    });
+    part.materials = out;
     let (mut radius, mut lo, mut hi) = (0.0f32, f32::MAX, f32::MIN);
     for v in &part.vertices {
         radius = radius.max((v.position[1] * v.position[1] + v.position[2] * v.position[2]).sqrt());
         lo = lo.min(v.position[0]);
         hi = hi.max(v.position[0]);
     }
-    (radius > 0.1 && hi > lo).then_some(Wheel { part, radius, width: hi - lo, png: (tex.1.width, tex.1.height, rgba) })
+    (radius > 0.1 && hi > lo).then_some(Wheel { part, radius, width: hi - lo, png: (tex.1.width, tex.1.height, rgba), tyre_png, atlas_png })
 }
 
 /// The stock parts: the first (letter `a`) of each kit family and none of the `race` / roll-cage extras.
@@ -564,7 +691,8 @@ fn stock_parts<'a>(parts: &'a [Part], kit: &[(&'static str, char)]) -> Vec<&'a P
         .iter()
         .filter(|p| {
             let n = p.name.to_ascii_lowercase();
-            if n.ends_with("race") || n.starts_with("cage") {
+            // `Original_damage_body`, `exclude_*`: damage-model duplicates that sit on top of the intact parts.
+            if n.ends_with("race") || n.starts_with("cage") || n.contains("damage") || n.starts_with("exclude") {
                 return false;
             }
             match FAMILIES.iter().find(|f| n.starts_with(**f)) {
@@ -608,7 +736,7 @@ fn material_look(name: &str, paint: Colour, metallic: bool) -> ([f32; 4], f32, f
     match name {
         "body" | "body_2" | "badge" | "race_kit_red" => paint_look,
         "matte_colors" => ([paint[0], paint[1], paint[2], 1.0], 0.0, 0.8),
-        "window" | "window_2" | "glass" | "detail_glass_clear" => ([0.04, 0.06, 0.08, 0.4], 0.0, 0.05),
+        "window" | "window_2" | "glass" | "detail_glass_clear" | "lights_gls_head" => ([0.04, 0.06, 0.08, 0.4], 0.0, 0.05),
         "black_glass" => ([0.01, 0.01, 0.015, 0.7], 0.0, 0.05),
         "detail_glass_red" | "red_glass" => ([0.6, 0.02, 0.02, 0.6], 0.0, 0.05),
         "detail_glass_amber" => ([0.8, 0.4, 0.02, 0.6], 0.0, 0.05),
@@ -642,6 +770,8 @@ struct Gltf {
     /// Material name -> texture index (`add_texture`).
     mat_texture: HashMap<String, usize>,
     paint_metallic: bool,
+    /// Materials drawn alpha-masked (cut-out textures).
+    cutout: std::collections::HashSet<String>,
     triangles: usize,
 }
 
@@ -674,7 +804,12 @@ impl Gltf {
 
     fn add_texture(&mut self, uri: &str) -> usize {
         self.images.push(json!({"uri": uri}));
-        self.textures.push(json!({"source": self.images.len() - 1}));
+        // An explicit sampler: linear magnification and trilinear minification, repeating (tread and decal uv leave 0..1). Without one the
+        // engine samples the atlas with the default, which blocks up thin livery lines when magnified.
+        if self.samplers.is_empty() {
+            self.samplers.push(json!({"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}));
+        }
+        self.textures.push(json!({"source": self.images.len() - 1, "sampler": 0}));
         self.textures.len() - 1
     }
 
@@ -688,13 +823,17 @@ impl Gltf {
             return i;
         }
         let (c, metal, rough) = material_look(name, paint, self.paint_metallic);
-        let mut m = json!({"name": format!("fm2_{name}"), "pbrMetallicRoughness": {"baseColorFactor": c, "metallicFactor": metal, "roughnessFactor": rough}, "doubleSided": true});
-        if let Some(&t) = self.mat_texture.get(name) {
+        let mut m = json!({"name": name, "pbrMetallicRoughness": {"baseColorFactor": c, "metallicFactor": metal, "roughnessFactor": rough}, "doubleSided": true});
+        if let Some(&t) = self.mat_texture.get(&name.to_ascii_lowercase()) {
             m["pbrMetallicRoughness"]["baseColorFactor"] = json!([1.0, 1.0, 1.0, 1.0]);
             m["pbrMetallicRoughness"]["baseColorTexture"] = json!({"index": t});
             m["pbrMetallicRoughness"]["metallicFactor"] = json!(0.0);
             m["pbrMetallicRoughness"]["roughnessFactor"] = json!(0.35);
             m.as_object_mut().unwrap().remove("alphaMode");
+            if self.cutout.contains(&name.to_ascii_lowercase()) {
+                m["alphaMode"] = json!("MASK");
+                m["alphaCutoff"] = json!(0.5);
+            }
         }
         if c[3] < 1.0 {
             m["alphaMode"] = json!("BLEND");
@@ -754,8 +893,13 @@ impl Gltf {
         let mut prims = Vec::new();
         for r in runs {
             let mut name = p.materials.get(r.material).cloned().unwrap_or_default();
-            if p.name.eq_ignore_ascii_case("body") && name == "black" {
-                name = "body".into(); // the main shell's paint material is called "black" in the file
+            // Headlight units: the engine's remaster car styling lights materials by name (`head_light` = an emissive lamp, `lights_gls_head`
+            // = a cover over one), so the headlight parts' reflector and glass take those names (the tail lamps already are `detail_glass_red`).
+            let lower = p.name.to_ascii_lowercase();
+            if lower.starts_with("headlight") && (name == "textured_reflector" || name == "reflector") {
+                name = "head_light".into();
+            } else if lower.starts_with("glass") && lower.ends_with("hl") && (name == "glass" || name == "detail_glass_clear") {
+                name = "lights_gls_head".into();
             }
             let idx: Vec<u8> = r
                 .indices
