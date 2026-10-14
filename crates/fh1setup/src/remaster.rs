@@ -159,6 +159,13 @@ struct Record {
     srgb: u32,
 }
 
+/// FM2 two-sided drawing (`FM2_TWO_SIDED=1` at the remaster build; default off). Tried as the fix for the undecoded winding: it brings back faces the
+/// heuristic culled (bridge undersides) but also the back copies of double-layer road meshes, which z-fight with the front ones (banded roads on
+/// Nurburgring), so the up-facing-majority flip in `fm2_scenery.rs` plus back-face culling stays the default.
+fn fm2_two_sided() -> u16 {
+    if std::env::var_os("FM2_TWO_SIDED").is_some() { FLAG_TWO_SIDED } else { 0 }
+}
+
 /// An FM2 map's lightmap colours: (dark, light) = TrackSettings `DarkColor` / `LightColor`.
 type Fm2Light = ([f32; 3], [f32; 3]);
 
@@ -286,7 +293,7 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
         // FM2: the lightmap is a second uv pair (set 2, the mask keeps set 1) and is the lighting, as on the diffuse family.
         if let Some((dark, light)) = fm2 {
             r.uv_set[LM] = 2;
-            r.flags |= FLAG_LM_LIGHT;
+            r.flags |= FLAG_LM_LIGHT | fm2_two_sided();
             r.params[1] = [dark[0], dark[1], dark[2], 0.0];
             r.params[3][1..4].copy_from_slice(&[light[0] - dark[0], light[1] - dark[1], light[2] - dark[2]]);
         }
@@ -343,7 +350,7 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
         // unlit and `albedo * (lightmap * gain + bias)` (FLAG_LM_LIGHT), not FM4's occlusion multiply. Set on every FM2
         // diffuse material; the shader only switches when an LM texture is bound.
         if let Some((dark, light)) = fm2 {
-            r.flags |= FLAG_LM_LIGHT;
+            r.flags |= FLAG_LM_LIGHT | fm2_two_sided();
             // The map's own lerp(DarkColor, LightColor, lightmap): p1.xyz = dark, p3.yzw = light - dark (both unused by a
             // single-layer diffuse material).
             r.params[1] = [dark[0], dark[1], dark[2], 0.0];
