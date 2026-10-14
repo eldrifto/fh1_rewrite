@@ -395,13 +395,91 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     for id in baked_new {
         textures.insert(id, (false, 0x3F00));
     }
+    // Tree sprites (`MLMC` / `MC` / `MMC`: a big opacity mask first, then a small colour map): the colour is a smooth 128x128 gradient
+    // stretched over the sprite and the BC4 mask (a 512x512 sheet of leaf / branch silhouettes) is its opacity. Composed into one RGBA texture
+    // per (mask, colour), drawn as a cut-out card at uv x1. The second mask (a 256x256 shading map) is ignored.
+    let mut sprite_ids: Vec<Option<u32>> = Vec::with_capacity(pending.len());
+    {
+        let mut made: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut made_new: Vec<u32> = Vec::new();
+        for p in &pending {
+            let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0);
+            let ordered: Vec<(u32, bool)> = p.candidates.iter().filter(usable).map(|t| (t.0, mask(t.0))).collect();
+            let size = |id: u32| {
+                let b = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).unwrap_or_default();
+                let u = |o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+                (u(16), u(12))
+            };
+            let cols: Vec<u32> = ordered.iter().filter(|c| !c.1).map(|c| c.0).collect();
+            let first_mask = ordered.first().filter(|c| c.1).map(|c| c.0);
+            let ok = cols.len() == 1 && first_mask.is_some_and(|m| size(m).0 * size(m).1 >= 256 * 256) && size(cols[0]).0 * size(cols[0]).1 <= 128 * 128;
+            if !ok || std::env::var_os("FM2_NO_SPRITE").is_some() {
+                sprite_ids.push(None);
+                continue;
+            }
+            let (m, c) = (first_mask.unwrap_or(0), cols[0]);
+            let id = *made.entry((m, c)).or_insert_with(|| {
+                let id = 0xFFFF_4000 + made_new.len() as u32;
+                let read = |id: u32, fmt: texpresso::Format| {
+                    let b = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).ok()?;
+                    let u = |o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+                    let (h, w) = (u(12), u(16));
+                    let mut rgba = vec![0u8; w * h * 4];
+                    fmt.decompress(b.get(148..148 + fmt.compressed_size(w, h))?, w, h, &mut rgba);
+                    Some((w, h, rgba, u(128)))
+                };
+                let made = (|| {
+                    let (mw, mh, mrgba, _) = read(m, texpresso::Format::Bc4)?;
+                    let (cw, ch, crgba, cf) = {
+                        let b = std::fs::read(dir.join("textures").join(format!("{c:08x}.dds"))).ok()?;
+                        let cf = u32::from_le_bytes(b.get(128..132)?.try_into().ok()?);
+                        let fmt = match cf {
+                            71 => texpresso::Format::Bc1,
+                            74 => texpresso::Format::Bc2,
+                            77 => texpresso::Format::Bc3,
+                            _ => return None,
+                        };
+                        let (w, h, r, _) = read(c, fmt)?;
+                        (w, h, r, cf)
+                    };
+                    let _ = cf;
+                    let mut out = vec![0u8; mw * mh * 4];
+                    for y in 0..mh {
+                        for x in 0..mw {
+                            // Bilinear sample of the colour map over the whole sprite.
+                            let (fx, fy) = ((x as f32 + 0.5) / mw as f32 * cw as f32 - 0.5, (y as f32 + 0.5) / mh as f32 * ch as f32 - 0.5);
+                            let (x0, y0) = (fx.floor().max(0.0) as usize, fy.floor().max(0.0) as usize);
+                            let (x1, y1) = ((x0 + 1).min(cw - 1), (y0 + 1).min(ch - 1));
+                            let (tx, ty) = ((fx - x0 as f32).clamp(0.0, 1.0), (fy - y0 as f32).clamp(0.0, 1.0));
+                            for k in 0..3 {
+                                let g = |xx: usize, yy: usize| crgba[(yy * cw + xx) * 4 + k] as f32;
+                                let v = (g(x0, y0) * (1.0 - tx) + g(x1, y0) * tx) * (1.0 - ty) + (g(x0, y1) * (1.0 - tx) + g(x1, y1) * tx) * ty;
+                                out[(y * mw + x) * 4 + k] = v.round() as u8;
+                            }
+                            out[(y * mw + x) * 4 + 3] = mrgba[(y * mw + x) * 4];
+                        }
+                    }
+                    crate::textures::rgba_to_dds(out, mw as u32, mh as u32).ok()
+                })();
+                if let Some(c) = made {
+                    let _ = std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds);
+                }
+                made_new.push(id);
+                id
+            });
+            sprite_ids.push(Some(id));
+        }
+        for id in made_new {
+            textures.insert(id, (true, 0x3F00));
+            keyed_ids.insert(id);
+        }
+    }
     // Colour + wear mask (road strips with a separate mask uv): the mask's dark layer is the colour texture darkened (rubber).
     let wear_dark: f32 = std::env::var("FM2_WEAR_DARK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.55);
     let mut dark_of: HashMap<u32, u32> = HashMap::new();
     let mut dark_ids: Vec<Option<(u32, u32)>> = Vec::with_capacity(pending.len());
     let mut dark_new: Vec<u32> = Vec::new();
-    let mut pi_dark = 0usize;
-    for p in &pending {
+    for (pi_dark, p) in pending.iter().enumerate() {
         let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0);
         let cols: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| !mask(t.0)).map(|t| t.0).collect();
         let mask_ids: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).map(|t| t.0).collect();
@@ -414,7 +492,10 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         };
         let wear_mask = mask_ids.iter().copied().max_by_key(|&m| area(m)).filter(|&m| area(m) >= 512 * 512);
         let base = if cols.len() == 1 { Some(cols[0]) } else if cols.is_empty() { road_ids[pi_dark].map(|r| r.0) } else { None };
-        pi_dark += 1;
+        if sprite_ids[pi_dark].is_some() {
+            dark_ids.push(None);
+            continue;
+        }
         let (Some(a), Some(wm)) = (base, wear_mask) else {
             dark_ids.push(None);
             continue;
@@ -555,6 +636,11 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             *patterns.entry(pat).or_default() += 1;
         }
         let (mut colours, mut masks) = (colours, masks);
+        let sprite = sprite_ids[pi];
+        if let Some(sid) = sprite {
+            colours = vec![(sid, 4)];
+            masks = Vec::new();
+        }
         if let Some((d, wm)) = dark_ids[pi] {
             // Wear blend: the colour (or the baked road) and its darkened copy, by the wear mask.
             let base = colours.first().copied().or(road_ids[pi]).unwrap_or((ASPHALT, 0));
@@ -642,7 +728,8 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         let base = b.positions.len() as u32;
         b.positions.extend_from_slice(&p.positions);
         b.normals.extend(normals);
-        b.uvs[0].extend_from_slice(&p.uv);
+        // Sprite cards map their sheet once (x1), not tiled.
+        b.uvs[0].extend_from_slice(if sprite.is_some() { &p.raw } else { &p.uv });
         if blend {
             b.uvs[1].extend_from_slice(p.mask_raw.as_ref().unwrap_or(&p.raw));
             if attrs & ATTR_UV2 != 0 {
