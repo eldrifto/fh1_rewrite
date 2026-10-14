@@ -411,8 +411,13 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 (u(16), u(12))
             };
             let cols: Vec<u32> = ordered.iter().filter(|c| !c.1).map(|c| c.0).collect();
-            let first_mask = ordered.first().filter(|c| c.1).map(|c| c.0);
-            let ok = cols.len() == 1 && first_mask.is_some_and(|m| size(m).0 * size(m).1 >= 256 * 256) && size(cols[0]).0 * size(cols[0]).1 <= 128 * 128;
+            let masks_o: Vec<u32> = ordered.iter().filter(|c| c.1).map(|c| c.0).collect();
+            let mut first_mask = ordered.first().filter(|c| c.1).map(|c| c.0).filter(|&m| size(m).0 * size(m).1 >= 256 * 256);
+            // `CM` (colour, then a 64x64..128x128 mask): the same sprite with a small sheet. 32x32 BC4 textures are lightmap-sized, not sprites.
+            if first_mask.is_none() && masks_o.len() == 1 && (64 * 64..256 * 256).contains(&(size(masks_o[0]).0 * size(masks_o[0]).1)) && cols.len() == 1 {
+                first_mask = Some(masks_o[0]);
+            }
+            let ok = cols.len() == 1 && first_mask.is_some() && size(cols[0]).0 * size(cols[0]).1 <= 128 * 128;
             if !ok || std::env::var_os("FM2_NO_SPRITE").is_some() {
                 sprite_ids.push(None);
                 continue;
