@@ -48,6 +48,7 @@ mod fm4;
 mod fm3;
 #[cfg(feature = "fm2")]
 mod fm2;
+mod fm2_cars;
 #[cfg(feature = "fm4")]
 mod fm4_merge;
 mod grass;

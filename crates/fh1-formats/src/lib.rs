@@ -5,6 +5,7 @@ pub mod bundle;
 pub mod caff;
 pub mod camera;
 pub mod carbin;
+pub mod carbin_fm2;
 pub mod crowd;
 pub mod fm2;
 pub mod fxobj;

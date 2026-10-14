@@ -1,4 +1,4 @@
-//! `fh1setup import-fm2 <Forza Motorsport 2 ISO|zip|folder> [--data <dir>] [--only maps]`: Forza Motorsport 2 (Xbox 360, 2007) circuits
+//! `fh1setup import-fm2 <Forza Motorsport 2 ISO|zip|folder> [--data <dir>] [--only maps,cars]`: Forza Motorsport 2 (Xbox 360, 2007) circuits
 //! into the ACTIVE install (`imported/fm2`), through the same builder as FM3's and FM4's ([`crate::fm4::build_maps`]).
 //!
 //! What FM2 shares with FM3 (checked on the disc): the folder layout (`Media/DB/gamedb.slt`, `Media/tracks/<track>/Ribbon_NN/*.col` collision,
@@ -32,11 +32,11 @@ pub fn run() -> Result<()> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--data" => data = it.next().context("--data needs a path")?.into(),
-            "--only" => only = Some(it.next().context("--only needs maps")?.split(',').map(str::to_owned).collect()),
+            "--only" => only = Some(it.next().context("--only needs maps,cars")?.split(',').map(str::to_owned).collect()),
             _ => source = Some(PathBuf::from(a)),
         }
     }
-    let source = source.context("usage: fh1setup import-fm2 <Forza Motorsport 2 ISO|zip|folder> [--data <dir>] [--only maps]")?;
+    let source = source.context("usage: fh1setup import-fm2 <Forza Motorsport 2 ISO|zip|folder> [--data <dir>] [--only maps,cars]")?;
     let inst: Value = serde_json::from_slice(&std::fs::read(data.join("installation.json")).context("installation.json: run fh1setup on the FH1 disc first")?)?;
     println!("[fm2] disc: {}", source.display());
     let disc = crate::extract::resolve_any(&source, &data.join("work_fm2"))?;
@@ -49,6 +49,9 @@ pub fn run() -> Result<()> {
         let layouts = layouts(&disc)?;
         build_maps(&disc, &root, "fm2", "FM2", layouts)?;
         println!("[fm2] run `fh1setup <FH1 disc> --only remaster --force` to (re)build the FM2 remaster material tables");
+    }
+    if want("cars") {
+        crate::fh2::swap(&root.join("cars"), |stage| crate::fm2_cars::cars(&disc, &private, stage))?;
     }
     println!("[fm2] done: {}", root.display());
     Ok(())
