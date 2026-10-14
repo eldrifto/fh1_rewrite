@@ -130,7 +130,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 .iter()
                 .filter_map(|&it| list.get(it as usize).and_then(|&t| pvs.textures.get(t as usize).map(|x| (x.file_id, x.flags, t as usize))))
                 .collect();
-            let has_tile = candidates.iter().any(|t| matches!(t.1, 8 | 9 | 12));
+            let has_tile = candidates.iter().any(|t| matches!(t.1, 8 | 9 | 12 | 1));
             let sep = if has_tile { d.separate_mask(uv0) } else { None };
             let lightmap_at = if let Some((lm, _)) = sep { Some(lm) } else { has_tile.then(|| d.lightmap_offset(uv0)).flatten() };
             let mask_raw = sep.map(|(_, mk)| d.uv_at(mk));
@@ -294,10 +294,41 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             }
         }
     }
-    // BC4 (DXGI 80 / 81) textures are single-channel masks.
-    let mask = |id: u32| {
+    // BC4 (DXGI 80 / 81) textures are single-channel masks, except the small runtime ones (PVS flags 1, <= 64x64): those are a model's own
+    // lightmap carried as a plain `.stx.bin` texture instead of an atlas tile (`small_lm`), drawn as a lightmap, not as a mask or a colour.
+    let is_bc4 = |id: u32| {
         std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).ok().is_some_and(|b| matches!(b.get(128..132).map(|w| u32::from_le_bytes(w.try_into().unwrap())), Some(80 | 81)))
     };
+    let small_lm: std::collections::HashSet<u32> = pending
+        .iter()
+        .flat_map(|p| p.candidates.iter())
+        .filter(|t| t.1 == 1 && std::env::var_os("FM2_NO_SMALL_LM").is_none())
+        .map(|t| t.0)
+        .filter(|&id| {
+            let b = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).unwrap_or_default();
+            let u = |o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+            is_bc4(id) && u(12) * u(16) <= 64 * 64
+        })
+        .collect();
+    // Same form as the cropped atlas tiles: greyscale replicated into RGB (the remaster samples `.rgb`; BC4 alone would tint it red).
+    for &id in &small_lm {
+        let path = dir.join("textures").join(format!("{id:08x}.dds"));
+        let Ok(b) = std::fs::read(&path) else { continue };
+        let u = |o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+        let (w, h) = (u(16), u(12));
+        let fmt = texpresso::Format::Bc4;
+        if let Some(data) = b.get(148..148 + fmt.compressed_size(w, h)) {
+            let mut rgba = vec![0u8; w * h * 4];
+            fmt.decompress(data, w, h, &mut rgba);
+            for p in rgba.chunks_exact_mut(4) {
+                (p[1], p[2], p[3]) = (p[0], p[0], 255);
+            }
+            if let Ok(c) = crate::textures::rgba_to_dds(rgba, w as u32, h as u32) {
+                let _ = std::fs::write(&path, &c.dds);
+            }
+        }
+    }
+    let mask = |id: u32| !small_lm.contains(&id) && is_bc4(id);
 
     if std::env::var_os("FM2_DEBUG").is_some() {
         let mut hist: BTreeMap<String, usize> = BTreeMap::new();
@@ -342,7 +373,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     let mut baked: HashMap<(u32, [u8; 3]), u32> = HashMap::new();
     let mut baked_new: Vec<u32> = Vec::new();
     for p in &pending {
-        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0);
+        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0);
         let has_colour = p.candidates.iter().filter(usable).any(|t| !mask(t.0));
         let masks: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).map(|t| t.0).collect();
         if has_colour || masks.is_empty() || std::env::var_os("FM2_NO_ROAD").is_some() {
@@ -403,7 +434,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         let mut made: HashMap<(u32, u32), u32> = HashMap::new();
         let mut made_new: Vec<u32> = Vec::new();
         for p in &pending {
-            let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0);
+            let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0);
             let ordered: Vec<(u32, bool)> = p.candidates.iter().filter(usable).map(|t| (t.0, mask(t.0))).collect();
             let size = |id: u32| {
                 let b = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).unwrap_or_default();
@@ -485,7 +516,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     let mut dark_ids: Vec<Option<(u32, u32)>> = Vec::with_capacity(pending.len());
     let mut dark_new: Vec<u32> = Vec::new();
     for (pi_dark, p) in pending.iter().enumerate() {
-        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0);
+        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0);
         let cols: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| !mask(t.0)).map(|t| t.0).collect();
         let mask_ids: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).map(|t| t.0).collect();
         // The base: the draw's one colour texture, or the baked road. The wear mask: the largest mask (>= 512x512; a small square
@@ -601,7 +632,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 println!("[fm2] wedge d {cl:.0} cos {cos:.3} model {} tris {} tex {:?} lum {lum:?} at {:.0},{:.0},{:.0}", p.model, p.indices.len() / 3, p.candidates, c[0] + o[0], c[1] + o[1], c[2] + o[2]);
             }
         }
-        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0);
+        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0);
         let colours: Vec<(u32, u32)> = p.candidates.iter().filter(usable).filter(|t| !mask(t.0)).map(|t| (t.0, t.1)).collect();
         let masks: Vec<(u32, u32)> = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).map(|t| (t.0, t.1)).collect();
         let tex = |(id, flags): (u32, u32)| json!({"id": id, "flags": flags, "file": format!("textures/{id:08x}.dds"), "word": textures[&id].1});
@@ -655,8 +686,9 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         let blend = masks.len() == 1 && colours.len() >= 2 && std::env::var_os("FM2_NO_BLEND").is_none();
         // A decoded lightmap atlas tile that isn't used by the blend path (its shader shares the mask's uv, so the two
         // cannot be told apart yet). FM2_LIGHTMAPS=1 only (opt-in: the mapping is new).
+        let small = p.candidates.iter().find(|t| small_lm.contains(&t.0)).map(|t| (t.0, 0u32, [1.0f32, 1.0, 0.0, 0.0]));
         let lm_used = (lightmaps_on && p.lm_uv.len() == p.positions.len())
-            .then_some(p.lightmap)
+            .then(|| p.lightmap.or(small))
             .flatten()
             .filter(|(id, _, _)| textures.contains_key(id));
         let (key, material_json, attrs) = if blend {
