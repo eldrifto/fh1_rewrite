@@ -504,8 +504,9 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             for &g in &grain_r {
                 // A black road constant (`c_constant1` < 0.05, Tsukuba / Suzuka / Silverstone): the shader lerps toward the constant only where the
                 // stone mask says so, otherwise the road is the grain texture itself, a mid-grey asphalt (`FM2_NO_ROAD_TEX=1` keeps the constant).
-                if grain.is_some() && c1.iter().all(|v| *v < 0.05) && std::env::var_os("FM2_NO_ROAD_TEX").is_none() {
-                    let v = ((g as f32 / 255.0) * road_tex_gain).clamp(0.0, 1.0);
+                if grain.is_some() && c1.iter().all(|v| *v < 0.1) && std::env::var_os("FM2_NO_ROAD_TEX").is_none() {
+                    // The grain is a linear-value mask (gamma word 0x01); the baked texture is sRGB, so encode it.
+                    let v = ((g as f32 / 255.0) * road_tex_gain).clamp(0.0, 1.0).powf(1.0 / 2.2);
                     let b = (255.0 * v).round() as u8;
                     px.extend_from_slice(&[b, b, b, 255]);
                     continue;
