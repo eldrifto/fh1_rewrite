@@ -785,6 +785,14 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             let resolved_colour = |id: u32| p.candidates.iter().enumerate().filter(|(_, c)| c.0 == id).any(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)).is_some_and(|u| !u.is_empty()));
             colours.sort_by_key(|c| !resolved_colour(c.0));
         }
+        // Terrain blends list their layers' colours with a greyscale detail / AO image among them: with three or more colours, the grey ones are
+        // not a layer, and taking one as the blend's first colour greyed the terrain (Nurburgring's verges). `FM2_KEEP_GREY=1` keeps them.
+        if colours.len() >= 3 && masks.len() == 1 && std::env::var_os("FM2_KEEP_GREY").is_none() {
+            let colour_ones: Vec<(u32, u32)> = colours.iter().copied().filter(|c| !is_grey_texture(&dir.join("textures").join(format!("{:08x}.dds", c.0)))).collect();
+            if colour_ones.len() >= 2 {
+                colours = colour_ones;
+            }
+        }
         let sprite = sprite_ids[pi];
         if let Some(sid) = sprite {
             colours = vec![(sid, 4)];
