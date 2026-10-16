@@ -807,12 +807,13 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         // Three "colours" with no mask, one of them a greyscale DXT texture spanning the draw once and the other two tiled (grass verges: a hand-painted
         // mix mask stored as a DXT1 image): that texture is the blend mask. `FM2_NO_GREY_MASK=1` keeps it as a colour (drawn white).
         if masks.is_empty() && colours.len() == 3 && std::env::var_os("FM2_NO_GREY_MASK").is_none() {
+            // The wider of the two coordinate spans: a layer tiled along the road only (Road Atlanta's verge) barely spans the other axis.
             let span = |id: u32| {
                 let u = p.candidates.iter().enumerate().filter(|(_, c)| c.0 == id).find_map(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)))?;
-                let (lo, hi) = u.iter().fold((f32::MAX, f32::MIN), |a, t| (a.0.min(t[1]), a.1.max(t[1])));
-                (!u.is_empty()).then_some(hi - lo)
+                let (lo, hi) = u.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |a, t| ([a.0[0].min(t[0]), a.0[1].min(t[1])], [a.1[0].max(t[0]), a.1[1].max(t[1])]));
+                (!u.is_empty()).then_some((hi[0] - lo[0]).max(hi[1] - lo[1]))
             };
-            let cand = (0..3).find(|&i| span(colours[i].0).is_some_and(|v| v < 2.0) && (0..3).filter(|&j| j != i).all(|j| span(colours[j].0).is_some_and(|v| v >= 4.0)));
+            let cand = (0..3).find(|&i| span(colours[i].0).is_some_and(|v| v < 1.5) && (0..3).filter(|&j| j != i).all(|j| span(colours[j].0).is_some_and(|v| v >= 2.0)));
             if let Some(i) = cand.filter(|&i| is_grey_texture(&dir.join("textures").join(format!("{:08x}.dds", colours[i].0)))) {
                 let m = colours.remove(i);
                 masks = vec![m];
