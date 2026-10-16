@@ -793,6 +793,20 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             colours = vec![base, (d, 0)];
             masks = vec![(wm, 4)];
         }
+        // Three "colours" with no mask, one of them a greyscale DXT texture spanning the draw once and the other two tiled (grass verges: a hand-painted
+        // mix mask stored as a DXT1 image): that texture is the blend mask. `FM2_NO_GREY_MASK=1` keeps it as a colour (drawn white).
+        if masks.is_empty() && colours.len() == 3 && std::env::var_os("FM2_NO_GREY_MASK").is_none() {
+            let span = |id: u32| {
+                let u = p.candidates.iter().enumerate().filter(|(_, c)| c.0 == id).find_map(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)))?;
+                let (lo, hi) = u.iter().fold((f32::MAX, f32::MIN), |a, t| (a.0.min(t[1]), a.1.max(t[1])));
+                (!u.is_empty()).then_some(hi - lo)
+            };
+            let cand = (0..3).find(|&i| span(colours[i].0).is_some_and(|v| v < 2.0) && (0..3).filter(|&j| j != i).all(|j| span(colours[j].0).is_some_and(|v| v >= 4.0)));
+            if let Some(i) = cand.filter(|&i| is_grey_texture(&dir.join("textures").join(format!("{:08x}.dds", colours[i].0)))) {
+                let m = colours.remove(i);
+                masks = vec![m];
+            }
+        }
         // Two colours and two masks where one colour is tiled and the other spans the draw once (road shoulders: asphalt + a strip of edge
         // concrete, blended by the strip's own mask uv): a blend of the tiled colour (A) and the strip (B) by the one-pass mask. The second mask
         // (the asphalt grain) is dropped. `FM2_NO_STRIP_BLEND=1` keeps the old first-colour-only look.
@@ -1198,4 +1212,22 @@ fn crop_atlas(path: &Path, rect: [f32; 4]) -> Option<crate::textures::Converted>
         }
     }
     crate::textures::rgba_to_dds(out, cw as u32, ch as u32).ok()
+}
+
+/// Whether a BC1 / BC2 / BC3 DDS holds a greyscale image (R = G = B within a few levels on average).
+fn is_grey_texture(path: &Path) -> bool {
+    let Ok(dds) = std::fs::read(path) else { return false };
+    let u = |o: usize| u32::from_le_bytes(dds.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+    let fmt = match u(128) {
+        71 => texpresso::Format::Bc1,
+        74 => texpresso::Format::Bc2,
+        77 => texpresso::Format::Bc3,
+        _ => return false,
+    };
+    let (h, w) = (u(12), u(16));
+    let Some(data) = dds.get(148..148 + fmt.compressed_size(w, h)) else { return false };
+    let mut rgba = vec![0u8; w * h * 4];
+    fmt.decompress(data, w, h, &mut rgba);
+    let d: f32 = rgba.chunks_exact(4).map(|p| (p[0] as f32 - p[1] as f32).abs() + (p[1] as f32 - p[2] as f32).abs()).sum::<f32>() / (w * h) as f32;
+    d < 4.0
 }
