@@ -157,6 +157,34 @@ pub fn time_of_day_path(assets: &Path, id: &str) -> std::path::PathBuf {
 
 /// FH1's post chain inputs for a map: a native import's own TimeOfDay / TrackSettings / post zones / templates / LUTs
 /// (`imported/<id>/{tracks,dynamicpost,scenery}`, FH2: `Tracks/Anthem`), else Colorado's.
+/// FM2 circuits have fixed baked lighting: no day / night cycle, the clock stays at a daytime hour, its own TrackSettings (SH ambient, fog,
+/// bloom) replace Colorado's and the sun comes from the track's `ShadowLightDirection` (the direction the light travels). The sky, clouds and
+/// atmosphere are still Colorado's at that hour. `FH1_FM2_SUN=0` keeps Colorado's sun direction; `FH1_TOD` still sets the hour.
+pub fn fm2_lighting(t: &mut fh1_render::lighting::FxTimeOfDay, assets: &Path, id: &str) {
+    t.seconds = 14.0 * 3600.0;
+    t.rate_scale = 0.0;
+    let Some(xml) = native_track_dir(assets, id).and_then(|d| std::fs::read_to_string(d.join("tracks/TrackSettings.xml")).ok()) else { return };
+    t.track = fh1_render::lighting::TrackSettings::parse(&xml);
+    if std::env::var("FH1_FM2_SUN").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let attr = |tag: &str, name: &str| -> Option<f32> {
+        let s = xml.find(&format!("<{tag}"))?;
+        let rest = &xml[s..];
+        let rest = &rest[..rest.find("/>")?];
+        let p = rest.find(&format!(" {name}=\""))? + name.len() + 3;
+        rest[p..].split('"').next()?.parse().ok()
+    };
+    let (Some(x), Some(y), Some(z)) = (attr("ShadowLightDirection x", "x"), attr("ShadowLightDirection x", "y"), attr("ShadowLightDirection x", "z")) else { return };
+    // Towards the sun = against the light's travel; the lighting code mirrors z, so mirror it here too.
+    let toward = [-x, -y, z];
+    let n = (toward[0] * toward[0] + toward[1] * toward[1] + toward[2] * toward[2]).sqrt().max(1e-3);
+    let pos = [toward[0] / n * 100.0, toward[1] / n * 100.0, toward[2] / n * 100.0];
+    for (name, v) in [("SunPos", pos), ("SunObjectPos", pos), ("HazeObjectPos", pos), ("SunTargetPos", [0.0; 3]), ("SunObjectTargetPos", [0.0; 3]), ("HazeObjectTargetPos", [0.0; 3])] {
+        t.tod.channels.insert(name.to_string(), fh1_render::tod::Curve { keys: vec![(0.0, v)] });
+    }
+}
+
 pub fn post_config(assets: &Path, id: &str) -> fh1_render::postfx::FxPostConfig {
     let native = native_track_dir(assets, id).and_then(|d| {
         let tracks = std::fs::read_dir(d.join("dynamicpost/Tracks")).ok()?.flatten().find(|e| e.path().is_dir())?.file_name().into_string().ok()?;

@@ -203,6 +203,9 @@ fn main() -> AppExit {
     if let Some(t) = fh1_render::lighting::FxTimeOfDay::load(&track::time_of_day_path(&assets, &track.id), 960.0) {
         let mut t = t;
         t.rate_scale = 1.0;
+        if track.id.starts_with("fm2/") {
+            track::fm2_lighting(&mut t, &assets, &track.id);
+        }
         app.insert_resource(t);
     }
     // FM2 circuits carry no post-chain inputs of their own, so they borrow Colorado's: its grading LUT is FH1's warm late-afternoon look, which
