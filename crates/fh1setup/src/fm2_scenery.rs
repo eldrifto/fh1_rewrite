@@ -203,6 +203,9 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
 
     // Textures: every candidate with a file on the disc (.bix pair = flags & 4, else a .bin).
     let dir = out.join(&src.name);
+    if let Err(e) = crate::fm2_sky::import(ar, &by_name, &pvs, &dir) {
+        println!("[fm2] sky: {e}");
+    }
     std::fs::create_dir_all(dir.join("textures"))?;
     std::fs::create_dir_all(dir.join("tiles"))?;
     let mut wanted = BTreeMap::new();
@@ -517,7 +520,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 }
                 px.push(255);
             }
-            if let Ok(c) = crate::textures::rgba_to_dds(px, w as u32, h as u32) {
+                if let Ok(c) = crate::textures::rgba_to_dds(px, w as u32, h as u32) {
                 let _ = std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds);
             }
             baked_new.push(id);

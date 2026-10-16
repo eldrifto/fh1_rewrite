@@ -51,6 +51,7 @@ mod skidmarks;
 mod net;
 mod smoke;
 mod smash;
+mod fm2_sky;
 mod track;
 mod ui;
 
@@ -212,6 +213,14 @@ fn main() -> AppExit {
     // tints FM2's neutral roads beige (2026-10-16 comparison with the original). A weaker LUT unless the user set one.
     if track.id.starts_with("fm2/") && std::env::var_os("FH1_RM_LUT").is_none() {
         std::env::set_var("FH1_RM_LUT", "0.3");
+    }
+    // FM2's own painted sky replaces Colorado's procedural one.
+    if track.id.starts_with("fm2/") {
+        if let Some(sky) = track::native_track_dir(&assets, &track.id).and_then(|d| fm2_sky::load(&d)) {
+            std::env::set_var("FH1_SKY", "0");
+            app.insert_resource(sky);
+            fm2_sky::plugin(&mut app);
+        }
     }
     // FH1's own post chain (bloom, adaptation, filmic, grading LUTs, vignette); neutral without the files.
     app.insert_resource(track::post_config(&assets, &track.id));
