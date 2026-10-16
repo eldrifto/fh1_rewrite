@@ -159,6 +159,18 @@ impl StringTables {
         self.files.insert(key, (stem.to_string(), table));
     }
 
+    /// Makes gamedb keys whose file hash is `hash` resolve in the table `stem`. Forza Motorsport 2's gamedb names its strings
+    /// with file hash 6547 on every `Tracks` row (that hash is no stem's `H(stem)`), the id being the text id in `Tracks.str`.
+    /// False when the table is missing.
+    pub fn alias_hash(&mut self, hash: u16, stem: &str) -> bool {
+        let key = stem.to_lowercase();
+        let known = self.files.contains_key(&key);
+        if known {
+            self.by_hash.entry(hash).or_insert(key);
+        }
+        known
+    }
+
     pub fn file(&self, stem: &str) -> Option<&StrTable> {
         self.files.get(&stem.to_lowercase()).map(|(_, t)| t)
     }

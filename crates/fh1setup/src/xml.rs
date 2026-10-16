@@ -60,7 +60,7 @@ fn insert(parent: &mut Map<String, Value>, name: String, v: Value) {
     }
 }
 
-fn scalar(s: &str) -> Value {
+pub(crate) fn scalar(s: &str) -> Value {
     s.parse::<f64>()
         .ok()
         .and_then(serde_json::Number::from_f64)

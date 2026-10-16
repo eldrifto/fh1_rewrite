@@ -92,6 +92,9 @@ pub const FLAG_TREE: u16 = 1024;
 pub const FLAG_VB_DECAL: u16 = 2048;
 pub const FLAG_VB_DECAL_A: u16 = 4096;
 pub const FLAG_VB_DECAL_DIRECT: u16 = 8192;
+/// FM2: the tf7 lightmap is the whole lighting (`albedo * (lightmap * gain + bias)`, drawn unlit), not FM4's occlusion
+/// multiply (`FLAG_LM_BAKED`).
+pub const FLAG_LM_LIGHT: u16 = 16384;
 
 /// One family's sampler register -> role.
 fn sampler_role(name: &str) -> Option<usize> {
@@ -156,8 +159,28 @@ struct Record {
     srgb: u32,
 }
 
+/// FM2 two-sided drawing (`FM2_TWO_SIDED=1` at the remaster build; default off). Tried as the fix for the undecoded winding: it brings back faces the
+/// heuristic culled (bridge undersides) but also the back copies of double-layer road meshes, which z-fight with the front ones (banded roads on
+/// Nurburgring), so the up-facing-majority flip in `fm2_scenery.rs` plus back-face culling stays the default.
+fn fm2_two_sided() -> u16 {
+    if std::env::var_os("FM2_TWO_SIDED").is_some() { FLAG_TWO_SIDED } else { 0 }
+}
+
+/// An FM2 map's lightmap colours: (dark, light) = TrackSettings `DarkColor` / `LightColor`.
+type Fm2Light = ([f32; 3], [f32; 3]);
+
+/// `tracks/fx_globals.json` V2LightmapColor1 / 2 of an imported FM2 map; (0.03, 1.3) when missing.
+fn fm2_light(map: &Path) -> Fm2Light {
+    let j: Value = std::fs::read(map.join("tracks/fx_globals.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let get = |k: &str, d: f32| -> [f32; 3] {
+        let v = &j["globals"][k];
+        [0, 1, 2].map(|i| v[i].as_f64().map(|x| x as f32).unwrap_or(d))
+    };
+    (get("V2LightmapColor1", 0.03), get("V2LightmapColor2", 1.3))
+}
+
 /// The family rules (docs/REMASTER.md "Material rules").
-fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family>, fm4: bool) -> Record {
+fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family>, fm4: bool, fm2: Option<Fm2Light>) -> Record {
     let c = |k: usize| ps.get(k).copied().unwrap_or([0.0; 4]);
     let one = |v: f32| if v == 0.0 { 1.0 } else { v };
     let mut r = Record {
@@ -267,6 +290,13 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
         r.params[0] = [1.0, c(3)[0], c(3)[1], 1.0];
         r.params[2] = [c(5)[0], c(5)[1], c(5)[2], 0.5];
         r.params[3][0] = c(3)[3];
+        // FM2: the lightmap is a second uv pair (set 2, the mask keeps set 1) and is the lighting, as on the diffuse family.
+        if let Some((dark, light)) = fm2 {
+            r.uv_set[LM] = 2;
+            r.flags |= FLAG_LM_LIGHT | fm2_two_sided();
+            r.params[1] = [dark[0], dark[1], dark[2], 0.0];
+            r.params[3][1..4].copy_from_slice(&[light[0] - dark[0], light[1] - dark[1], light[2] - dark[2]]);
+        }
     } else if shader.starts_with("h_road") || shader.starts_with("h_vblnd") {
         // Road: A uv0 × c0.xy, B uv0 × c0.zw, C uv0 × c1.xy, noise uv0 × c1.zw, normal uv0 × c0.xy (strength c3.z),
         // modulate uv1 × c2.xy, AO + lightmap uv2. Weights: B = sat((vc.r-.5)c4.x + (noise.r-.5)c4.y + .5),
@@ -316,6 +346,16 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
         }
         // `_lm` floor: max(c213.y, c6.z) (docs/LIGHTMAPS.md; every installed value is 0).
         r.params[3][0] = c(6)[2];
+        // FM2 (first cut): the tf7 tile is the daytime baked track lightmap that IS the lighting, so the material is drawn
+        // unlit and `albedo * (lightmap * gain + bias)` (FLAG_LM_LIGHT), not FM4's occlusion multiply. Set on every FM2
+        // diffuse material; the shader only switches when an LM texture is bound.
+        if let Some((dark, light)) = fm2 {
+            r.flags |= FLAG_LM_LIGHT | fm2_two_sided();
+            // The map's own lerp(DarkColor, LightColor, lightmap): p1.xyz = dark, p3.yzw = light - dark (both unused by a
+            // single-layer diffuse material).
+            r.params[1] = [dark[0], dark[1], dark[2], 0.0];
+            r.params[3][1..4].copy_from_slice(&[light[0] - dark[0], light[1] - dark[1], light[2] - dark[2]]);
+        }
     }
     r
 }
@@ -414,8 +454,9 @@ fn dump(i: usize, shader: &str, r: &Record) -> Value {
     })
 }
 
-/// Build the table for one installed track scenery folder (`scenery/<track>` with materials.json).
-fn build_track(scenery: &Path, track_shaders: &Path, out: &Path, fm4: bool) -> Result<()> {
+/// Build the table for one installed track scenery folder (`scenery/<track>` with materials.json). `fm2`: an imported FM2
+/// map, whose lightmap tile is a daytime baked map (multiplied into the diffuse, not FH1's additive night lamp map).
+fn build_track(scenery: &Path, track_shaders: &Path, out: &Path, fm4: bool, fm2: Option<Fm2Light>) -> Result<()> {
     let mats: Value = serde_json::from_slice(&std::fs::read(scenery.join("materials.json")).with_context(|| format!("{}/materials.json", scenery.display()))?)?;
     let list = mats.as_array().context("materials.json is not an array")?;
     let mut families: HashMap<String, Option<Family>> = HashMap::new();
@@ -435,7 +476,7 @@ fn build_track(scenery: &Path, track_shaders: &Path, out: &Path, fm4: bool) -> R
             .map(|v| [0, 1, 2, 3].map(|k| v.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32))
             .collect();
         let textures = m["textures"].as_array().cloned().unwrap_or_default();
-        let r = record(&shader, &ps, &textures, fam.as_ref(), fm4);
+        let r = record(&shader, &ps, &textures, fam.as_ref(), fm4, fm2);
         *counts.entry(format!("{:?}", r.class)).or_default() += 1;
         write(&r, &mut bin);
         dumps.push(dump(i, &shader, &r));
@@ -456,9 +497,10 @@ pub fn build(_disc: &Path, stage: &Path) -> Result<()> {
     let scenery = private.join("scenery").join("colorado");
     let shaders = private.join("shaders").join("track");
     anyhow::ensure!(scenery.join("materials.json").is_file(), "remaster needs the scenery group installed first");
-    build_track(&scenery, &shaders, &stage.join("scenery").join("colorado"), false)?;
-    // Imported maps (optional: only those installed). FM4 has its own family set (fm4_rules); FH2 uses FH1's.
-    for game in ["fm4", "fh2"] {
+    build_track(&scenery, &shaders, &stage.join("scenery").join("colorado"), false, None)?;
+    // Imported maps (optional: only those installed). FM4 has its own family set (fm4_rules); FH2 uses FH1's; FM2 uses
+    // FH1's with the daytime baked lightmap as the lighting (`FLAG_LM_LIGHT`).
+    for game in ["fm4", "fh2", "fm2"] {
         let Ok(dirs) = std::fs::read_dir(private.join("imported").join(game)) else { continue };
         let mut n = 0;
         for d in dirs.flatten() {
@@ -468,7 +510,7 @@ pub fn build(_disc: &Path, stage: &Path) -> Result<()> {
                 continue;
             }
             let out = stage.join("imported").join(game).join(d.file_name()).join("scenery");
-            if let Err(e) = build_track(&sc, &map.join("shaders").join("track"), &out, game == "fm4") {
+            if let Err(e) = build_track(&sc, &map.join("shaders").join("track"), &out, game == "fm4", (game == "fm2").then(|| fm2_light(&map))) {
                 println!("[remaster] {}: skipped ({e})", sc.display());
                 continue;
             }

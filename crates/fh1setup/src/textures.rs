@@ -33,9 +33,13 @@ pub fn bix_to_dds(header: &[u8], base: &[u8]) -> Result<Converted> {
 /// narrow 8x256 ones, stored inside a packed tail), or cube maps (written as a DDS cube, faces +X -X +Y -Y +Z -Z as
 /// stored).
 pub fn caff_to_dds(file: &[u8]) -> Result<Converted> {
-    let t = caff::parse(file)?;
+    caff_texture_to_dds(file, caff::parse(file)?)
+}
+
+/// [`caff_to_dds`] for a texture whose descriptor is known (`caff::parse_stx` entries; `gpu_offset` absolute in `file`).
+pub fn caff_texture_to_dds(file: &[u8], t: caff::CaffTexture) -> Result<Converted> {
     if t.cube {
-        let faces: Vec<_> = caff::decode_faces(file)?.1.into_iter().map(|f| (f, Vec::new())).collect();
+        let faces: Vec<_> = caff::decode_faces_of(file, t)?.1.into_iter().map(|f| (f, Vec::new())).collect();
         return faces_to_dds(&faces, t.raw_format);
     }
     let mut chain = bundle::decode_chain(&file[t.gpu_offset..], t.format, t.endian, t.width, t.height, 0, t.mip_count.max(1))?;

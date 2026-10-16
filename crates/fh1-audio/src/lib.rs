@@ -13,6 +13,7 @@
 
 pub mod fsb;
 pub mod install;
+pub mod install_fm2;
 pub mod tuning;
 pub mod wav;
 pub mod xma;

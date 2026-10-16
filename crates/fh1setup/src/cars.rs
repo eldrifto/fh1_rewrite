@@ -73,11 +73,13 @@ pub fn build(disc: &Path, out: &Path) -> Result<()> {
         let zip = disc.join("media/cars").join(format!("{media}.zip"));
         let kit = stock_kit(&db, id, physics["body"]["Id"].as_i64())?;
         // Hub height above the model origin (bottom of the body) = tyre radius - ride height.
-        let num = |k: &str| car[k].as_f64().unwrap_or(0.0) as f32;
+        let num = |k: &str| car.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        // FM3 keeps the stock ride heights in Data_CarBody (`ModelFrontStockRideHeight`), FM4 / FH1 in Data_Car.
+        let ride = |k: &str| car.get(k).and_then(Value::as_f64).or_else(|| physics["body"].get(format!("Model{k}")).and_then(Value::as_f64)).unwrap_or(0.0) as f32;
         let tyre = |w: &str, a: &str, d: &str| num(d) * 0.0254 * 0.5 + num(w) * 0.001 * num(a) * 0.01;
         let hub_height = [
-            tyre("FrontTireWidthMM", "FrontTireAspect", "FrontWheelDiameterIN") - num("FrontStockRideHeight"),
-            tyre("RearTireWidthMM", "RearTireAspect", "RearWheelDiameterIN") - num("RearStockRideHeight"),
+            tyre("FrontTireWidthMM", "FrontTireAspect", "FrontWheelDiameterIN") - ride("FrontStockRideHeight"),
+            tyre("RearTireWidthMM", "RearTireAspect", "RearWheelDiameterIN") - ride("RearStockRideHeight"),
         ];
         let axle = |w: &str, a: &str, d: &str| model::Axle {
             tyre_radius: tyre(w, a, d),
@@ -232,8 +234,8 @@ fn car_physics(
                 "id": tc,
                 "torque_scale_nm": row["TorqueScale"],
                 // Engine drag scale at zero throttle (N·m; 82D22D58, docs/DRIVETRAIN.md "Engine torque").
-                "zero_throttle_nm": row["ZeroThrottleTorqueScale"],
-                "max_rpm": cam.unwrap()["TorqueCurveMaxRPM"],
+                "zero_throttle_nm": row.get("ZeroThrottleTorqueScale").cloned().unwrap_or(Value::Null),
+                "max_rpm": cam.and_then(|c| c.get("TorqueCurveMaxRPM")).cloned().unwrap_or(Value::Null),
                 "samples": samples(&row, n),
             })
         }

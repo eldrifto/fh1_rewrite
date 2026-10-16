@@ -1292,6 +1292,11 @@ fn update_fx_cockpit(
         let env_dynamic = env.as_ref().filter(|c| c.use_dynamic).map(|c| c.dynamic.clone());
         let Some(parts) = load_cockpit_parts_env(&body.assets, &body.car, track, body_paint(&car_dir, &model, choice, custom), env_dynamic, &mut lib, &mut globals, &mut shaders, &mut images) else {
             warn!("{}: no cockpit model (fx/{}_cockpit.fxcar)", body.car, body.car);
+            // Imported cars drawn from their glTF (FM2) carry the driver's eye in model.json (`cockpit_eye`, mesh space).
+            if let Some(a) = model["cockpit_eye"].as_array().filter(|a| a.len() == 3) {
+                let eye = Vec3::from_array(std::array::from_fn(|i| a[i].as_f64().unwrap_or(0.0) as f32));
+                commands.entity(e).insert(FxCockpitEye(offset + eye));
+            }
             commands.entity(e).insert(FxCockpitMissing);
             continue;
         };

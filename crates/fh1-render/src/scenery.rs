@@ -328,6 +328,9 @@ pub struct SceneryMaterials {
     /// where tf7 is the daytime track lightmap and the runtime-composed atlas tiles have no file; black darkened every
     /// road to DarkColor, docs/FM4_RECON.md). FH1 tracks don't set it (tf7 = the night lamp lightmap, black = off).
     runtime_lm_white: bool,
+    /// An unbound tf11 (the road shaders' skid-mark mask, a runtime render target) is BLACK = no marks rather than Bevy's
+    /// white = every road fully rubbered-in: index.json `"skid_mask": "black"` (FM3, whose RoadSkid2 is ~1.5 vs FM4's ~0.2).
+    skid_mask_black: bool,
     /// Single-channel (BC4, Xenos DXT5A) textures sample as `.xxxx` (`gamma.y` bit per slot): index.json
     /// `"single_channel": "replicate"` (FM4: its road blend masks are DXT5A read through `.y`, which BC4's (r, 0, 0, 1)
     /// zeroed, so every road went black; the 360's single-channel fetch replicates). FH1 tracks don't set it.
@@ -406,6 +409,7 @@ impl SceneryMaterials {
             idle: HashMap::new(),
             last_sweep: (!std::env::var("FH1_SCENERY_EVICT").is_ok_and(|v| v == "0")).then_some(0.0),
             runtime_lm_white: index["runtime_lightmap"] == "white",
+            skid_mask_black: index["skid_mask"] == "black",
             replicate_single: index["single_channel"] == "replicate",
             single: HashMap::new(),
             flip_cull: false,
@@ -636,6 +640,9 @@ impl SceneryMaterials {
             let per_instance_lm = !self.runtime_lm_white && program.textures.iter().any(|&(tf, d)| tf == 7 && d != 3) && m.t7.is_none() && !pending.iter().any(|&(_, s)| s == 7);
             if per_instance_lm {
                 m.t7 = Some(BLACK.clone());
+            }
+            if self.skid_mask_black && m.t11.is_none() && program.textures.iter().any(|&(tf, d)| tf == 11 && d != 3) {
+                m.t11 = Some(BLACK.clone());
             }
             let h = materials.add(m);
             count_made(0);

@@ -148,13 +148,21 @@ fn has_bounds(d: &[u8], p: usize) -> bool {
 }
 
 pub fn parse(data: &[u8]) -> Result<Carbin, Error> {
+    // FM3's files (bodies and brakes type 1, rims type 2) share the FH1 / FM4 framing with a different section layout (half-float
+    // 40-byte vertices, shorter section head and tail): try the layouts of the other games first, then FM3's.
+    parse_as(data, false).or_else(|e| parse_as(data, true).map_err(|_| e))
+}
+
+fn parse_as(data: &[u8], fm3: bool) -> Result<Carbin, Error> {
     let type_id = be_u32(data, 0).ok_or(Error::Truncated("carbin"))?;
     // Brake header word: 0x11 in FH1, 0x10 in FM4.
     let is_brake = type_id == 1 && matches!(be_u32(data, 4), Some(0x10 | 0x11));
     // 3 = rims (`media/wheels/<rim>.zip`): same section layout, table right after the header.
     // 2 = FM4 bodies (main, _lod0, _cockpit): the same sections; the header carries non-zero words where
     // FH1's is blank, and the section-table scan below finds the table (docs/FM4_RECON.md).
-    if type_id != 5 && type_id != 2 && type_id != 3 && !is_brake {
+    // FM3 bodies are type 1 too (no 0x10 / 0x11 brake word): 40-byte vertices, see [`decode_vertex_fm3`].
+    let is_fm3_body = fm3;
+    if !(1..=5).contains(&type_id) || (!fm3 && type_id != 5 && type_id != 2 && type_id != 3 && !is_brake) {
         return Err(Error::Unsupported(format!("carbin type {type_id}")));
     }
     // partCount sits right before the first section. Its offset depends on the variant, so
@@ -173,7 +181,7 @@ pub fn parse(data: &[u8]) -> Result<Carbin, Error> {
             let mut sections = Vec::new();
             for _ in 0..pc {
                 let at = r.p;
-                match parse_section(&mut r) {
+                match parse_section(&mut r, is_fm3_body) {
                     Ok(s) => sections.push(s),
                     Err(e) => {
                         if std::env::var_os("CARBIN_DEBUG").is_some() {
@@ -197,9 +205,68 @@ pub fn parse(data: &[u8]) -> Result<Carbin, Error> {
             break;
         }
     }
-    best.filter(|b| !b.sections.is_empty())
-        .map(|b| Carbin { sh_compression: sh_compression(data), ..b })
-        .ok_or(Error::BadMagic("carbin: no section table found"))
+    match best.filter(|b| !b.sections.is_empty()) {
+        Some(b) => Ok(Carbin { sh_compression: sh_compression(data), ..b }),
+        None if fm3 && type_id == 1 => parse_fm3_brake(data),
+        None => Err(Error::BadMagic("carbin: no section table found")),
+    }
+}
+
+/// FM3 calipers / rotors (type 1, header word 0xD): one section without the marker, bounds and permutation block: the
+/// name (u8 length) comes straight after a 0x230-byte header of identity matrices, then the same version / pools /
+/// subsections as an FM3 body section. Positions are absolute (unit direction x w), there are no bounds to remap onto.
+fn parse_fm3_brake(data: &[u8]) -> Result<Carbin, Error> {
+    let at = (0x40..0x600.min(data.len().saturating_sub(64))).find(|&p| {
+        let len = data[p] as usize;
+        (3..=40).contains(&len)
+            && data[p + 1..p + 1 + len].iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            && be_u32(data, p + 1 + len) == Some(2)
+            && be_u32(data, p + 5 + len).is_some_and(|n| n < 100_000)
+            && be_u32(data, p + 9 + len).is_some_and(|n| matches!(n, 0 | 40 | 44))
+    });
+    let at = at.ok_or(Error::BadMagic("carbin: no FM3 brake section"))?;
+    let mut r = Reader { d: data, p: at };
+    let name_len = r.u8()? as usize;
+    let name = String::from_utf8_lossy(r.bytes(name_len)?).into_owned();
+    let version = r.u32()?;
+    let lod_count = r.u32()? as usize;
+    let lod_size = r.u32()? as usize;
+    if std::env::var_os("CARBIN_DEBUG").is_some() {
+        eprintln!("brake {name:?} @ {at:#x} version {version} lod {lod_count} x {lod_size}");
+    }
+    let lod_start = r.p;
+    let lod_vertices = read_pool(&mut r, lod_count, lod_size)?;
+    let lod_raw = RawPool { stride: lod_size, data: r.d[lod_start..r.p].to_vec(), ..Default::default() };
+    r.skip(4)?;
+    let sub_count = r.u32()? as usize;
+    if sub_count > 1000 {
+        return Err(Error::BadMagic("carbin subpart count"));
+    }
+    let mut subsections = Vec::with_capacity(sub_count);
+    for _ in 0..sub_count {
+        subsections.push(parse_subsection(&mut r, version, true)?);
+    }
+    r.skip(4)?;
+    let lod0_count = r.u32()? as usize;
+    let lod0_size = r.u32()? as usize;
+    if std::env::var_os("CARBIN_DEBUG").is_some() {
+        eprintln!("brake lod0 {lod0_count} x {lod0_size} @ {:#x}; next bytes {:02x?}", r.p, &r.d[r.p.min(r.d.len())..(r.p + 24).min(r.d.len())]);
+    }
+    let lod0_start = r.p;
+    let lod0_vertices = read_pool(&mut r, lod0_count, lod0_size)?;
+    let lod0_raw = RawPool { stride: lod0_size, data: r.d[lod0_start..r.p].to_vec(), ..Default::default() };
+    let all: Vec<Vertex> = lod_vertices.iter().chain(&lod0_vertices).cloned().collect();
+    let (bounds_min, bounds_max) = bbox(&all);
+    let mut lod_raw = lod_raw;
+    let mut lod0_raw = lod0_raw;
+    (lod_raw.pool_min, lod_raw.pool_max) = bbox(&lod_vertices);
+    (lod0_raw.pool_min, lod0_raw.pool_max) = bbox(&lod0_vertices);
+    let mut subsections = subsections;
+    let half_diag = 0.5 * (0..3).map(|k| (bounds_max[k] - bounds_min[k]).max(0.0).powi(2)).sum::<f32>().sqrt();
+    let (lod_vertices, lod_raw) = fm3_convert(lod_vertices, &lod_raw, &mut subsections, false, half_diag);
+    let (lod0_vertices, lod0_raw) = fm3_convert(lod0_vertices, &lod0_raw, &mut subsections, true, half_diag);
+    let section = Section { name, offset: [0.0; 3], bounds_min, bounds_max, lod_vertices, lod0_vertices, subsections, lod_raw, lod0_raw };
+    Ok(Carbin { type_id: 1, sections: vec![section], sh_compression: None, complete: true })
 }
 
 /// The header's shCompressionFactors (offset, scale): the car VS decodes each SH0 byte as
@@ -219,7 +286,7 @@ pub fn sh_compression(data: &[u8]) -> Option<[f32; 2]> {
     })
 }
 
-fn parse_section(r: &mut Reader) -> Result<Section, Error> {
+fn parse_section(r: &mut Reader, fm3: bool) -> Result<Section, Error> {
     let marker = r.u32()?;
     if marker != 5 && marker != 2 {
         return Err(Error::BadMagic("carbin section marker"));
@@ -238,14 +305,17 @@ fn parse_section(r: &mut Reader) -> Result<Section, Error> {
         return Err(Error::BadMagic("carbin cnt2"));
     }
     r.skip(cnt2 * 2)?;
-    r.skip(12)?;
+    r.skip(if fm3 { 8 } else { 12 })?;
     let name_len = r.u8()? as usize;
     let name = String::from_utf8_lossy(r.bytes(name_len)?).into_owned();
     let version = r.u32()?;
 
     let lod_count = r.u32()? as usize;
     let lod_size = r.u32()? as usize;
-    if lod_count > 0 && lod_size != 28 && lod_size != 32 {
+    if std::env::var_os("CARBIN_DEBUG").is_some() {
+        eprintln!("  section {name:?} @ {:#x}: perm {perm_count} cnt2 {cnt2} version {version} lod {lod_count} x {lod_size}", r.p);
+    }
+    if lod_count > 0 && lod_size != 28 && lod_size != 32 && lod_size != 40 && lod_size != 44 {
         return Err(Error::BadMagic("carbin LOD vertex size"));
     }
     if version >= 3 {
@@ -262,14 +332,48 @@ fn parse_section(r: &mut Reader) -> Result<Section, Error> {
     }
     let mut subsections = Vec::with_capacity(sub_count);
     for _ in 0..sub_count {
-        subsections.push(parse_subsection(r, version)?);
+        subsections.push(parse_subsection(r, version, fm3)?);
     }
 
+    if fm3 {
+        // After the subsections: `[u32 2]`, then the LOD0 pool (`[count][size]` + vertices; empty in the main carbin, whose
+        // detail is in the `_lod0` file), a short tail and the next section.
+        r.skip(4)?;
+        let lod0_count = r.u32()? as usize;
+        let lod0_size = r.u32()? as usize;
+        if lod0_count > 0 && lod0_size != 40 && lod0_size != 44 {
+            return Err(Error::BadMagic("carbin FM3 LOD0 vertex size"));
+        }
+        let lod0_start = r.p;
+        let lod0_vertices = read_pool(r, lod0_count, lod0_size)?;
+        let mut lod0_raw = RawPool { stride: lod0_size, data: r.d[lod0_start..r.p].to_vec(), ..Default::default() };
+        (lod_raw.pool_min, lod_raw.pool_max) = bbox(&lod_vertices);
+        (lod0_raw.pool_min, lod0_raw.pool_max) = bbox(&lod0_vertices);
+        let target = ([minx, miny, minz], [maxx, maxy, maxz]);
+        let (lod_vertices, lod0_vertices) = (remap(lod_vertices, target), remap(lod0_vertices, target));
+        let mut subsections = subsections;
+        let half_diag = 0.5 * (0..3).map(|k| (target.1[k] - target.0[k]).max(0.0).powi(2)).sum::<f32>().sqrt();
+        let (lod_vertices, lod_raw) = fm3_convert(lod_vertices, &lod_raw, &mut subsections, false, half_diag);
+        let (lod0_vertices, lod0_raw) = fm3_convert(lod0_vertices, &lod0_raw, &mut subsections, true, half_diag);
+        let next = (0..64).step_by(4).find(|t| looks_like_section(r.d, r.p + t) && has_bounds(r.d, r.p + t));
+        r.p = next.map_or((r.p + 4).min(r.d.len()), |t| r.p + t);
+        return Ok(Section {
+            name,
+            offset: [ox, oy, oz],
+            bounds_min: [minx, miny, minz],
+            bounds_max: [maxx, maxy, maxz],
+            lod_vertices,
+            lod0_vertices,
+            subsections,
+            lod_raw,
+            lod0_raw,
+        });
+    }
     r.skip(4)?;
     let lod0_count = r.u32()? as i32;
     let lod0_size = r.u32()? as usize;
     let lod0_count = lod0_count.max(0) as usize;
-    if lod0_count > 0 && lod0_size != 28 && lod0_size != 32 {
+    if lod0_count > 0 && lod0_size != 28 && lod0_size != 32 && lod0_size != 40 && lod0_size != 44 {
         return Err(Error::BadMagic("carbin LOD0 vertex size"));
     }
     // Present even when the pool is empty (main carbins), like the LOD pool's.
@@ -357,7 +461,7 @@ fn read_pool(r: &mut Reader, count: usize, size: usize) -> Result<Vec<Vertex>, E
         return Ok(Vec::new());
     }
     let raw = r.bytes(count * size)?;
-    Ok(raw.chunks_exact(size).map(decode_vertex).collect())
+    Ok(raw.chunks_exact(size).map(|v| if size != 28 && size != 32 { decode_vertex_fm3(v) } else { decode_vertex(v) }).collect())
 }
 
 fn decode_vertex(v: &[u8]) -> Vertex {
@@ -374,6 +478,159 @@ fn decode_vertex(v: &[u8]) -> Vertex {
     }
 }
 
+/// FM3's 40-byte vertex: half floats where FM4 has 16-bit integers. `(x, y, z)` is a unit direction (|xyz| = 1 to 3 digits on
+/// every vertex checked) and `w` the length, as in FM4; then uv0 (half2).
+fn decode_vertex_fm3(v: &[u8]) -> Vertex {
+    let h = |o: usize| crate::props::half_to_f32_pub(u16::from_be_bytes([v[o], v[o + 1]]));
+    let w = h(6);
+    Vertex { position: [h(0) * w, h(2) * w, h(4) * w], uv0: [h(8), h(10)], uv1: [0.0; 2], normal: [0.0, 1.0, 0.0] }
+}
+
+/// Rewrites one FM3 pool in FM4's 28-byte vertex layout (what the car vertex shader and `fh1setup`'s `.fxcar` expect):
+/// `i16 x,y,z (unit direction * 32767), i16 w (length / section half-diagonal * 32767), u16 uv0 x2, u16 uv1 x2 (0),
+/// i16 tangent-frame quaternion x4, SH0 (0)`. The normal / tangent are FM3's packed 11:11:10 vectors at +16 / +36 of the
+/// 40- and 44-byte vertices (VERIFIED: the normal agrees with the triangles' on every vertex, the tangent is perpendicular);
+/// the 16-byte brake vertices have none, so smooth normals are computed. UVs (halves, tiling past 0..1 on some panels) are
+/// normalised per pool to the range of the vertices the subsections use, the range going into their `uv_transform`.
+fn fm3_convert(mut verts: Vec<Vertex>, old: &RawPool, subs: &mut [Subsection], lod0: bool, half_diag: f32) -> (Vec<Vertex>, RawPool) {
+    let n = verts.len();
+    if n == 0 {
+        return (verts, RawPool::default());
+    }
+    let mine = |s: &Subsection| (s.lod == 0) == lod0;
+    let mut used = vec![false; n];
+    for s in subs.iter().filter(|s| mine(s)) {
+        for &i in &s.indices {
+            if let Some(u) = used.get_mut(i as usize) {
+                *u = true;
+            }
+        }
+    }
+    // Normals and tangents.
+    let dec11 = |w: u32| {
+        let sx = |v: u32, bits: u32| {
+            let v = v & ((1 << bits) - 1);
+            if v >= 1 << (bits - 1) { v as i32 - (1 << bits) } else { v as i32 }
+        };
+        [sx(w, 11) as f32 / 1023.0, sx(w >> 11, 11) as f32 / 1023.0, sx(w >> 22, 10) as f32 / 511.0]
+    };
+    let unit = |v: [f32; 3]| {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if l > 1e-9 { [v[0] / l, v[1] / l, v[2] / l] } else { [0.0, 1.0, 0.0] }
+    };
+    let cross = |a: [f32; 3], b: [f32; 3]| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let mut normals = vec![[0.0f32; 3]; n];
+    let mut tangents = vec![[0.0f32; 3]; n];
+    if old.stride >= 40 && old.data.len() >= n * old.stride {
+        for i in 0..n {
+            let at = |o: usize| u32::from_be_bytes(old.data[i * old.stride + o..i * old.stride + o + 4].try_into().unwrap());
+            normals[i] = unit(dec11(at(16)));
+            tangents[i] = unit(dec11(at(36)));
+        }
+    } else {
+        for s in subs.iter().filter(|s| mine(s)) {
+            for t in s.indices.chunks_exact(3) {
+                let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
+                if a >= n || b >= n || c >= n {
+                    continue;
+                }
+                let sub = |p: [f32; 3], q: [f32; 3]| [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
+                let f = cross(sub(verts[b].position, verts[a].position), sub(verts[c].position, verts[a].position));
+                for v in [a, b, c] {
+                    for k in 0..3 {
+                        normals[v][k] += f[k];
+                    }
+                }
+            }
+        }
+        for i in 0..n {
+            normals[i] = unit(normals[i]);
+            let up = if normals[i][1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+            tangents[i] = unit(cross(up, normals[i]));
+        }
+    }
+    // uv0 range over the used vertices.
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for (v, _) in verts.iter().zip(&used).filter(|(_, u)| **u) {
+        for k in 0..2 {
+            let x = v.uv0[k].clamp(-64.0, 64.0);
+            lo[k] = lo[k].min(x);
+            hi[k] = hi[k].max(x);
+        }
+    }
+    for k in 0..2 {
+        if lo[k] > hi[k] {
+            (lo[k], hi[k]) = (0.0, 1.0);
+        }
+        if hi[k] - lo[k] < 1e-6 {
+            hi[k] = lo[k] + 1.0;
+        }
+    }
+    let span = [hi[0] - lo[0], hi[1] - lo[1]];
+    for s in subs.iter_mut().filter(|s| mine(s)) {
+        s.uv_transform = [lo[0], span[0], lo[1], span[1], 0.0, 1.0, 0.0, 1.0];
+    }
+    // Rebuild.
+    let s = half_diag.max(1e-6);
+    let snorm = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0).round() as i16;
+    let unorm = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
+    let mut data = Vec::with_capacity(n * 28);
+    let (mut pmin, mut pmax) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for i in 0..n {
+        let p = verts[i].position;
+        let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        let dir = if len > 1e-9 { [p[0] / len, p[1] / len, p[2] / len] } else { [0.0, 0.0, 1.0] };
+        let w = (len / s).min(1.0);
+        for k in 0..3 {
+            let raw = dir[k] * w;
+            pmin[k] = pmin[k].min(raw);
+            pmax[k] = pmax[k].max(raw);
+        }
+        verts[i].uv0 = [((verts[i].uv0[0] - lo[0]) / span[0]).clamp(0.0, 1.0), ((verts[i].uv0[1] - lo[1]) / span[1]).clamp(0.0, 1.0)];
+        verts[i].normal = normals[i];
+        // Tangent frame: rotation with columns (normal, tangent, binormal); the decoder reads the normal back as its first column.
+        let nn = normals[i];
+        let d = dot(tangents[i], nn);
+        let tt = unit([tangents[i][0] - nn[0] * d, tangents[i][1] - nn[1] * d, tangents[i][2] - nn[2] * d]);
+        let bb = cross(nn, tt);
+        let q = matrix_to_quat([[nn[0], tt[0], bb[0]], [nn[1], tt[1], bb[1]], [nn[2], tt[2], bb[2]]]);
+        for v in [snorm(dir[0]), snorm(dir[1]), snorm(dir[2]), snorm(w)] {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+        for v in [unorm(verts[i].uv0[0]), unorm(verts[i].uv0[1]), 0, 0] {
+            data.extend_from_slice(&v.to_be_bytes());
+        }
+        for v in q {
+            data.extend_from_slice(&snorm(v).to_be_bytes());
+        }
+        data.extend_from_slice(&[0u8; 4]);
+    }
+    let raw = RawPool { stride: 28, data, pool_min: pmin, pool_max: pmax, extra: Vec::new(), extra_stride: 0 };
+    (verts, raw)
+}
+
+/// Unit quaternion (x, y, z, w; w >= 0) of a rotation matrix given by rows.
+fn matrix_to_quat(m: [[f32; 3]; 3]) -> [f32; 4] {
+    let tr = m[0][0] + m[1][1] + m[2][2];
+    let q = if tr > 0.0 {
+        let s = (tr + 1.0).sqrt() * 2.0;
+        [(m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, 0.25 * s]
+    } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
+        let s = (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt() * 2.0;
+        [0.25 * s, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s]
+    } else if m[1][1] > m[2][2] {
+        let s = (1.0 + m[1][1] - m[0][0] - m[2][2]).sqrt() * 2.0;
+        [(m[0][1] + m[1][0]) / s, 0.25 * s, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s]
+    } else {
+        let s = (1.0 + m[2][2] - m[0][0] - m[1][1]).sqrt() * 2.0;
+        [(m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, 0.25 * s, (m[1][0] - m[0][1]) / s]
+    };
+    let l = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt().max(1e-9);
+    let sign = if q[3] < 0.0 { -1.0 } else { 1.0 };
+    [q[0] / l * sign, q[1] / l * sign, q[2] / l * sign, q[3] / l * sign]
+}
+
 /// First row of the rotation matrix of the (x, y, z, w) quaternion.
 fn quat_normal([x, y, z, w]: [f32; 4]) -> [f32; 3] {
     let len = (x * x + y * y + z * z + w * w).sqrt();
@@ -384,10 +641,17 @@ fn quat_normal([x, y, z, w]: [f32; 4]) -> [f32; 3] {
     [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y)]
 }
 
-fn parse_subsection(r: &mut Reader, version: u32) -> Result<Subsection, Error> {
-    r.skip(5)?;
-    let uv_transform = r.f32s::<8>()?;
-    r.skip(36)?;
+fn parse_subsection(r: &mut Reader, version: u32, fm3: bool) -> Result<Subsection, Error> {
+    // FM3: a 9-byte head, then the name; the uv transform is not stored where FM4 has it (identity until decoded).
+    let uv_transform = if fm3 {
+        r.skip(9)?;
+        [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
+    } else {
+        r.skip(5)?;
+        let t = r.f32s::<8>()?;
+        r.skip(36)?;
+        t
+    };
     let name_len = r.u32()? as usize;
     if name_len > 256 {
         return Err(Error::BadMagic("carbin subsection name"));
@@ -405,6 +669,9 @@ fn parse_subsection(r: &mut Reader, version: u32) -> Result<Subsection, Error> {
     let size = r.u32()? as usize;
     if size != 2 && size != 4 {
         return Err(Error::BadMagic("carbin index size"));
+    }
+    if std::env::var_os("CARBIN_DEBUG").is_some() {
+        eprintln!("    sub {name:?} lod {lod} type {index_type} count {count} size {size} @ {:#x}", r.p);
     }
     let raw = r.bytes(count * size)?;
     let idx: Vec<u32> = raw
@@ -461,4 +728,38 @@ fn skip_tail(r: &mut Reader) -> Result<[Option<(Vec<u8>, usize)>; 2], Error> {
     // Last section: whatever remains is footer.
     r.p = (base + 4).min(r.d.len());
     Ok(streams)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tangent_frame_quaternion_returns_the_normal() {
+        // Columns (normal, tangent, binormal) = (z, x, y): the decoder reads the normal back as the first column.
+        let q = matrix_to_quat([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]);
+        let n = quat_normal(q);
+        assert!((n[0]).abs() < 1e-5 && (n[1]).abs() < 1e-5 && (n[2] - 1.0).abs() < 1e-5, "{n:?}");
+        assert_eq!(matrix_to_quat([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn fm3_pool_is_rewritten_in_fm4_layout() {
+        // One triangle, positions on a 1 m box: unit direction x length / half-diagonal, uv normalised.
+        let v = |p: [f32; 3], uv: [f32; 2]| Vertex { position: p, uv0: uv, uv1: [0.0; 2], normal: [0.0, 1.0, 0.0] };
+        let verts = vec![v([1.0, 0.0, 0.0], [0.0, 0.0]), v([0.0, 1.0, 0.0], [2.0, 0.0]), v([0.0, 0.0, 1.0], [0.0, 4.0])];
+        let mut subs = vec![Subsection { name: "s".into(), lod: 0, uv_transform: [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0], indices: vec![0, 1, 2] }];
+        let (out, raw) = fm3_convert(verts, &RawPool::default(), &mut subs, true, 1.0);
+        assert_eq!((raw.stride, raw.data.len()), (28, 3 * 28));
+        assert_eq!(subs[0].uv_transform, [0.0, 2.0, 0.0, 4.0, 0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(out[1].uv0, [1.0, 0.0]);
+        // Vertex 0: direction +x, w = 1.
+        assert_eq!(i16::from_be_bytes([raw.data[0], raw.data[1]]), 32767);
+        assert_eq!(i16::from_be_bytes([raw.data[6], raw.data[7]]), 32767);
+        // Smooth normal of the triangle, read back through the tangent-frame quaternion.
+        let q: [f32; 4] = std::array::from_fn(|k| i16::from_be_bytes([raw.data[16 + 2 * k], raw.data[17 + 2 * k]]) as f32 / 32767.0);
+        let n = quat_normal(q);
+        let s = 1.0 / 3f32.sqrt();
+        assert!((n[0] - s).abs() < 1e-3 && (n[1] - s).abs() < 1e-3 && (n[2] - s).abs() < 1e-3, "{n:?}");
+    }
 }

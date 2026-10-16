@@ -211,8 +211,10 @@ impl<'a> Reader<'a> {
 
 pub fn parse(d: &[u8]) -> Result<TrackModel, Error> {
     let mut r = Reader { d, p: 0 };
-    if r.u32()? != 6 {
-        return Err(Error::BadMagic("rmb: CTrackModel version 6 expected"));
+    // 6 = FH1 / FH2 / FM4, 4 = FM3.
+    let version = r.u32()?;
+    if version != 6 && version != 4 {
+        return Err(Error::BadMagic("rmb: CTrackModel version 6 (or 4, FM3) expected"));
     }
     let bmin = r.vec4()?;
     let bmax = r.vec4()?;

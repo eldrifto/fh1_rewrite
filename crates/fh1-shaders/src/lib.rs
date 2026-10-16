@@ -4,6 +4,7 @@
 pub mod container;
 pub mod disasm;
 pub mod effect;
+pub mod fm2;
 pub mod ucode;
 pub mod wgsl;
 pub mod xex;

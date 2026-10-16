@@ -670,6 +670,8 @@ impl CarSound {
                 emitters.push(EmitterSynth::new(lib, em, kind).with_context(|| format!("{car} {kind}"))?);
             }
         }
+        let sh = audio.shared.as_ref();
+        let layer = |r: &crate::tuning::ClipRef| Layer::get(lib, &r.bank, &r.name);
         let t = |g: TyreGroup, roll: &str, pre: &str, skid: &str, high: &str| {
             (
                 g,
@@ -682,17 +684,36 @@ impl CarSound {
                 },
             )
         };
-        let tyres = vec![
+        let mut tyres = vec![
             t(TyreGroup::OnRoad, "Asph_Roadnoise_Slow_V2_1", "Asph_HDF_PreSkid_1V4", "Asph_HDF_Skid_1V4", "Asph_HDF_SkidHigh_1V4"),
             t(TyreGroup::Trackway, "Asph_Roadnoise_Slow_V2_2", "Asph_LDF_PreSkid_1V4", "Asph_HDF_Skid_2V4", "Asph_HDF_SkidHigh_2V4"),
             t(TyreGroup::Brick, "Brick_V3_01", "Asph_HDF_PreSkid_2V4", "Asph_HDF_Skid_3V4", "Asph_HDF_SkidHigh_3V4"),
             t(TyreGroup::OffRoad, "DRT_Fast_1V4", "DRT_MedSkid_1_V2", "DRT_MedSkid_2_V2", "DRT_Fast_2V4"),
             t(TyreGroup::Grass, "GRS_Fast_1V4", "GRS_MedSkid_1_V2", "GRS_MedSkid_2_V2", "GRS_Fast_2V4"),
         ];
-        let shift_clips = (1..=3)
-            .flat_map(|i| ["A", "B", "C"].map(|v| format!("HorizonShift_0{i}_{v}")))
-            .filter_map(|n| lib.clip("Transmissions", &n))
-            .collect();
+        if let Some(sh) = sh {
+            for r in &sh.tyres {
+                let g = match r.group.as_str() {
+                    "OnRoad" => TyreGroup::OnRoad,
+                    "Trackway" => TyreGroup::Trackway,
+                    "Brick" => TyreGroup::Brick,
+                    "OffRoad" => TyreGroup::OffRoad,
+                    "Grass" => TyreGroup::Grass,
+                    _ => continue,
+                };
+                let layers = TyreLayers { smooth: 0.0, roll: layer(&r.roll), skid_pre: layer(&r.pre_skid), skid: layer(&r.skid), skid_high: layer(&r.skid_high) };
+                if let Some(slot) = tyres.iter_mut().find(|(tg, _)| *tg == g) {
+                    slot.1 = layers;
+                }
+            }
+        }
+        let shift_clips: Vec<Clip> = match sh.filter(|s| !s.shift.is_empty()) {
+            Some(s) => s.shift.iter().filter_map(|r| lib.clip(&r.bank, &r.name)).collect(),
+            None => (1..=3)
+                .flat_map(|i| ["A", "B", "C"].map(|v| format!("HorizonShift_0{i}_{v}")))
+                .filter_map(|n| lib.clip("Transmissions", &n))
+                .collect(),
+        };
         // Burbles: pops vs bangs by sample name. Missing in audio-1 installs (then: no pops).
         let (bangs, pops): (Vec<Clip>, Vec<Clip>) = lib
             .bank(burble_bank(car, audio.cylinders))
@@ -714,15 +735,19 @@ impl CarSound {
             c => ("LFE_8cyl_A_NORM_Down1", (c as f32 / 8.0).clamp(0.5, 0.75)),
         };
         let choice = audio.extras.blowoff_choice.clamp(1, 3);
-        let blowoff = lib.clip("Turbos", &format!("BlowOff_L1_{choice}_HI_1")).or_else(|| lib.clip("Turbos", "BlowOff_L1_1_HI_1"));
-        let blowoff_med = lib.clip("Turbos", &format!("BlowOff_L1_{choice}_MED_1")).or_else(|| blowoff.clone());
+        let blowoff = sh
+            .and_then(|s| s.blowoff.as_ref())
+            .and_then(|r| lib.clip(&r.bank, &r.name))
+            .or_else(|| lib.clip("Turbos", &format!("BlowOff_L1_{choice}_HI_1")))
+            .or_else(|| lib.clip("Turbos", "BlowOff_L1_1_HI_1"));
+        let blowoff_med = sh.and_then(|s| s.blowoff_med.as_ref()).and_then(|r| lib.clip(&r.bank, &r.name)).or_else(|| lib.clip("Turbos", &format!("BlowOff_L1_{choice}_MED_1"))).or_else(|| blowoff.clone());
         Ok(CarSound {
             emitters,
             tyres,
-            offroad_chassis: Layer::get(lib, "Tires", "Chassis_OffRoad_LP_1"),
-            wind: Layer::get(lib, "Wind", "Wind_Violent_V4"),
-            whine: Layer::get(lib, "Transmissions", "Transm_Mid_6100"),
-            turbo: Layer::get(lib, "Turbos", "turbo1_loop7_V5"),
+            offroad_chassis: sh.and_then(|s| s.offroad_chassis.as_ref()).and_then(layer).or_else(|| Layer::get(lib, "Tires", "Chassis_OffRoad_LP_1")),
+            wind: sh.and_then(|s| s.wind.as_ref()).and_then(layer).or_else(|| Layer::get(lib, "Wind", "Wind_Violent_V4")),
+            whine: sh.and_then(|s| s.whine.as_ref()).and_then(layer).or_else(|| Layer::get(lib, "Transmissions", "Transm_Mid_6100")),
+            turbo: sh.and_then(|s| s.turbo.as_ref()).and_then(layer).or_else(|| Layer::get(lib, "Turbos", "turbo1_loop7_V5")),
             shift_clips,
             blowoff,
             blowoff_med,
