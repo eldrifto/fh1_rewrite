@@ -176,6 +176,40 @@ pub fn fm2_lighting(t: &mut fh1_render::lighting::FxTimeOfDay, assets: &Path, id
         rest[p..].split('"').next()?.parse().ok()
     };
     let (Some(x), Some(y), Some(z)) = (attr("ShadowLightDirection x", "x"), attr("ShadowLightDirection x", "y"), attr("ShadowLightDirection x", "z")) else { return };
+    // Sun and fog colours: the track's `LightColor` and the density-weighted mean of its enabled fog layers replace Colorado's curves.
+    let rgb = |s: &str, tag: &str| -> Option<[f32; 3]> {
+        let r = &s[s.find(tag)?..];
+        let r = &r[..r.find("/>")?];
+        let g = |n: &str| -> Option<f32> { let p = r.find(&format!(" {n}=\""))? + n.len() + 3; r[p..].split('"').next()?.parse().ok() };
+        Some([g("r")?, g("g")?, g("b")?])
+    };
+    if std::env::var("FH1_FM2_COLOURS").map_or(true, |v| v != "0") {
+        if let Some(c) = rgb(&xml, "<LightColor") {
+            t.tod.channels.insert("SunColor".into(), fh1_render::tod::Curve { keys: vec![(0.0, c)] });
+            t.tod.channels.insert("SunColorMult".into(), fh1_render::tod::Curve { keys: vec![(0.0, [1.0; 3])] });
+        }
+        let (mut sum, mut wsum) = ([0.0f32; 3], 0.0f32);
+        for i in 0..8 {
+            let Some(a) = xml.find(&format!("<Settings{i}>")) else { continue };
+            let blk = &xml[a..xml[a..].find(&format!("</Settings{i}>")).map_or(xml.len(), |e| a + e)];
+            if !blk.contains("<Enabled value=\"1\"") {
+                continue;
+            }
+            let (Some(c), Some(d)) = (rgb(blk, "<Color"), blk.find("<FarDensity value=\"").and_then(|p| blk[p + 19..].split('"').next()?.parse::<f32>().ok())) else { continue };
+            for k in 0..3 {
+                sum[k] += c[k] * d;
+            }
+            wsum += d;
+        }
+        if wsum > 0.0 {
+            // Colorado's fog colour curves run ~0.05-0.25 (the shader scales by its own density), so the track's colours are brought down to match.
+            let k: f32 = std::env::var("FH1_FM2_FOG_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.2);
+            let c = [sum[0] / wsum * k, sum[1] / wsum * k, sum[2] / wsum * k];
+            for ch in ["FogColour", "FogSunScatterColour"] {
+                t.tod.channels.insert(ch.into(), fh1_render::tod::Curve { keys: vec![(0.0, c)] });
+            }
+        }
+    }
     // Towards the sun = against the light's travel; the lighting code mirrors z, so mirror it here too.
     let toward = [-x, -y, z];
     let n = (toward[0] * toward[0] + toward[1] * toward[1] + toward[2] * toward[2]).sqrt().max(1e-3);
