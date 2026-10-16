@@ -1,12 +1,12 @@
 //! FH1 Rewrite launcher: the exe release users open. First run = a short install wizard (pick the Forza Horizon
 //! disc: ISO, a .zip holding it, or the folder it's in; optionally Forza Horizon 2 / Forza Motorsport 4 discs), which
-//! runs `fh1setup` (and its `import-fh2` / `import-fm4` / `import-fm3`) as child processes; afterwards it is the Play button.
+//! runs `fh1setup` (and its `import-fh2` / `import-fm4` / `import-fm3` / `import-fm2` / `import-fm1`) as child processes; afterwards it is the Play button.
 //!
 //! Release layout (tools/release.ps1):
 //! ```text
 //! <root>/FH1 Rewrite.exe        this launcher
 //! <root>/bin/fh1-engine.exe     the game
-//! <root>/bin/fh1setup.exe       asset converter (built with --features fh2,fm4,fm3)
+//! <root>/bin/fh1setup.exe       asset converter (built with --features fh2,fm4,fm3,fm2,fm1)
 //! <root>/bin/extract-xiso.exe   ISO extraction (fh1setup finds it next to itself)
 //! <root>/bin/ffmpeg.exe         XMA audio decoding during setup, FMV playback in the game (FH1_FFMPEG)
 //! <root>/data/                  converted assets (installation.json, installations/<id>/...), launcher.json, logs/
@@ -87,7 +87,11 @@ impl Paths {
     }
 
     fn imported(&self, game: &str) -> bool {
-        self.private().is_some_and(|p| p.join("imported").join(game).join("cars/index.json").is_file())
+        // Circuit games without cars on their own (FM2 can import maps only) count once their maps are in.
+        self.private().is_some_and(|p| {
+            let d = p.join("imported").join(game);
+            d.join("cars/index.json").is_file() || (game == "fm2" && d.join("maps.json").is_file())
+        })
     }
 
 }
@@ -106,6 +110,10 @@ struct Saved {
     own_fm3: bool,
     fm3_play: String,
     fm3_content: String,
+    own_fm2: bool,
+    fm2: String,
+    own_fm1: bool,
+    fm1: String,
     /// Release whose setup last finished (empty = never).
     release: String,
     /// Multiplayer display name (the game's `FH1_NAME`, docs/MULTIPLAYER.md "Player name"); empty = the game's default.
@@ -261,8 +269,14 @@ impl Launcher {
             if !s.fm3_content.is_empty() {
                 args.extend(["--disc2".into(), s.fm3_content.clone()]);
             }
-            args.extend(["--data".into(), data]);
+            args.extend(["--data".into(), data.clone()]);
             steps.push(Step { title: "Forza Motorsport 3".into(), args });
+        }
+        if s.own_fm2 && !s.fm2.is_empty() && !(current && self.paths.imported("fm2")) {
+            steps.push(Step { title: "Forza Motorsport 2".into(), args: vec!["import-fm2".into(), s.fm2.clone(), "--data".into(), data.clone()] });
+        }
+        if s.own_fm1 && !s.fm1.is_empty() && !(current && self.paths.imported("fm1")) {
+            steps.push(Step { title: "Forza Motorsport 1".into(), args: vec!["import-fm1".into(), s.fm1.clone(), "--data".into(), data] });
         }
         steps
     }
@@ -311,7 +325,7 @@ impl Launcher {
                 send(Msg::Line("removing extracted disc files...".into()));
                 // The FM4 merge holds junctions into the extracted Play Disc: remove it first (junctions are removed,
                 // not followed).
-                for d in ["work_fm4", "work_fm4_disc1", "work_fm4_disc2", "work_fm3_disc1", "work_fm3_disc2", "work_fh2", "work"] {
+                for d in ["work_fm4", "work_fm4_disc1", "work_fm4_disc2", "work_fm3_disc1", "work_fm3_disc2", "work_fm2", "work_fm1", "work_fh2", "work"] {
                     let _ = std::fs::remove_dir_all(data.join(d));
                 }
             }
@@ -512,6 +526,14 @@ impl Launcher {
                     path_row(ui, "fm3b", &mut self.saved.fm3_content);
                 });
             }
+            ui.checkbox(&mut self.saved.own_fm2, RichText::new("FORZA MOTORSPORT 2  ·  32 circuit layouts + 311 cars").strong());
+            if self.saved.own_fm2 {
+                ui.indent("fm2", |ui| path_row(ui, "fm2", &mut self.saved.fm2));
+            }
+            ui.checkbox(&mut self.saved.own_fm1, RichText::new("FORZA MOTORSPORT 1  ·  the original Xbox game's cars").strong());
+            if self.saved.own_fm1 {
+                ui.indent("fm1", |ui| path_row(ui, "fm1", &mut self.saved.fm1));
+            }
         });
         ui.add_space(10.0);
         ui.checkbox(&mut self.delete_work, "Delete the extracted disc files afterwards (your disc images are never touched)");
@@ -527,6 +549,12 @@ impl Launcher {
         }
         if self.saved.own_fm3 {
             gb += 8 + 3 + 18;
+        }
+        if self.saved.own_fm2 {
+            gb += 7 + 4 + 5;
+        }
+        if self.saved.own_fm1 {
+            gb += 5 + 1 + 3;
         }
         ui.label(RichText::new(format!("Needs about {gb} GB free next to this program while installing; up to an hour on slower PCs.")).color(style::DIM));
         ui.add_space(12.0);
@@ -567,6 +595,12 @@ impl Launcher {
         }
         if s.own_fm3 && !s.fm3_content.is_empty() && bad(&s.fm3_content) {
             return Some("The FM3 Content Install Disc path doesn't exist.");
+        }
+        if s.own_fm2 && bad(&s.fm2) {
+            return Some("Choose your Forza Motorsport 2 disc, or untick it.");
+        }
+        if s.own_fm1 && bad(&s.fm1) {
+            return Some("Choose your Forza Motorsport 1 disc, or untick it.");
         }
         if !self.paths.bin.join(format!("fh1setup{EXE}")).is_file() {
             return Some("fh1setup is missing from the bin folder next to this program. Re-extract the release.");
@@ -685,6 +719,8 @@ impl Launcher {
                 ("Forza Horizon 2", self.paths.imported("fh2"), "locked"),
                 ("Forza Motorsport 4", self.paths.imported("fm4"), "locked"),
                 ("Forza Motorsport 3", self.paths.imported("fm3"), "locked"),
+                ("Forza Motorsport 2", self.paths.imported("fm2"), "locked"),
+                ("Forza Motorsport 1", self.paths.imported("fm1"), "locked"),
             ] {
                 let (mark, color) = if ok { ("✔", style::OK) } else { ("—", style::DIM) };
                 let text = if ok || note.is_empty() { format!("{mark}  {name}") } else { format!("{mark}  {name}  ·  {note}") };

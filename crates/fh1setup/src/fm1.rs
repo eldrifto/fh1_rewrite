@@ -37,8 +37,10 @@ pub fn run() -> Result<()> {
             _ => source = Some(PathBuf::from(a)),
         }
     }
-    let source = source.context("usage: fh1setup import-fm1 <Forza Motorsport 1 disc folder> [--data <dir>] [--only cars]")?;
+    let source = source.context("usage: fh1setup import-fm1 <Forza Motorsport 1 ISO|zip|disc folder> [--data <dir>] [--only cars]")?;
     let inst: Value = serde_json::from_slice(&std::fs::read(data.join("installation.json")).context("installation.json: run fh1setup on the FH1 disc first")?)?;
+    // An ISO or zip is extracted first (the launcher hands over whatever the user picked).
+    let source = crate::extract::resolve_any(&source, &data.join("work_fm1"))?;
     let disc = disc_root(&source)?;
     println!("[fm1] disc: {}", disc.display());
     let private = data.join("installations").join(inst["id"].as_str().context("installation.json id")?).join("assets/private");
