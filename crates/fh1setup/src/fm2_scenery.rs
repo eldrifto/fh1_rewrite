@@ -53,6 +53,14 @@ struct Pending {
     lm_uv: Vec<[f32; 2]>,
     indices: Vec<u32>,
     candidates: Vec<(u32, u32, usize)>,
+    /// The sampler slot of each candidate (`candidates` is `Draw::items` minus the unresolvable ones).
+    cand_slots: Vec<usize>,
+    /// Texture coordinates resolved from the draw's own shaders (`fm2_uv`), by sampler slot.
+    resolved: BTreeMap<usize, Vec<[f32; 2]>>,
+    /// The pixel shader's output alpha is a constant: the colour textures' alpha channel is not opacity.
+    alpha_const: bool,
+    /// Sampler slot -> draw constant register holding the atlas sub-rectangle the shader maps the coordinate into.
+    atlas: BTreeMap<usize, u32>,
 }
 
 pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, pvs_bytes: &[u8]) -> Result<()> {
@@ -104,7 +112,8 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             *skipped.entry(why.split(|c: char| c.is_ascii_digit()).next().unwrap_or("").to_owned()).or_default() += 1;
         }
         let list = pvs.models.get(number).cloned().unwrap_or_default();
-        for d in &model.draws {
+        let shader_uv = if std::env::var("FM2_SHADER_UV").is_ok_and(|v| v == "0") { Vec::new() } else { crate::fm2_uv::resolve(&raw_model, &model, &|it| match list.get(it as usize).and_then(|&t| pvs.textures.get(t as usize)) { None => crate::fm2_uv::ItemKind::System, Some(t) if matches!(t.flags, 8 | 9 | 12) => crate::fm2_uv::ItemKind::Tile, Some(_) => crate::fm2_uv::ItemKind::Other }) };
+        for (di, d) in model.draws.iter().enumerate() {
             if std::env::var("FM2_PAIRS_MODEL").ok().and_then(|v| v.parse::<usize>().ok()) == Some(number) {
                 let mut line = format!("[fm2] pairs model {number} stride {} tris {}:", d.stride, d.indices.len() / 3);
                 let mut o = 12;
@@ -130,6 +139,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 .iter()
                 .filter_map(|&it| list.get(it as usize).and_then(|&t| pvs.textures.get(t as usize).map(|x| (x.file_id, x.flags, t as usize))))
                 .collect();
+            let cand_slots: Vec<usize> = d.items.iter().enumerate().filter(|(_, &it)| list.get(it as usize).is_some_and(|&t| pvs.textures.get(t as usize).is_some())).map(|(j, _)| j).collect();
             let has_tile = candidates.iter().any(|t| matches!(t.1, 8 | 9 | 12 | 1));
             let sep = if has_tile { d.separate_mask(uv0) } else { None };
             let lightmap_at = if let Some((lm, _)) = sep { Some(lm) } else { has_tile.then(|| d.lightmap_offset(uv0)).flatten() };
@@ -167,11 +177,19 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 lm_uv,
                 indices: d.indices.clone(),
                 candidates,
+                cand_slots,
+                resolved: shader_uv.get(di).map(|s| s.slots.clone()).unwrap_or_default(),
+                alpha_const: shader_uv.get(di).is_some_and(|s| s.alpha_const),
+                atlas: shader_uv.get(di).map(|s| s.atlas.clone()).unwrap_or_default(),
             });
             draws += 1;
         }
     }
     println!("[fm2] {models} models ({failed} failed), {draws} draws, skipped draws {skipped:?}");
+    if std::env::var_os("FM2_UV_STATS").is_some() {
+        let n = |i: usize| crate::fm2_uv::STATS[i].load(std::sync::atomic::Ordering::Relaxed);
+        println!("[fm2] shader uv: {} draws unpaired, {} with no direct sampler, {} direct samplers on a complex vertex output, {} matrices without values, {} samplers resolved", n(0), n(1), n(2), n(3), n(4));
+    }
     if !name_hist.is_empty() {
         let mut v: Vec<_> = name_hist.iter().collect();
         v.sort_by_key(|x| std::cmp::Reverse(*x.1));
@@ -194,6 +212,36 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         }
     }
     let mut textures = convert_textures(ar, &by_name, &wanted, &dir.join("textures"))?;
+    // Atlas lookups (`frac(uv) * c.xy + c.zw`): the draw's colour is a sub-rectangle of a shared atlas that repeats. Cut the rectangle out into its
+    // own texture so the plain unit coordinate (sampled with wrap) reproduces it; one cut per (texture, rectangle).
+    if std::env::var_os("FM2_NO_ATLAS_CROP").is_none() {
+        let mut cuts: HashMap<(u32, [u32; 4]), Option<u32>> = HashMap::new();
+        let mut next = 0u32;
+        let mut cropped = 0usize;
+        for p in pending.iter_mut() {
+            for (&slot, &creg) in p.atlas.clone().iter() {
+                let (Some(k), Some(c)) = (p.cand_slots.iter().position(|&s| s == slot), p.consts.get(&creg).copied()) else { continue };
+                let id = p.candidates[k].0;
+                if !textures.contains_key(&id) || c[0] <= 0.0 || c[1] <= 0.0 {
+                    continue;
+                }
+                let key = (id, c.map(f32::to_bits));
+                let new = *cuts.entry(key).or_insert_with(|| {
+                    let c2 = crop_atlas(&dir.join("textures").join(format!("{id:08x}.dds")), c)?;
+                    let nid = 0xFFFF_5000 + next;
+                    next += 1;
+                    std::fs::write(dir.join("textures").join(format!("{nid:08x}.dds")), &c2.dds).ok()?;
+                    textures.insert(nid, (c2.alpha, c2.word));
+                    Some(nid)
+                });
+                if let Some(nid) = new {
+                    p.candidates[k].0 = nid;
+                    cropped += 1;
+                }
+            }
+        }
+        println!("[fm2] {cropped} atlas draws cut to {} sub-textures", cuts.values().flatten().count());
+    }
     // The track's `.stx.bin`: runtime textures (flags 1) and the lightmap atlas pages the flags 8 / 9 / 12 tiles are cut from.
     let stx = crate::scenery::read_stx(ar, &by_name);
     if let Some((d, ents)) = &stx {
@@ -229,6 +277,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     // Foliage sheets are DXT1 with black as the colour key (the game's pixel shader discards the black texels): without
     // alpha they draw as black boxes. Rewrite those textures with the black texels transparent.
     let mut keyed = 0usize;
+    let mut opaque_alpha = 0usize;
     let mut keyed_ids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     if std::env::var_os("FM2_NO_KEY").is_none() {
         let used: std::collections::BTreeSet<u32> = pending.iter().flat_map(|p| p.candidates.iter().filter(|t| t.1 & 8 == 0 && t.1 & 1 == 0).map(|t| t.0)).collect();
@@ -251,12 +300,21 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         // Other alpha textures: partly transparent sheets are cut-outs; unused alpha channels (all 0) stay opaque.
         for (&id, &(alpha, _)) in textures.iter() {
             if alpha && !keyed_ids.contains(&id) {
-                if std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).ok().is_some_and(|b| cutout_texture(&b)) {
-                    keyed_ids.insert(id);
+                // A texture only ever drawn by shaders whose output alpha is a constant carries other data in its alpha (FM2 atlases).
+                let opaque_use = || {
+                    let mut uses = pending.iter().filter(|p| p.candidates.iter().any(|c| c.0 == id)).peekable();
+                    uses.peek().is_some() && uses.all(|p| p.alpha_const)
+                };
+                if std::env::var_os("FM2_NO_ALPHA_CONST").is_some() || !opaque_use() {
+                    if std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).ok().is_some_and(|b| cutout_texture(&b)) {
+                        keyed_ids.insert(id);
+                    }
+                } else {
+                    opaque_alpha += 1;
                 }
             }
         }
-        println!("[fm2] {keyed} black-keyed foliage textures given alpha, {} cut-out textures in all", keyed_ids.len());
+        println!("[fm2] {keyed} black-keyed foliage textures given alpha, {} cut-out textures in all, {opaque_alpha} alpha atlases kept opaque", keyed_ids.len());
         if std::env::var_os("FM2_DEBUG").is_some() {
             for (&id, &(alpha, _)) in textures.iter() {
                 if alpha && !keyed_ids.contains(&id) {
@@ -329,6 +387,37 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         }
     }
     let mask = |id: u32| !small_lm.contains(&id) && is_bc4(id);
+    // Tangent-space normal maps (mean (127, 127, 255)) ride along in the draws' item lists: they are not surface colours.
+    let normal_ids: std::collections::HashSet<u32> = if std::env::var_os("FM2_NO_NORMAL_FILTER").is_some() {
+        Default::default()
+    } else {
+        let used: std::collections::BTreeSet<u32> = pending.iter().flat_map(|p| p.candidates.iter().map(|t| t.0)).collect();
+        used.into_iter()
+            .filter(|&id| {
+                let Ok(b) = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))) else { return false };
+                let u = |o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+                let (h, w) = (u(12), u(16));
+                let mut rgba = vec![0u8; w * h * 4];
+                match u(128) {
+                    71 | 77 => {
+                        let fmt = if u(128) == 71 { texpresso::Format::Bc1 } else { texpresso::Format::Bc3 };
+                        let Some(data) = b.get(148..148 + fmt.compressed_size(w, h)) else { return false };
+                        fmt.decompress(data, w, h, &mut rgba);
+                    }
+                    // Uncompressed RGBA8.
+                    28 => {
+                        let Some(data) = b.get(148..148 + w * h * 4) else { return false };
+                        rgba.copy_from_slice(data);
+                    }
+                    _ => return false,
+                }
+                let n = (w * h) as f32;
+                let m = |k: usize| rgba.chunks_exact(4).map(|p| p[k] as f32).sum::<f32>() / n;
+                (m(0) - 127.0).abs() < 14.0 && (m(1) - 127.0).abs() < 14.0 && m(2) > 235.0
+            })
+            .collect()
+    };
+    println!("[fm2] {} normal maps kept out of the colour lists", normal_ids.len());
 
     if std::env::var_os("FM2_DEBUG").is_some() {
         let mut hist: BTreeMap<String, usize> = BTreeMap::new();
@@ -366,6 +455,9 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     let (mut textured, mut bare) = (0usize, 0usize);
     let one_sided = std::env::var("FM2_NO_FLIP").is_ok();
     let mut flipped = 0usize;
+    let mut shader_uv_draws = 0usize;
+    let mut colour_fallback = 0usize;
+    let mut fallback_why: BTreeMap<String, usize> = BTreeMap::new();
     // Roads: draws that bind masks and no colour texture. Their colour is a pixel-shader constant (`c_constant1`, the asphalt) modulated by
     // a fine grain mask; baked here into one small texture per (grain, colour). UNVERIFIED reading of the constants (see the handoff).
     let road_gain: f32 = std::env::var("FM2_ROAD_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
@@ -373,7 +465,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     let mut baked: HashMap<(u32, [u8; 3]), u32> = HashMap::new();
     let mut baked_new: Vec<u32> = Vec::new();
     for p in &pending {
-        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0);
+        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0) && !normal_ids.contains(&t.0);
         let has_colour = p.candidates.iter().filter(usable).any(|t| !mask(t.0));
         let masks: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).map(|t| t.0).collect();
         if has_colour || masks.is_empty() || std::env::var_os("FM2_NO_ROAD").is_some() {
@@ -434,7 +526,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         let mut made: HashMap<(u32, u32), u32> = HashMap::new();
         let mut made_new: Vec<u32> = Vec::new();
         for p in &pending {
-            let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0);
+            let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0) && !normal_ids.contains(&t.0);
             let ordered: Vec<(u32, bool)> = p.candidates.iter().filter(usable).map(|t| (t.0, mask(t.0))).collect();
             let size = |id: u32| {
                 let b = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).unwrap_or_default();
@@ -516,7 +608,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     let mut dark_ids: Vec<Option<(u32, u32)>> = Vec::with_capacity(pending.len());
     let mut dark_new: Vec<u32> = Vec::new();
     for (pi_dark, p) in pending.iter().enumerate() {
-        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0);
+        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0) && !normal_ids.contains(&t.0);
         let cols: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| !mask(t.0)).map(|t| t.0).collect();
         let mask_ids: Vec<u32> = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).map(|t| t.0).collect();
         // The base: the draw's one colour texture, or the baked road. The wear mask: the largest mask (>= 512x512; a small square
@@ -632,8 +724,10 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 println!("[fm2] wedge d {cl:.0} cos {cos:.3} model {} tris {} tex {:?} lum {lum:?} at {:.0},{:.0},{:.0}", p.model, p.indices.len() / 3, p.candidates, c[0] + o[0], c[1] + o[1], c[2] + o[2]);
             }
         }
-        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0);
-        let colours: Vec<(u32, u32)> = p.candidates.iter().filter(usable).filter(|t| !mask(t.0)).map(|t| (t.0, t.1)).collect();
+        let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0) && !normal_ids.contains(&t.0);
+        // A texture the draw's pixel shader samples as a cube map is an environment map: neither a colour nor a mask.
+        let cube = |id: u32| p.candidates.iter().enumerate().any(|(k, c)| c.0 == id && p.cand_slots.get(k).and_then(|s| p.resolved.get(s)).is_some_and(|u| u.is_empty()));
+        let colours: Vec<(u32, u32)> = p.candidates.iter().filter(usable).filter(|t| !mask(t.0) && !cube(t.0)).map(|t| (t.0, t.1)).collect();
         let masks: Vec<(u32, u32)> = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).map(|t| (t.0, t.1)).collect();
         let tex = |(id, flags): (u32, u32)| json!({"id": id, "flags": flags, "file": format!("textures/{id:08x}.dds"), "word": textures[&id].1});
         // Two colour textures and one single-channel mask: FH1's two-way terrain blend (h_blnd2_ao: A, B, splat mask in slots 0, 1,
@@ -672,6 +766,12 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             *patterns.entry(pat).or_default() += 1;
         }
         let (mut colours, mut masks) = (colours, masks);
+        // Textures bound to samplers the shader reads a surface uv through come first: the item list can also carry textures of samplers the
+        // colour path does not use (the shadow-map slots hold placeholders).
+        {
+            let resolved_colour = |id: u32| p.candidates.iter().enumerate().filter(|(_, c)| c.0 == id).any(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)).is_some_and(|u| !u.is_empty()));
+            colours.sort_by_key(|c| !resolved_colour(c.0));
+        }
         let sprite = sprite_ids[pi];
         if let Some(sid) = sprite {
             colours = vec![(sid, 4)];
@@ -766,9 +866,52 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         b.positions.extend_from_slice(&p.positions);
         b.normals.extend(normals);
         // Sprite cards map their sheet once (x1), not tiled.
-        b.uvs[0].extend_from_slice(if sprite.is_some() { &p.raw } else { &p.uv });
+        // The texture coordinates the draw's shaders feed the colour / mask samplers (`fm2_uv`), when they resolved; else the old guess.
+        let slot_uv = |id: u32| p.candidates.iter().enumerate().filter(|(_, c)| c.0 == id).find_map(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)).filter(|u| !u.is_empty()));
+        // Sprite cards sample their sheet (a mask) with the first resolved coordinate; wear blends keep their base colour's and mask's.
+        // A baked road (colour from shader constants) tiles with its grain mask's coordinate: the first resolved mask that is not the wear streak.
+        let wear_id = dark_ids[pi].map(|d| d.1);
+        let grain_uv = || p.candidates.iter().filter(|c| mask(c.0) && Some(c.0) != wear_id).find_map(|c| slot_uv(c.0));
+        let colour_uv = if sprite.is_some() { p.resolved.values().next() } else { colours.first().and_then(|c| slot_uv(c.0)).or_else(|| if colours.first().is_some_and(|c| p.candidates.iter().any(|x| x.0 == c.0)) { None } else { grain_uv() }) };
+        // A baked road whose grain coordinate the shader builds from world position (through per-view constants the files do not carry): lay the
+        // grain out in world metres, `FM2_GRAIN_M` per repeat (default 2.5; `FM2_NO_PLANAR_GRAIN=1` keeps the old x32 guess).
+        let planar_grain: Option<Vec<[f32; 2]>> = (colour_uv.is_none()
+            && sprite.is_none()
+            && colours.first().is_some_and(|c| c.0 >= 0xFFFF_2000)
+            && p.candidates.iter().any(|c| mask(c.0) && Some(c.0) != wear_id)
+            && std::env::var_os("FM2_NO_PLANAR_GRAIN").is_none())
+        .then(|| {
+            let m: f32 = std::env::var("FM2_GRAIN_M").ok().and_then(|v| v.parse().ok()).unwrap_or(2.5);
+            p.positions.iter().map(|q| [q[0] / m, q[2] / m]).collect()
+        });
+        let colour_uv = colour_uv.or(planar_grain.as_ref());
+        let mask_uv = if blend { masks.first().and_then(|m| slot_uv(m.0)) } else { None };
+        shader_uv_draws += colour_uv.is_some() as usize;
+        // A baked road with no grain mask is one flat colour: its coordinate does not matter.
+        let flat_road = colours.first().is_some_and(|c| c.0 >= 0xFFFF_2000) && !p.candidates.iter().any(|c| mask(c.0) && Some(c.0) != wear_id);
+        // Runtime textures (PVS flags 1) of at most 32x32 are placeholders the game fills in at run time (reflection probes): no real colour.
+        let placeholder = !colours.is_empty()
+            && colours.iter().all(|c| {
+                p.candidates.iter().any(|x| x.0 == c.0 && x.1 == 1)
+                    && std::fs::read(dir.join("textures").join(format!("{:08x}.dds", c.0))).is_ok_and(|b| {
+                        let u = |o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+                        u(12) * u(16) <= 32 * 32
+                    })
+            });
+        if colour_uv.is_none() && sprite.is_none() && !colours.is_empty() && !flat_road && !placeholder {
+            colour_fallback += 1;
+            if std::env::var_os("FM2_UV_FALLBACK").is_some() {
+                let slots: Vec<usize> = colours.iter().flat_map(|c| p.candidates.iter().enumerate().filter(|(_, x)| x.0 == c.0).filter_map(|(k, _)| p.cand_slots.get(k).copied()).collect::<Vec<_>>()).collect();
+                let why = if slots.is_empty() { if sprite.is_some() { "sprite" } else if dark_ids[pi].is_some() { "wear blend over a baked road / asphalt" } else { "other synthetic colour" } } else if p.resolved.is_empty() { "nothing resolved" } else { "other samplers resolved, not the colour" };
+                if std::env::var("FM2_UV_MODEL").ok().and_then(|v| v.parse::<usize>().ok()) == Some(p.model) {
+                    println!("[fm2] uv model {}: colour slots {slots:?} resolved {:?} cand_slots {:?} cands {:?}", p.model, p.resolved.keys().collect::<Vec<_>>(), p.cand_slots, p.candidates);
+                }
+                *fallback_why.entry(format!("{why}; model {}", if slots.is_empty() { 0 } else { p.model })).or_default() += 1;
+            }
+        }
+        b.uvs[0].extend_from_slice(colour_uv.unwrap_or(if sprite.is_some() { &p.raw } else { &p.uv }));
         if blend {
-            b.uvs[1].extend_from_slice(p.mask_raw.as_ref().unwrap_or(&p.raw));
+            b.uvs[1].extend_from_slice(mask_uv.or(p.mask_raw.as_ref()).unwrap_or(&p.raw));
             if attrs & ATTR_UV2 != 0 {
                 b.uvs[2].extend_from_slice(&p.lm_uv);
             }
@@ -799,6 +942,13 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             b.indices.extend(p.indices.chunks_exact(3).flat_map(|t| [t[0] + base, t[2] + base, t[1] + base]));
         }
     }
+    if !fallback_why.is_empty() {
+        let mut v: Vec<_> = fallback_why.iter().collect();
+        v.sort_by_key(|x| std::cmp::Reverse(*x.1));
+        for (k, n) in v.iter().take(25) {
+            println!("[fm2] uv fallback {n}: {k}");
+        }
+    }
     if !patterns.is_empty() {
         let mut v: Vec<_> = patterns.iter().collect();
         v.sort_by_key(|x| std::cmp::Reverse(*x.1));
@@ -823,7 +973,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index_json)?)?;
     std::fs::write(dir.join("materials.json"), serde_json::to_vec(&materials)?)?;
     println!(
-        "[fm2] {}: {flipped} draws rewound, {textured} draws ({blends} terrain blends, {bare} lightmap-only: flat grey), {} materials, {} textures, {} tiles",
+        "[fm2] {}: {shader_uv_draws} draws with shader-derived colour uv ({colour_fallback} coloured draws still on the x32 guess), {flipped} draws rewound, {textured} draws ({blends} terrain blends, {bare} lightmap-only: flat grey), {} materials, {} textures, {} tiles",
         src.name,
         materials.len(),
         textures.len(),
@@ -980,4 +1130,40 @@ fn texture_mean(path: &Path) -> Option<f32> {
     let mut rgba = vec![0u8; w * h * 4];
     fmt.decompress(dds.get(148..148 + fmt.compressed_size(w, h))?, w, h, &mut rgba);
     Some(rgba.chunks_exact(4).map(|p| (p[0] as u32 + p[1] as u32 + p[2] as u32) as f32 / 3.0).sum::<f32>() / (w * h) as f32)
+}
+
+/// Cuts the sub-rectangle `[su, sv, ou, ov]` (fractions of the texture) out of a BC1 / BC2 / BC3 / RGBA8 DDS into a new texture.
+fn crop_atlas(path: &Path, rect: [f32; 4]) -> Option<crate::textures::Converted> {
+    let dds = std::fs::read(path).ok()?;
+    let u = |o: usize| u32::from_le_bytes(dds.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+    let (h, w) = (u(12), u(16));
+    let mut rgba = vec![0u8; w * h * 4];
+    match u(128) {
+        71 | 74 | 77 => {
+            let fmt = match u(128) {
+                71 => texpresso::Format::Bc1,
+                74 => texpresso::Format::Bc2,
+                _ => texpresso::Format::Bc3,
+            };
+            fmt.decompress(dds.get(148..148 + fmt.compressed_size(w, h))?, w, h, &mut rgba);
+        }
+        28 => rgba.copy_from_slice(dds.get(148..148 + w * h * 4)?),
+        _ => return None,
+    }
+    let x0 = ((rect[2].clamp(0.0, 1.0)) * w as f32).round() as usize;
+    let y0 = ((rect[3].clamp(0.0, 1.0)) * h as f32).round() as usize;
+    let cw = ((rect[0] * w as f32).round() as usize).clamp(1, w.saturating_sub(x0).max(1));
+    let ch = ((rect[1] * h as f32).round() as usize).clamp(1, h.saturating_sub(y0).max(1));
+    if cw < 2 || ch < 2 || (cw == w && ch == h) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(cw * ch * 4);
+    for y in 0..ch {
+        let row = (y0 + y).min(h - 1) * w;
+        for x in 0..cw {
+            let o = (row + (x0 + x).min(w - 1)) * 4;
+            out.extend_from_slice(&rgba[o..o + 4]);
+        }
+    }
+    crate::textures::rgba_to_dds(out, cw as u32, ch as u32).ok()
 }

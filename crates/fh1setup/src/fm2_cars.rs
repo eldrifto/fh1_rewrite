@@ -23,7 +23,7 @@ use serde_json::{json, Map, Value};
 use fh1_formats::carbin_fm2::{self, Part};
 use fh1_formats::zip::Archive;
 
-type Row = Map<String, Value>;
+pub(crate) type Row = Map<String, Value>;
 
 pub(crate) fn cars(disc: &Path, private: &Path, out: &Path) -> Result<()> {
     let db = Connection::open_with_flags(disc.join("media/db/gamedb.slt"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -111,16 +111,16 @@ struct Built {
 }
 
 /// An FH1 car whose wheels and `physics.json` another game's car borrows.
-struct WheelDonor {
-    dir: PathBuf,
-    media: String,
-    mass: f64,
-    drive: i64,
-    year: f64,
+pub(crate) struct WheelDonor {
+    pub(crate) dir: PathBuf,
+    pub(crate) media: String,
+    pub(crate) mass: f64,
+    pub(crate) drive: i64,
+    pub(crate) year: f64,
 }
 
 impl WheelDonor {
-    fn load_all(private: &Path) -> Vec<WheelDonor> {
+    pub(crate) fn load_all(private: &Path) -> Vec<WheelDonor> {
         let mut out = Vec::new();
         for e in std::fs::read_dir(private.join("cars")).into_iter().flatten().flatten() {
             let dir = e.path();
@@ -140,7 +140,7 @@ impl WheelDonor {
     }
 }
 
-fn pick<'a>(donors: &'a [WheelDonor], mass: f64, drive: i64, year: f64) -> &'a WheelDonor {
+pub(crate) fn pick<'a>(donors: &'a [WheelDonor], mass: f64, drive: i64, year: f64) -> &'a WheelDonor {
     donors
         .iter()
         .min_by(|a, b| {
@@ -150,11 +150,11 @@ fn pick<'a>(donors: &'a [WheelDonor], mass: f64, drive: i64, year: f64) -> &'a W
         .unwrap()
 }
 
-fn f(v: &Value, k: &str) -> f64 {
+pub(crate) fn f(v: &Value, k: &str) -> f64 {
     v[k].as_f64().unwrap_or(0.0)
 }
 
-fn rf_(r: &Row, k: &str) -> f64 {
+pub(crate) fn rf_(r: &Row, k: &str) -> f64 {
     r.get(k).and_then(Value::as_f64).unwrap_or(0.0)
 }
 
@@ -706,7 +706,7 @@ fn stock_parts<'a>(parts: &'a [Part], kit: &[(&'static str, char)]) -> Vec<&'a P
         .collect()
 }
 
-fn signed_volume(parts: &[&Part]) -> f64 {
+pub(crate) fn signed_volume(parts: &[&Part]) -> f64 {
     let mut v = 0.0;
     for p in parts {
         for r in p.runs.iter().filter(|r| r.lod == 1) {
@@ -719,13 +719,13 @@ fn signed_volume(parts: &[&Part]) -> f64 {
     v
 }
 
-type Colour = [f32; 3];
-const PALETTE: [Colour; 8] = [
+pub(crate) type Colour = [f32; 3];
+pub(crate) const PALETTE: [Colour; 8] = [
     [0.55, 0.03, 0.04], [0.04, 0.12, 0.45], [0.65, 0.65, 0.68], [0.02, 0.02, 0.025],
     [0.85, 0.82, 0.78], [0.05, 0.30, 0.12], [0.80, 0.45, 0.05], [0.30, 0.30, 0.33],
 ];
 
-fn paint_rgb(c: Colour) -> u32 {
+pub(crate) fn paint_rgb(c: Colour) -> u32 {
     let b = |x: f32| (x.powf(1.0 / 2.2) * 255.0).round() as u32;
     (b(c[0]) << 16) | (b(c[1]) << 8) | b(c[2])
 }
@@ -756,27 +756,27 @@ fn material_look(name: &str, paint: Colour, metallic: bool) -> ([f32; 4], f32, f
 // glTF writer
 
 #[derive(Default)]
-struct Gltf {
-    bin: Vec<u8>,
-    views: Vec<Value>,
-    accessors: Vec<Value>,
-    meshes: Vec<Value>,
-    nodes: Vec<Value>,
-    materials: Vec<Value>,
-    textures: Vec<Value>,
-    images: Vec<Value>,
-    samplers: Vec<Value>,
-    mat_cache: HashMap<String, usize>,
+pub(crate) struct Gltf {
+    pub(crate) bin: Vec<u8>,
+    pub(crate) views: Vec<Value>,
+    pub(crate) accessors: Vec<Value>,
+    pub(crate) meshes: Vec<Value>,
+    pub(crate) nodes: Vec<Value>,
+    pub(crate) materials: Vec<Value>,
+    pub(crate) textures: Vec<Value>,
+    pub(crate) images: Vec<Value>,
+    pub(crate) samplers: Vec<Value>,
+    pub(crate) mat_cache: HashMap<String, usize>,
     /// Material name -> texture index (`add_texture`).
-    mat_texture: HashMap<String, usize>,
-    paint_metallic: bool,
+    pub(crate) mat_texture: HashMap<String, usize>,
+    pub(crate) paint_metallic: bool,
     /// Materials drawn alpha-masked (cut-out textures).
-    cutout: std::collections::HashSet<String>,
-    triangles: usize,
+    pub(crate) cutout: std::collections::HashSet<String>,
+    pub(crate) triangles: usize,
 }
 
 impl Gltf {
-    fn view(&mut self, data: &[u8], target: Option<u64>, stride: Option<u64>) -> usize {
+    pub(crate) fn view(&mut self, data: &[u8], target: Option<u64>, stride: Option<u64>) -> usize {
         while self.bin.len() % 4 != 0 {
             self.bin.push(0);
         }
@@ -792,7 +792,7 @@ impl Gltf {
         self.views.len() - 1
     }
 
-    fn accessor(&mut self, view: usize, comp: u64, count: usize, ty: &str, minmax: Option<([f32; 3], [f32; 3])>) -> usize {
+    pub(crate) fn accessor(&mut self, view: usize, comp: u64, count: usize, ty: &str, minmax: Option<([f32; 3], [f32; 3])>) -> usize {
         let mut a = json!({"bufferView": view, "componentType": comp, "count": count, "type": ty});
         if let Some((mn, mx)) = minmax {
             a["min"] = json!(mn);
@@ -802,7 +802,7 @@ impl Gltf {
         self.accessors.len() - 1
     }
 
-    fn add_texture(&mut self, uri: &str) -> usize {
+    pub(crate) fn add_texture(&mut self, uri: &str) -> usize {
         self.images.push(json!({"uri": uri}));
         // An explicit sampler: linear magnification and trilinear minification, repeating (tread and decal uv leave 0..1). Without one the
         // engine samples the atlas with the default, which blocks up thin livery lines when magnified.
@@ -813,12 +813,12 @@ impl Gltf {
         self.textures.len() - 1
     }
 
-    fn node(&mut self, n: Value) -> usize {
+    pub(crate) fn node(&mut self, n: Value) -> usize {
         self.nodes.push(n);
         self.nodes.len() - 1
     }
 
-    fn material(&mut self, name: &str, paint: Colour) -> usize {
+    pub(crate) fn material(&mut self, name: &str, paint: Colour) -> usize {
         if let Some(&i) = self.mat_cache.get(name) {
             return i;
         }
@@ -844,12 +844,12 @@ impl Gltf {
     }
 
     /// One body part -> a mesh + node in world space (centre added), LOD1 only, normals from the triangles.
-    fn part(&mut self, p: &Part, c: [f32; 3], flip: bool, paint: Colour, bmin: &mut [f32; 3], bmax: &mut [f32; 3]) -> Option<usize> {
+    pub(crate) fn part(&mut self, p: &Part, c: [f32; 3], flip: bool, paint: Colour, bmin: &mut [f32; 3], bmax: &mut [f32; 3]) -> Option<usize> {
         let mesh = self.part_mesh(p, c, flip, paint, bmin, bmax)?;
         Some(self.node(json!({"name": p.name, "mesh": mesh})))
     }
 
-    fn part_mesh(&mut self, p: &Part, c: [f32; 3], flip: bool, paint: Colour, bmin: &mut [f32; 3], bmax: &mut [f32; 3]) -> Option<usize> {
+    pub(crate) fn part_mesh(&mut self, p: &Part, c: [f32; 3], flip: bool, paint: Colour, bmin: &mut [f32; 3], bmax: &mut [f32; 3]) -> Option<usize> {
         let runs: Vec<_> = p.runs.iter().filter(|r| r.lod == 1 && !r.indices.is_empty()).collect();
         if runs.is_empty() {
             return None;
@@ -917,7 +917,7 @@ impl Gltf {
         Some(self.meshes.len() - 1)
     }
 
-    fn write(mut self, dir: &Path, root: usize) -> Result<()> {
+    pub(crate) fn write(mut self, dir: &Path, root: usize) -> Result<()> {
         let mut g = json!({
             "asset": {"version": "2.0", "generator": "fh1setup import-fm2"},
             "scene": 0,
@@ -945,7 +945,7 @@ impl Gltf {
 }
 
 /// Copies meshes (with their accessors, materials, textures and image files) out of a donor glTF.
-struct Copier {
+pub(crate) struct Copier {
     from: PathBuf,
     to: PathBuf,
     views: HashMap<usize, usize>,
@@ -956,7 +956,7 @@ struct Copier {
 }
 
 impl Copier {
-    fn new(from: &Path, to: &Path) -> Self {
+    pub(crate) fn new(from: &Path, to: &Path) -> Self {
         Self { from: from.to_owned(), to: to.to_owned(), views: HashMap::new(), accessors: HashMap::new(), materials: HashMap::new(), textures: HashMap::new(), images: HashMap::new() }
     }
 
@@ -1033,7 +1033,7 @@ impl Copier {
         Ok(g.materials.len() - 1)
     }
 
-    fn mesh(&mut self, g: &mut Gltf, d: &Value, bin: &[u8], i: usize) -> Result<usize> {
+    pub(crate) fn mesh(&mut self, g: &mut Gltf, d: &Value, bin: &[u8], i: usize) -> Result<usize> {
         let mut m = d["meshes"][i].clone();
         for p in m["primitives"].as_array_mut().into_iter().flatten() {
             for (_, a) in p["attributes"].as_object_mut().into_iter().flatten() {

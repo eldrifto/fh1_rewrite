@@ -7,6 +7,7 @@ pub mod camera;
 pub mod carbin;
 pub mod carbin_fm2;
 pub mod crowd;
+pub mod fm1;
 pub mod fm2;
 pub mod fxobj;
 pub mod granny;

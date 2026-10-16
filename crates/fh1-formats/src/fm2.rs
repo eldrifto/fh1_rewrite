@@ -43,6 +43,8 @@ pub struct Pvs {
     pub textures: Vec<Texture>,
     /// Per model number: its PVS texture indices.
     pub models: Vec<Vec<u32>>,
+    /// Per model number: the 12 words after its texture list (three vec4s: `c_uvAtlas`?) and the marker word after them.
+    pub model_extra: Vec<([u32; 12], u32)>,
 }
 
 /// Reads the texture table and the per-model texture lists of an FM2 `.pvs`.
@@ -70,6 +72,7 @@ pub fn parse_pvs(d: &[u8]) -> Result<Pvs> {
     let n = be(d, o).ok_or(Error::Truncated("pvs model count"))? as usize;
     o += 4;
     let mut models = Vec::with_capacity(n.min(1 << 16));
+    let mut model_extra = Vec::with_capacity(n.min(1 << 16));
     for _ in 0..n {
         let Some(k) = be(d, o) else { break };
         let k = k as usize;
@@ -82,10 +85,15 @@ pub fn parse_pvs(d: &[u8]) -> Result<Pvs> {
             items.push(be(d, o + 4 * j).ok_or(Error::Truncated("pvs model list"))?);
         }
         // 12 words of other data and one marker word (0x64 or 1.0f).
+        let mut extra = [0u32; 12];
+        for (j, e) in extra.iter_mut().enumerate() {
+            *e = be(d, o + 4 * k + 4 * j).unwrap_or(0);
+        }
+        model_extra.push((extra, be(d, o + 4 * k + 48).unwrap_or(0)));
         o += 4 * k + 52;
         models.push(items);
     }
-    Ok(Pvs { textures, models })
+    Ok(Pvs { textures, models, model_extra })
 }
 
 /// One draw: a triangle list over one vertex buffer.
@@ -104,6 +112,13 @@ pub struct Draw {
     /// The state-setting stream records seen since the previous draw (`0x05`, `0x08`, `0x0c`, `0x1d`: type and payload words), for decoding the
     /// cull mode and other render state.
     pub state: Vec<(u8, Vec<u32>)>,
+    /// End of this draw's vertex / index data in the `.gpu` section.
+    pub buffer_end: usize,
+    /// The pixel-shader container's `.data` offset (stream record `0x02` + 0x28) when the draw set one, and the model's draw group index of
+    /// that container (position among the PS containers) is derived by the caller.
+    pub ps_container: Option<usize>,
+    /// The pixel-shader container set before `ps_container` (a model can set two before a draw: the real shader, then a depth variant).
+    pub ps_alt: Option<usize>,
 }
 
 impl Draw {
@@ -233,6 +248,8 @@ fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
 #[derive(Debug, Default)]
 pub struct Model {
     pub draws: Vec<Draw>,
+    /// Where the vertex / index buffers end in `.gpu` (the shader tail starts here).
+    pub tail_start: usize,
     /// Draw records that could not be resolved to buffers (reason per draw).
     pub skipped: Vec<String>,
 }
@@ -261,6 +278,8 @@ pub fn parse_model(d: &[u8]) -> Result<Model> {
     let (mut vb, mut items): (Option<usize>, Vec<u32>) = (None, Vec::new());
     let mut constants: std::collections::BTreeMap<u32, [f32; 4]> = Default::default();
     let mut state: Vec<(u8, Vec<u32>)> = Vec::new();
+    let mut ps: Option<usize> = None;
+    let mut ps_prev: Option<usize> = None;
     let mut o = start;
     while o + 4 <= stream.len() {
         let (len, ty) = (stream[o + 1] as usize, stream[o + 2]);
@@ -271,6 +290,11 @@ pub fn parse_model(d: &[u8]) -> Result<Model> {
         match ty {
             // Draws after the first of a vertex buffer reuse its fetch constants (no new record).
             0x2e => vb = w(1).map(|v| v as usize),
+            // The pixel shader container of the following draws: its `.data` offset minus 0x28.
+            0x02 => {
+                ps_prev = ps;
+                ps = w(0).map(|v| v as usize + 0x28);
+            }
             0x2d => {
                 // A draw can carry several of these; the first one binds its pixel-shader samplers (a road draw: `[12, 13, 0, 1,
                 // 2, 3]` = two system textures (the shadow maps, items past the model's list) then lightmap + three colours), a
@@ -294,8 +318,11 @@ pub fn parse_model(d: &[u8]) -> Result<Model> {
             0x01 => {
                 let (count, key) = (w(1).unwrap_or(0) as usize, w(2).unwrap_or(0));
                 if let (Some(vo), true) = (vb, count > 0 && w(0) == Some(4)) {
-                    match build_draw(gpu, data, vo, count, key, std::mem::take(&mut items), constants.clone(), std::mem::take(&mut state)) {
-                        Ok(draw) => model.draws.push(draw),
+                    match build_draw(gpu, data, vo, count, key, std::mem::take(&mut items), constants.clone(), std::mem::take(&mut state), ps, ps_prev) {
+                        Ok(draw) => {
+                            model.tail_start = model.tail_start.max(draw.buffer_end);
+                            model.draws.push(draw)
+                        }
                         Err(why) => model.skipped.push(why),
                     }
                 } else {
@@ -309,7 +336,7 @@ pub fn parse_model(d: &[u8]) -> Result<Model> {
     Ok(model)
 }
 
-fn build_draw(gpu: &[u8], data: &[u8], vb: usize, count: usize, key: u32, items: Vec<u32>, constants: std::collections::BTreeMap<u32, [f32; 4]>, state: Vec<(u8, Vec<u32>)>) -> std::result::Result<Draw, String> {
+fn build_draw(gpu: &[u8], data: &[u8], vb: usize, count: usize, key: u32, items: Vec<u32>, constants: std::collections::BTreeMap<u32, [f32; 4]>, state: Vec<(u8, Vec<u32>)>, ps_container: Option<usize>, ps_alt: Option<usize>) -> std::result::Result<Draw, String> {
     let (stride, goff, size) = match (be(data, vb), be(data, vb + 8), be(data, vb + 12)) {
         (Some(a), Some(b), Some(c)) => (a as usize, b as usize, c as usize),
         _ => return Err("vertex record outside .data".into()),
@@ -336,7 +363,7 @@ fn build_draw(gpu: &[u8], data: &[u8], vb: usize, count: usize, key: u32, items:
             [f(0), f(1), f(2)]
         })
         .collect();
-    Ok(Draw { stride, positions, vertices, indices, items, constants, state })
+    Ok(Draw { stride, positions, vertices, indices, items, constants, state, buffer_end: (goff + size).max(ioff + count * 2), ps_container, ps_alt })
 }
 
 #[cfg(test)]
