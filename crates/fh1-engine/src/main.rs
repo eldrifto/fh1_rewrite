@@ -205,6 +205,11 @@ fn main() -> AppExit {
         t.rate_scale = 1.0;
         app.insert_resource(t);
     }
+    // FM2 circuits carry no post-chain inputs of their own, so they borrow Colorado's: its grading LUT is FH1's warm late-afternoon look, which
+    // tints FM2's neutral roads beige (2026-10-16 comparison with the original). A weaker LUT unless the user set one.
+    if track.id.starts_with("fm2/") && std::env::var_os("FH1_RM_LUT").is_none() {
+        std::env::set_var("FH1_RM_LUT", "0.3");
+    }
     // FH1's own post chain (bloom, adaptation, filmic, grading LUTs, vignette); neutral without the files.
     app.insert_resource(track::post_config(&assets, &track.id));
     app.insert_resource(camera::CameraData::load(&assets));
