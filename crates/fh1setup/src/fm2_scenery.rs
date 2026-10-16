@@ -793,6 +793,28 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             colours = vec![base, (d, 0)];
             masks = vec![(wm, 4)];
         }
+        // Two colours and two masks where one colour is tiled and the other spans the draw once (road shoulders: asphalt + a strip of edge
+        // concrete, blended by the strip's own mask uv): a blend of the tiled colour (A) and the strip (B) by the one-pass mask. The second mask
+        // (the asphalt grain) is dropped. `FM2_NO_STRIP_BLEND=1` keeps the old first-colour-only look.
+        if masks.len() == 2 && colours.len() == 2 && dark_ids[pi].is_none() && road_ids[pi].is_none() && std::env::var_os("FM2_NO_STRIP_BLEND").is_none() {
+            let span = |id: u32| {
+                let u = p.candidates.iter().enumerate().filter(|(_, c)| c.0 == id).find_map(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)))?;
+                let (lo, hi) = u.iter().fold((f32::MAX, f32::MIN), |a, t| (a.0.min(t[1]), a.1.max(t[1])));
+                (u.len() > 0).then_some(hi - lo)
+            };
+            let (s0, s1) = (span(colours[0].0), span(colours[1].0));
+            let one_pass = |s: Option<f32>| s.is_some_and(|v| v < 2.0);
+            let tiled = |s: Option<f32>| s.is_some_and(|v| v >= 4.0);
+            let strip_mask = masks.iter().copied().find(|m| span(m.0).is_some_and(|v| v < 2.0));
+            if let Some(sm) = strip_mask {
+                if tiled(s0) && one_pass(s1) {
+                    masks = vec![sm];
+                } else if tiled(s1) && one_pass(s0) {
+                    colours.swap(0, 1);
+                    masks = vec![sm];
+                }
+            }
+        }
         let blend = masks.len() == 1 && colours.len() >= 2 && std::env::var_os("FM2_NO_BLEND").is_none();
         // A decoded lightmap atlas tile that isn't used by the blend path (its shader shares the mask's uv, so the two
         // cannot be told apart yet). FM2_LIGHTMAPS=1 only (opt-in: the mapping is new).
