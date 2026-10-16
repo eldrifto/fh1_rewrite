@@ -460,6 +460,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     let mut fallback_why: BTreeMap<String, usize> = BTreeMap::new();
     // Roads: draws that bind masks and no colour texture. Their colour is a pixel-shader constant (`c_constant1`, the asphalt) modulated by
     // a fine grain mask; baked here into one small texture per (grain, colour). UNVERIFIED reading of the constants (see the handoff).
+    let road_tex_gain: f32 = std::env::var("FM2_ROAD_TEX_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let road_gain: f32 = std::env::var("FM2_ROAD_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(2.0);
     let mut road_ids: Vec<Option<(u32, u32)>> = Vec::with_capacity(pending.len());
     let mut baked: HashMap<(u32, [u8; 3]), u32> = HashMap::new();
@@ -501,6 +502,14 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             let mean = (grain_r.iter().map(|&v| v as f32).sum::<f32>() / grain_r.len() as f32).max(1.0);
             let mut px = Vec::with_capacity(w * h * 4);
             for &g in &grain_r {
+                // A black road constant (`c_constant1` < 0.05, Tsukuba / Suzuka / Silverstone): the shader lerps toward the constant only where the
+                // stone mask says so, otherwise the road is the grain texture itself, a mid-grey asphalt (`FM2_NO_ROAD_TEX=1` keeps the constant).
+                if grain.is_some() && c1.iter().all(|v| *v < 0.05) && std::env::var_os("FM2_NO_ROAD_TEX").is_none() {
+                    let v = ((g as f32 / 255.0) * road_tex_gain).clamp(0.0, 1.0);
+                    let b = (255.0 * v).round() as u8;
+                    px.extend_from_slice(&[b, b, b, 255]);
+                    continue;
+                }
                 let f = (1.0 + 0.6 * (g as f32 / mean - 1.0)).clamp(0.5, 1.6);
                 for k in 0..3 {
                     px.push((255.0 * (c1[k] * road_gain * f).clamp(0.0, 1.0).powf(1.0 / 2.2)).round() as u8);
