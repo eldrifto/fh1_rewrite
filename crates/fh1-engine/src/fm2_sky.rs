@@ -50,8 +50,8 @@ pub fn load(native_dir: &Path) -> Option<Fm2Sky> {
     for d in v["draws"].as_array()? {
         let positions: Vec<[f32; 3]> = d["positions"].as_array()?.iter().filter_map(|p| Some([p[0].as_f64()? as f32, p[1].as_f64()? as f32, p[2].as_f64()? as f32])).collect();
         let Some(file) = d["textures"].as_array().and_then(|t| t.first()).and_then(Value::as_u64) else { continue };
-        if positions.len() < 150 {
-            continue; // sun disc / glow cards
+        if positions.len() < 12 {
+            continue; // sun glow cards
         }
         let Some((dds, w, h)) = tex(file) else { continue };
         // The draws are sectors of one dome, each with its own panorama texture (square textures are the zenith cap, alpha-blended).
