@@ -4,7 +4,7 @@
 # Layout (crates/fh1-launcher/src/main.rs):
 #   FH1 Rewrite.exe            launcher: install wizard (FH1 required, FH2/FM4 optional) + Play
 #   bin\fh1-engine.exe         the game
-#   bin\fh1setup.exe           asset converter, built with --features fh2,fm4
+#   bin\fh1setup.exe           asset converter, built with --features fh2,fm4,fm3
 #   bin\extract-xiso.exe       ISO extraction (pinned XboxDev build, SHA-256 checked)
 #   bin\ffmpeg.exe             XMA decoding during setup + FMV playback in the game (pinned gyan.dev essentials build, SHA-256 checked)
 #   bin\*.dll                  VC++ runtime (app-local, Microsoft redistributable)
@@ -39,7 +39,7 @@ if (-not $NoBuild) {
     $keyFile = Join-Path $Dist "xex_key.txt"
     if (-not (Test-Path $keyFile)) { throw "dist\xex_key.txt missing (32 hex digits; never committed)" }
     $env:FH1_XEX_KEY_EMBED = (Get-Content $keyFile -Raw).Trim()
-    $cargoArgs = @("build", "--release", "-p", "fh1setup", "--features", "fh2,fm4", "-p", "fh1-launcher", "-p", "fh1-engine")
+    $cargoArgs = @("build", "--release", "-p", "fh1setup", "--features", "fh2,fm4,fm3", "-p", "fh1-launcher", "-p", "fh1-engine")
     # The maintainers' machine serialises builds through a local lock script; elsewhere plain cargo.
     if (Test-Path tools\cargo-locked.ps1) {
         & powershell -NoProfile -ExecutionPolicy Bypass -File tools\cargo-locked.ps1 @cargoArgs

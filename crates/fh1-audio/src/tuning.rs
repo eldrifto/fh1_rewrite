@@ -104,7 +104,7 @@ impl Curve {
         Curve { coeff: [0.0; 4], pts: [[0.0, v], [0.5, v], [1.0, v]] }
     }
 
-    fn parse(el: &El) -> Option<Curve> {
+    pub(crate) fn parse(el: &El) -> Option<Curve> {
         let c = el.child("PhysicsCoeff")?;
         let p = el.child("ThreePointCurve")?;
         let g = |e: &El, k| e.f(k).unwrap_or(0.0);
@@ -170,7 +170,7 @@ pub struct Dsp {
 }
 
 impl Dsp {
-    fn parse(el: &El) -> Dsp {
+    pub(crate) fn parse(el: &El) -> Dsp {
         let peq = |e: Option<&El>| {
             let e = e.filter(|e| e.attr("Active") != Some("0"))?;
             Some(Peq {
@@ -208,7 +208,7 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    fn parse(tuning: &str, ht: &El) -> Option<Emitter> {
+    pub(crate) fn parse(tuning: &str, ht: &El) -> Option<Emitter> {
         let bank = ht.attr("name")?.to_owned();
         if bank.eq_ignore_ascii_case("NA.fsb") {
             return None;
@@ -390,6 +390,38 @@ impl EngineExtras {
     }
 }
 
+/// One sample of a bank (`bank` = bank stem, `name` = sample name as in `banks/<bank>.json`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipRef {
+    pub bank: String,
+    pub name: String,
+}
+
+/// A tyre surface group's four layers (rolling, pre-skid, skid, high skid).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TyreRefs {
+    /// `OnRoad`, `Trackway`, `Brick`, `OffRoad`, `Grass`.
+    pub group: String,
+    pub roll: ClipRef,
+    pub pre_skid: ClipRef,
+    pub skid: ClipRef,
+    pub skid_high: ClipRef,
+}
+
+/// Per-car overrides of the shared (non-engine) samples the synth otherwise takes from FH1's `Tires` / `Wind` / `Transmissions` / `Turbos`
+/// banks by fixed sample name. Forza Motorsport 2 cars name their own banks and samples here (`install_fm2`); absent = FH1's.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SharedSounds {
+    pub tyres: Vec<TyreRefs>,
+    pub offroad_chassis: Option<ClipRef>,
+    pub wind: Option<ClipRef>,
+    pub whine: Option<ClipRef>,
+    pub turbo: Option<ClipRef>,
+    pub shift: Vec<ClipRef>,
+    pub blowoff: Option<ClipRef>,
+    pub blowoff_med: Option<ClipRef>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CarAudio {
     pub car: String,
@@ -410,6 +442,9 @@ pub struct CarAudio {
     /// Car-wide DSP + burble/backfire/shift data (empty in audio-1 installs).
     #[serde(default)]
     pub extras: EngineExtras,
+    /// Shared-sample overrides (None = FH1's banks by fixed name).
+    #[serde(default)]
+    pub shared: Option<SharedSounds>,
 }
 
 impl CarAudio {
@@ -491,6 +526,7 @@ impl CarAudio {
             exhaust,
             views,
             extras: et_ref.map(EngineExtras::parse).unwrap_or_default(),
+            shared: None,
         })
     }
 

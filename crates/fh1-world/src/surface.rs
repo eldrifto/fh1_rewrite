@@ -75,6 +75,23 @@ pub fn parse_surface_types(xml: &str) -> Result<Vec<Surface>> {
                 block_order.push(name.clone());
                 blocks.insert(name.clone(), (attr(&e, "Category")?, BTreeMap::new()));
             }
+            // Forza Motorsport 2: `<FileSettings>` holds the surface blocks directly (35, in index order, no list, no Category).
+            [root] if *root == "FileSettings" => {
+                block_order.push(name.clone());
+                blocks.insert(name.clone(), (None, BTreeMap::new()));
+            }
+            [root, surface, rest @ ..] if *root == "FileSettings" && blocks.contains_key(*surface) => {
+                let key = rest.iter().copied().chain([name.as_str()]).collect::<Vec<_>>().join("/");
+                let params = &mut blocks.get_mut(*surface).expect("block opened").1;
+                for a in e.attributes() {
+                    let a = a?;
+                    let k = AsRef::<str>::as_ref(&a.key);
+                    if let Ok(v) = a.normalized_value(XmlVersion::Implicit1_0)?.trim().parse::<f32>() {
+                        let full = if k == "value" { key.clone() } else { format!("{key}@{k}") };
+                        params.insert(full, v);
+                    }
+                }
+            }
             [_, "SurfaceTypes", surface, rest @ ..] => {
                 let key = rest.iter().copied().chain([name.as_str()]).collect::<Vec<_>>().join("/");
                 let params = &mut blocks.get_mut(*surface).expect("block opened").1;

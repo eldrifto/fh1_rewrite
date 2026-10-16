@@ -174,7 +174,7 @@ pub fn merge(disc1: &Path, disc2: Option<&Path>, work: &Path) -> Result<PathBuf>
 }
 
 /// `dir/name`, matching an existing child case-insensitively (FM4's Play Disc has `Media`, the packs `Media/DLCZips`).
-fn child_ci(dir: &Path, name: &str) -> PathBuf {
+pub(crate) fn child_ci(dir: &Path, name: &str) -> PathBuf {
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -184,7 +184,7 @@ fn child_ci(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or_else(|| dir.join(name))
 }
 
-fn sorted_names(dir: &Path) -> Result<Vec<String>> {
+pub(crate) fn sorted_names(dir: &Path) -> Result<Vec<String>> {
     let mut v: Vec<String> = std::fs::read_dir(dir)
         .with_context(|| dir.display().to_string())?
         .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
@@ -195,7 +195,7 @@ fn sorted_names(dir: &Path) -> Result<Vec<String>> {
 
 /// Remove a merged `media` folder without touching the discs: junctions / symlinks are removed as links, real folders
 /// only hold hard links and our own zips.
-fn clear(m: &Path) -> Result<()> {
+pub(crate) fn clear(m: &Path) -> Result<()> {
     for e in std::fs::read_dir(m).into_iter().flatten().flatten() {
         let p = e.path();
         let meta = p.symlink_metadata()?;
@@ -211,7 +211,7 @@ fn clear(m: &Path) -> Result<()> {
 }
 
 /// Hard link, or a copy when the link fails (another volume, FAT/exFAT).
-fn link_or_copy(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn link_or_copy(src: &Path, dst: &Path) -> Result<()> {
     if std::fs::hard_link(src, dst).is_err() {
         std::fs::copy(src, dst).with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
@@ -219,7 +219,7 @@ fn link_or_copy(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// A directory junction (Windows) / symlink to `src`; where that fails, a tree of hard links (copies).
-fn link_dir(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn link_dir(src: &Path, dst: &Path) -> Result<()> {
     let src = std::path::absolute(src)?;
     #[cfg(windows)]
     let linked = std::process::Command::new("cmd")

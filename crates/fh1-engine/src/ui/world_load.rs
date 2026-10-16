@@ -351,9 +351,9 @@ pub fn switch_world(world: &mut World) {
     world.insert_resource(PendingWorld { choice: Some(WorldChoice { track, car: None, mode, start: None }) });
 }
 
-/// Circuit maps (FM4 imports) start in Motorsport mode.
+/// Circuit maps (FM4 / FM3 imports) start in Motorsport mode.
 fn motorsport(track: &str) -> bool {
-    track.starts_with("fm4/")
+    crate::track::OPTIONAL_GAMES.iter().any(|g| g.circuits && track.strip_prefix(g.folder).is_some_and(|r| r.starts_with('/')))
 }
 
 /// Dev hook (X1c verify): `FH1_MAP_TOUR=fh2/anthem,fm4/alps_00,colorado` switches to each map in turn through the

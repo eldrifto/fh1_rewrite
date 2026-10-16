@@ -1183,6 +1183,11 @@ impl Scenery {
         if !fh1_remaster::static_world::on() {
             return None;
         }
+        // FM2: the P12 static-world draw path does not render the imported FM2 tiles yet (geometry and records register,
+        // but they never draw; only the ECS path, FH1_STATIC_WORLD=0, does). Keep FM2 on the ECS remaster path.
+        if self.dir.to_string_lossy().replace('\\', "/").contains("imported/fm2") {
+            return None;
+        }
         let a = self.aabbs.get(&mesh.id())?;
         let (c, he) = (Vec3::from(a.center), Vec3::from(a.half_extents));
         let desc = fh1_remaster::static_world::InstanceDesc {
@@ -1319,6 +1324,8 @@ impl Scenery {
                 info!("scenery: dropped {} empty mesh part(s) (no vertices); further ones are dropped silently", before - out.len());
             }
         }
+        // FM2 stays on the ECS path (the static-world draw path doesn't render its tiles yet): keep its real meshes.
+        let fm2_scenery = self.dir.to_string_lossy().replace('\\', "/").contains("imported/fm2");
         merge_parts(out)
             .into_iter()
             .map(|(mesh, m)| {
@@ -1326,7 +1333,7 @@ impl Scenery {
                 let aabb = mesh.compute_aabb();
                 // P12 static world (FH1_STATIC_WORLD=1): remaster scenery geometry packed into the GPU arena.
                 let flags = static_flags.get(&m.id()).copied();
-                let packed = flags.and_then(|f| fh1_remaster::static_world::pack_mesh(&mesh).map(|p| (p, f)));
+                let packed = (!fm2_scenery).then(|| flags.and_then(|f| fh1_remaster::static_world::pack_mesh(&mesh).map(|p| (p, f)))).flatten();
                 // Packed parts nobody draws as a Mesh3d: a placeholder asset instead of a second upload (dc's review).
                 // FH1_STATIC_KEEP_MESHES=1 = the real meshes (old).
                 let h = if packed.is_some() && !keep_mesh && !std::env::var("FH1_STATIC_KEEP_MESHES").is_ok_and(|v| v == "1") {

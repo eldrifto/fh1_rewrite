@@ -163,6 +163,11 @@ impl R<'_> {
     }
 }
 
+/// IEEE half -> f32 (shared with the carbin reader).
+pub fn half_to_f32_pub(h: u16) -> f32 {
+    half_to_f32(h)
+}
+
 fn half_to_f32(h: u16) -> f32 {
     let s = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
     let e = ((h >> 10) & 0x1F) as i32;

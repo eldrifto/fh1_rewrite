@@ -67,7 +67,7 @@ pub fn bank_stem(bank: &str) -> &str {
 }
 
 /// Every entry of a zip by lowercase file name.
-fn read_zip(path: &Path) -> Result<HashMap<String, Vec<u8>>> {
+pub(crate) fn read_zip(path: &Path) -> Result<HashMap<String, Vec<u8>>> {
     let mut ar = Archive::open(path).with_context(|| path.display().to_string())?;
     let entries = ar.entries.clone();
     let mut out = HashMap::new();
@@ -79,7 +79,7 @@ fn read_zip(path: &Path) -> Result<HashMap<String, Vec<u8>>> {
 }
 
 /// Finds `name` in `dir` ignoring case.
-fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn find_ci(dir: &Path, name: &str) -> Option<PathBuf> {
     std::fs::read_dir(dir)
         .ok()?
         .flatten()
