@@ -620,7 +620,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             keyed_ids.insert(id);
         }
     }
-    // Painted strips with no colour texture (the start-line chequer): a long thin opacity mask plus a long thin chequer mask (BC4, 8:1). The shader
+    // Painted strips with no colour texture (the start-line chequer): a long thin chequer mask (BC4, 8:1), sometimes with a second long thin opacity mask. The shader
     // builds the paint from the chequer mask; here the chequer, read as greyscale, is the colour of a plain opaque card on its own uv (the
     // opacity mask is nearly white inside the strip). `FM2_NO_CHECKER=1` keeps the old (dark) look.
     let mut checker_of: Vec<Option<(u32, u32)>> = Vec::with_capacity(pending.len());
@@ -639,7 +639,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             strips.dedup();
             strips.sort_unstable();
             strips.dedup();
-            if !no_colour || strips.len() != 2 || std::env::var_os("FM2_NO_CHECKER").is_some() {
+            if !no_colour || strips.is_empty() || strips.len() > 2 || std::env::var_os("FM2_NO_CHECKER").is_some() {
                 checker_of.push(None);
                 continue;
             }
@@ -654,7 +654,12 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 let m = rgba.chunks_exact(4).map(|q| q[0] as f32).sum::<f32>() / n;
                 (rgba.chunks_exact(4).map(|q| (q[0] as f32 - m).powi(2)).sum::<f32>() / n).sqrt()
             };
-            let src = if spread(strips[0]) >= spread(strips[1]) { strips[0] } else { strips[1] };
+            let src = strips.iter().copied().max_by(|&a, &b| spread(a).total_cmp(&spread(b))).unwrap_or(strips[0]);
+            // A single strip counts only when it really is a chequer (a wide spread of values), not a soft opacity ramp.
+            if spread(src) < 45.0 {
+                checker_of.push(None);
+                continue;
+            }
             let id = *made.entry(src).or_insert_with(|| {
                 let id = 0xFFFF_5000 + made_new.len() as u32;
                 let made = (|| {
