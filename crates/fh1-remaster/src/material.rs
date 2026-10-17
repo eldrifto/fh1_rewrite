@@ -450,6 +450,8 @@ fn wgsl() -> String {
         // into the remaster's exposure; `FH1_RM_LM_LIGHT_*` tunes it.
         .replace("RM_LM_LIGHT_GAIN", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_GAIN", 3.0)))
         .replace("RM_LM_LIGHT_BIAS", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_BIAS", 0.5)))
+        .replace("RM_FM2_SHEEN_POW", &format!("{:.1}", wenv("FH1_RM_FM2_SHEEN_POW", 24.0)))
+        .replace("RM_FM2_SHEEN", &format!("{:.3}", wenv("FH1_RM_FM2_SHEEN", 0.15)))
         .replace("RM_LM_LIGHT_NOLM", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_NOLM", 0.75)))
         .replace("RM_LM_LIGHT_FLOOR", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_FLOOR", 0.12)))
         .replace("RM_LM_LIGHT_EXPOSURE", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_EXPOSURE", 1.0)))
@@ -461,6 +463,7 @@ const WGSL: &str = r#"
     mesh_functions,
     mesh_bindings::mesh,
     mesh_view_bindings::{view, globals},
+    mesh_view_bindings as view_bindings,
     view_transformations::position_world_to_clip,
     pbr_types,
     pbr_bindings,
@@ -1028,6 +1031,23 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
             col = col * max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR)) * RM_LM_LIGHT_EXPOSURE;
         } else {
             col = col * (lm * RM_LM_LIGHT_GAIN + RM_LM_LIGHT_BIAS);
+        }
+        // Sun sheen on flat, grey surfaces (asphalt): the unlit lightmap path has no specular, but FM2's roads glare toward a low sun.
+        // Blinn-Phong off the sun light(s), scaled by the lightmap so shaded road stays dull. `FH1_RM_FM2_SHEEN=0` turns it off.
+        if RM_FM2_SHEEN > 0.0 {
+            let n = normalize(pbr.world_normal);
+            let sat = max(max(col.r, col.g), col.b) - min(min(col.r, col.g), col.b);
+            if n.y > 0.9 && sat < 0.25 * max(max(col.r, col.g), 1e-4) + 0.02 {
+                let lit = smoothstep(0.35, 0.8, (lm.r + lm.g + lm.b) * 0.3333);
+                var spec = vec3<f32>(0.0);
+                for (var i = 0u; i < view_bindings::lights.n_directional_lights; i = i + 1u) {
+                    let light = &view_bindings::lights.directional_lights[i];
+                    let h = normalize((*light).direction_to_light + pbr.V);
+                    let nh = max(dot(n, h), 0.0);
+                    spec += (*light).color.rgb * pow(nh, RM_FM2_SHEEN_POW);
+                }
+                col += spec * lit * RM_FM2_SHEEN * view.exposure;
+            }
         }
     }
     if has(p, 9u) && (flags & FLAG_NIGHT_EMISSIVE) != 0u && p.night.y >= 0.5 {
