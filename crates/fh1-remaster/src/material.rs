@@ -450,8 +450,9 @@ fn wgsl() -> String {
         // into the remaster's exposure; `FH1_RM_LM_LIGHT_*` tunes it.
         .replace("RM_LM_LIGHT_GAIN", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_GAIN", 3.0)))
         .replace("RM_LM_LIGHT_BIAS", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_BIAS", 0.5)))
+        .replace("RM_FM2_DYN_SHADOW", &format!("{:.3}", wenv("FH1_RM_FM2_DYN_SHADOW", 0.6)))
         .replace("RM_FM2_SHEEN_POW", &format!("{:.1}", wenv("FH1_RM_FM2_SHEEN_POW", 24.0)))
-        .replace("RM_FM2_SHEEN", &format!("{:.3}", wenv("FH1_RM_FM2_SHEEN", 0.15)))
+        .replace("RM_FM2_SHEEN", &format!("{:.3}", wenv("FH1_RM_FM2_SHEEN", 0.1)))
         .replace("RM_LM_LIGHT_NOLM", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_NOLM", 0.75)))
         .replace("RM_LM_LIGHT_FLOOR", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_FLOOR", 0.12)))
         .replace("RM_LM_LIGHT_EXPOSURE", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_EXPOSURE", 1.0)))
@@ -464,6 +465,9 @@ const WGSL: &str = r#"
     mesh_bindings::mesh,
     mesh_view_bindings::{view, globals},
     mesh_view_bindings as view_bindings,
+    mesh_view_types,
+    mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT,
+    shadows,
     view_transformations::position_world_to_clip,
     pbr_types,
     pbr_bindings,
@@ -1034,6 +1038,26 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
         }
         // Sun sheen on flat, grey surfaces (asphalt): the unlit lightmap path has no specular, but FM2's roads glare toward a low sun.
         // Blinn-Phong off the sun light(s), scaled by the lightmap so shaded road stays dull. `FH1_RM_FM2_SHEEN=0` turns it off.
+        // Real-time sun shadows on top of the baked ones (the car, props the bake did not see): the lightmap already holds the static
+        // shadows, so the dynamic term only bites where the lightmap is bright. `FH1_RM_FM2_DYN_SHADOW=0` turns it off.
+        var sun_vis = 1.0;
+        if RM_FM2_DYN_SHADOW > 0.0 && (pbr.flags & MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u {
+            let view_z = dot(vec4<f32>(
+                view_bindings::view.view_from_world[0].z,
+                view_bindings::view.view_from_world[1].z,
+                view_bindings::view.view_from_world[2].z,
+                view_bindings::view.view_from_world[3].z
+            ), in.world_position);
+            let lit_lm = smoothstep(0.35, 0.75, (lm.r + lm.g + lm.b) * 0.3333);
+            for (var i = 0u; i < view_bindings::lights.n_directional_lights; i = i + 1u) {
+                if (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+                    let sh = shadows::fetch_directional_shadow(i, in.world_position, pbr.world_normal, view_z, in.position.xy);
+                    col = col * (1.0 - RM_FM2_DYN_SHADOW * lit_lm * (1.0 - sh));
+                    sun_vis = sh;
+                    break;
+                }
+            }
+        }
         if RM_FM2_SHEEN > 0.0 {
             let n = normalize(pbr.world_normal);
             let sat = max(max(col.r, col.g), col.b) - min(min(col.r, col.g), col.b);
@@ -1046,7 +1070,7 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
                     let nh = max(dot(n, h), 0.0);
                     spec += (*light).color.rgb * pow(nh, RM_FM2_SHEEN_POW);
                 }
-                col += spec * lit * RM_FM2_SHEEN * view.exposure;
+                col += spec * lit * sun_vis * RM_FM2_SHEEN * view.exposure;
             }
         }
     }
