@@ -456,7 +456,9 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     let mut patterns: BTreeMap<String, usize> = BTreeMap::new();
     let mut tiles: BTreeMap<(i32, i32), BTreeMap<(u32, u32, u32), Batch>> = BTreeMap::new();
     let (mut textured, mut bare) = (0usize, 0usize);
-    let one_sided = std::env::var("FM2_NO_FLIP").is_ok();
+    // The files' own winding is consistent (draws with a clear up / down majority are up-facing on every track), so it is kept. The old
+    // up-facing-majority flip turned gantries (their undersides face down) inside out: mirrored sign text, missing boards. `FM2_FLIP=1` brings it back.
+    let one_sided = std::env::var("FM2_FLIP").is_err();
     let mut flipped = 0usize;
     let mut shader_uv_draws = 0usize;
     let mut colour_fallback = 0usize;
