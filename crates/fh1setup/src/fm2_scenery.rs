@@ -619,9 +619,11 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         }
     }
     // Colour + wear mask (road strips with a separate mask uv): the mask's dark layer is the colour texture darkened (rubber).
-    let wear_dark: f32 = std::env::var("FM2_WEAR_DARK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.55);
+    let wear_dark: f32 = std::env::var("FM2_WEAR_DARK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.4);
     let mut dark_of: HashMap<u32, u32> = HashMap::new();
     let mut dark_ids: Vec<Option<(u32, u32)>> = Vec::with_capacity(pending.len());
+    // The base colour a wear blend darkens (the tiled one of a two-colour road draw; None = the draw's first colour).
+    let mut dark_base: Vec<Option<u32>> = Vec::with_capacity(pending.len());
     let mut dark_new: Vec<u32> = Vec::new();
     for (pi_dark, p) in pending.iter().enumerate() {
         let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0) && !normal_ids.contains(&t.0);
@@ -635,17 +637,30 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             u(12) * u(16)
         };
         let wear_mask = mask_ids.iter().copied().max_by_key(|&m| area(m)).filter(|&m| area(m) >= 512 * 512);
-        let base = if cols.len() == 1 { Some(cols[0]) } else if cols.is_empty() { road_ids[pi_dark].map(|r| r.0) } else { None };
+        // The uv extent of a colour's resolved coordinate (the wider axis): the tiled layer of a road spans many units, its one-pass overlay one.
+        let extent = |id: u32| {
+            let u = p.candidates.iter().enumerate().filter(|(_, c)| c.0 == id).find_map(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)))?;
+            let (lo, hi) = u.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |a, t| ([a.0[0].min(t[0]), a.0[1].min(t[1])], [a.1[0].max(t[0]), a.1[1].max(t[1])]));
+            (!u.is_empty()).then_some((hi[0] - lo[0]).max(hi[1] - lo[1]))
+        };
+        // Road shoulders list the tiled asphalt plus a one-pass overlay colour, with the streak mask and the grain: the streak darkens the asphalt
+        // (`FM2_NO_ROAD_WEAR=1` keeps the overlay blend).
+        let road_pair = cols.len() == 2 && mask_ids.len() == 2 && std::env::var_os("FM2_NO_ROAD_WEAR").is_none();
+        let tiled = if road_pair { cols.iter().copied().find(|&c| extent(c).is_some_and(|v| v >= 2.0) && cols.iter().filter(|&&o| o != c).all(|&o| extent(o).is_some_and(|v| v < 1.5))) } else { None };
+        let base = if cols.len() == 1 { Some(cols[0]) } else if cols.is_empty() { road_ids[pi_dark].map(|r| r.0) } else { tiled };
         if sprite_ids[pi_dark].is_some() {
             dark_ids.push(None);
+            dark_base.push(None);
             continue;
         }
         let (Some(a), Some(wm)) = (base, wear_mask) else {
             dark_ids.push(None);
+            dark_base.push(None);
             continue;
         };
         if std::env::var_os("FM2_NO_WEAR").is_some() || (cols.len() == 1 && mask_ids.len() == 1 && p.mask_raw.is_none() && p.candidates.len() < 3) {
             dark_ids.push(None);
+            dark_base.push(None);
             continue;
         }
         let id = *dark_of.entry(a).or_insert_with(|| {
@@ -677,6 +692,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             id
         });
         dark_ids.push(Some((id, wm)));
+        dark_base.push(Some(a));
     }
     for id in dark_new {
         textures.insert(id, (false, 0x3F00));
@@ -803,7 +819,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         }
         if let Some((d, wm)) = dark_ids[pi] {
             // Wear blend: the colour (or the baked road) and its darkened copy, by the wear mask.
-            let base = colours.first().copied().or(road_ids[pi]).unwrap_or((ASPHALT, 0));
+            let base = colours.iter().copied().find(|c| dark_base[pi] == Some(c.0)).or(colours.first().copied()).or(road_ids[pi]).unwrap_or((ASPHALT, 0));
             colours = vec![base, (d, 0)];
             masks = vec![(wm, 4)];
         }
