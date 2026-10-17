@@ -620,6 +620,68 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             keyed_ids.insert(id);
         }
     }
+    // Painted strips with no colour texture (the start-line chequer): a long thin opacity mask plus a long thin chequer mask (BC4, 8:1). The shader
+    // builds the paint from the chequer mask; here the chequer, read as greyscale, is the colour of a plain opaque card on its own uv (the
+    // opacity mask is nearly white inside the strip). `FM2_NO_CHECKER=1` keeps the old (dark) look.
+    let mut checker_of: Vec<Option<(u32, u32)>> = Vec::with_capacity(pending.len());
+    {
+        let mut made: HashMap<u32, u32> = HashMap::new();
+        let mut made_new: Vec<u32> = Vec::new();
+        for p in &pending {
+            let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0) && !normal_ids.contains(&t.0);
+            let dims = |id: u32| {
+                let b = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).unwrap_or_default();
+                let u = |o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+                (u(16), u(12))
+            };
+            let no_colour = !p.candidates.iter().filter(usable).any(|c| !mask(c.0) && c.1 != 1);
+            let mut strips: Vec<u32> = p.candidates.iter().filter(usable).filter(|c| mask(c.0)).map(|c| c.0).filter(|&m| { let (w, h) = dims(m); h > 0 && w >= 8 * h && w >= 512 }).collect();
+            strips.dedup();
+            strips.sort_unstable();
+            strips.dedup();
+            if !no_colour || strips.len() != 2 || std::env::var_os("FM2_NO_CHECKER").is_some() {
+                checker_of.push(None);
+                continue;
+            }
+            // The chequer is the strip with the larger spread of values.
+            let spread = |id: u32| -> f32 {
+                let Ok(b) = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))) else { return 0.0 };
+                let (w, h) = dims(id);
+                let Some(data) = b.get(148..148 + texpresso::Format::Bc4.compressed_size(w, h)) else { return 0.0 };
+                let mut rgba = vec![0u8; w * h * 4];
+                texpresso::Format::Bc4.decompress(data, w, h, &mut rgba);
+                let n = (w * h) as f32;
+                let m = rgba.chunks_exact(4).map(|q| q[0] as f32).sum::<f32>() / n;
+                (rgba.chunks_exact(4).map(|q| (q[0] as f32 - m).powi(2)).sum::<f32>() / n).sqrt()
+            };
+            let src = if spread(strips[0]) >= spread(strips[1]) { strips[0] } else { strips[1] };
+            let id = *made.entry(src).or_insert_with(|| {
+                let id = 0xFFFF_5000 + made_new.len() as u32;
+                let made = (|| {
+                    let b = std::fs::read(dir.join("textures").join(format!("{src:08x}.dds"))).ok()?;
+                    let (w, h) = dims(src);
+                    let mut rgba = vec![0u8; w * h * 4];
+                    texpresso::Format::Bc4.decompress(b.get(148..148 + texpresso::Format::Bc4.compressed_size(w, h))?, w, h, &mut rgba);
+                    // The chequer's light squares peak below 255 (the shader scales them by a constant): stretch to white.
+                    let peak = rgba.chunks_exact(4).map(|q| q[0]).max().unwrap_or(255).max(1) as f32;
+                    for q in rgba.chunks_exact_mut(4) {
+                        let v = (q[0] as f32 * 255.0 / peak).min(255.0) as u8;
+                        (q[0], q[1], q[2], q[3]) = (v, v, v, 255);
+                    }
+                    crate::textures::rgba_to_dds(rgba, w as u32, h as u32).ok()
+                })();
+                if let Some(c) = made {
+                    let _ = std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds);
+                }
+                made_new.push(id);
+                id
+            });
+            checker_of.push(Some((id, src)));
+        }
+        for id in made_new {
+            textures.insert(id, (false, 0x3F00));
+        }
+    }
     // Colour + wear mask (road strips with a separate mask uv): the mask's dark layer is the colour texture darkened (rubber).
     let wear_dark: f32 = std::env::var("FM2_WEAR_DARK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.4);
     let mut dark_of: HashMap<u32, u32> = HashMap::new();
@@ -650,7 +712,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         let road_pair = cols.len() == 2 && mask_ids.len() == 2 && std::env::var_os("FM2_NO_ROAD_WEAR").is_none();
         let tiled = if road_pair { cols.iter().copied().find(|&c| extent(c).is_some_and(|v| v >= 2.0) && cols.iter().filter(|&&o| o != c).all(|&o| extent(o).is_some_and(|v| v < 1.5))) } else { None };
         let base = if cols.len() == 1 { Some(cols[0]) } else if cols.is_empty() { road_ids[pi_dark].map(|r| r.0) } else { tiled };
-        if sprite_ids[pi_dark].is_some() {
+        if sprite_ids[pi_dark].is_some() || checker_of[pi_dark].is_some() {
             dark_ids.push(None);
             dark_base.push(None);
             continue;
@@ -819,6 +881,10 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             colours = vec![(sid, 4)];
             masks = Vec::new();
         }
+        if let Some((cid, _)) = checker_of[pi] {
+            colours = vec![(cid, 0)];
+            masks = Vec::new();
+        }
         if let Some((d, wm)) = dark_ids[pi] {
             // Wear blend: the colour (or the baked road) and its darkened copy, by the wear mask.
             let base = colours.iter().copied().find(|c| dark_base[pi] == Some(c.0)).or(colours.first().copied()).or(road_ids[pi]).unwrap_or((ASPHALT, 0));
@@ -871,7 +937,9 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         let lm_used = (lightmaps_on && p.lm_uv.len() == p.positions.len())
             .then(|| p.lightmap.or(small))
             .flatten()
-            .filter(|(id, _, _)| textures.contains_key(id));
+            .filter(|(id, _, _)| textures.contains_key(id))
+            // The chequer card is lit like the road around it, not by the (dark) tile its draw binds.
+            .filter(|_| checker_of[pi].is_none());
         let (key, material_json, attrs) = if blend {
             let (a, b2, m) = (colours[0], colours[1], masks[0]);
             let mut ao = tex((WHITE, 0));
@@ -953,7 +1021,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         // A baked road (colour from shader constants) tiles with its grain mask's coordinate: the first resolved mask that is not the wear streak.
         let wear_id = dark_ids[pi].map(|d| d.1);
         let grain_uv = || p.candidates.iter().filter(|c| mask(c.0) && Some(c.0) != wear_id).find_map(|c| slot_uv(c.0));
-        let colour_uv = if sprite.is_some() { p.resolved.values().next() } else { colours.first().and_then(|c| slot_uv(c.0)).or_else(|| if colours.first().is_some_and(|c| p.candidates.iter().any(|x| x.0 == c.0)) { None } else { grain_uv() }) };
+        let colour_uv = if let Some((_, src)) = checker_of[pi] { slot_uv(src) } else if sprite.is_some() { p.resolved.values().next() } else { colours.first().and_then(|c| slot_uv(c.0)).or_else(|| if colours.first().is_some_and(|c| p.candidates.iter().any(|x| x.0 == c.0)) { None } else { grain_uv() }) };
         // A baked road whose grain coordinate the shader builds from world position (through per-view constants the files do not carry): lay the
         // grain out in world metres, `FM2_GRAIN_M` per repeat (default 2.5; `FM2_NO_PLANAR_GRAIN=1` keeps the old x32 guess).
         let planar_grain: Option<Vec<[f32; 2]>> = (colour_uv.is_none()
