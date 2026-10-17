@@ -817,6 +817,8 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             if let Some(i) = cand.filter(|&i| is_grey_texture(&dir.join("textures").join(format!("{:08x}.dds", colours[i].0)))) {
                 let m = colours.remove(i);
                 masks = vec![m];
+                // The shader lerps the item-order colours the other way round (mask white = the first listed layer): swap to the blend's A / B.
+                colours.swap(0, 1);
             }
         }
         // Two colours and two masks where one colour is tiled and the other spans the draw once (road shoulders: asphalt + a strip of edge
