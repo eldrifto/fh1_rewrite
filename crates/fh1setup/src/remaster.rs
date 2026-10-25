@@ -212,10 +212,15 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
         r.tex[role] = t["id"].as_u64().unwrap_or(0) as u32;
         // The .bix format word's sign byte: 0x3F = gamma RGB (fh1-render SceneryMaterials). Without a word: the
         // format rule (BC4/BC5 linear) is applied by the engine when the image loads.
-        let gamma = match t["word"].as_u64() {
+        let mut gamma = match t["word"].as_u64() {
             Some(w) => ((w >> 8) & 0x3F) == 0x3F,
             None => !matches!(role, N | NB),
         };
+        // FM2_RM_COLOUR_SRGB=1 (experiment): an FM2 map's colour layers (A / B / C) are uploaded as sRGB whatever the format word says (the patch-level
+        // shader check puts Sebring's and Sunset's roads closer to Xenia that way; STATUS.md 2026-10-26).
+        if fm2.is_some() && matches!(role, A | B | C) && std::env::var_os("FM2_RM_COLOUR_SRGB").is_some() {
+            gamma = true;
+        }
         if gamma {
             r.srgb |= 1 << role;
         }

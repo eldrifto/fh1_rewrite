@@ -453,3 +453,6 @@ Fits Xenia with the corrected lightmaps (0.045 vs 0.040). Twelve-track sum 14.22
 
 ## 2026-10-26 (5): Sunset road search
 `fm2_ps_run`: `PS_WHITE=<samplers>` probe option. Sunset's road found by painting (texture 261, model 79 `534d74061a777a9a`); no gamma choice fits on the draw average. Nothing added. Documented in STATUS.md.
+
+## 2026-10-26 (10): patch-level shader check and FM2_RM_COLOUR_SRGB
+Engine `FH1_SHOT_PROBE`, importer `FM2_PROBE_AT` / `FM2_PROBE_LERP`, `shader_eval_verts`; remaster `FM2_RM_COLOUR_SRGB` (off). Global colour sRGB: Laguna 3.12 -> 1.39, New York 0.76 -> 0.17; needs to be per family. Documented in STATUS.md.

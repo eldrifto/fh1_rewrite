@@ -723,6 +723,103 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             w.insert(dir.join("textures").join(format!("{id:08x}.dds")));
         }
     });
+    // FM2_PROBE_AT=x,y,z[;x,y,z...] (diagnostic; points from the engine's FH1_SHOT_PROBE): every draw with a triangle under the point (x, z inside,
+    // height within 1.5 m) has its pixel shader run at that exact spot (a virtual vertex: all uv sets and the lightmap uv interpolated in the triangle),
+    // with neutral light, for several sampler gamma choices; times the lightmap light there (lerp(dark, light, tile value), the map's fx_globals) that
+    // is the shader's lit value at the patch, to compare with the Xenia band (linear G).
+    if let Ok(spec) = std::env::var("FM2_PROBE_AT") {
+        let fx: serde_json::Value = [dir.join("tracks/fx_globals.json"), dir.parent().unwrap_or(&dir).join("tracks/fx_globals.json")].iter().find_map(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let col = |k: &str, d: f32| -> [f32; 3] { [0, 1, 2].map(|i| fx["globals"][k][i].as_f64().map_or(d, |x| x as f32)) };
+        let (mut dark, mut light) = (col("V2LightmapColor1", 0.0), col("V2LightmapColor2", 1.0));
+        // FM2_PROBE_LERP=dark_g,light_g: the map's lightmap colours when its fx_globals.json is not in the staging folder yet.
+        if let Some(v) = std::env::var("FM2_PROBE_LERP").ok().map(|s| s.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 2) {
+            (dark, light) = ([v[0]; 3], [v[1]; 3]);
+        }
+        let mut cache: HashMap<std::path::PathBuf, Option<(usize, usize, Vec<u8>)>> = HashMap::new();
+        for pt in spec.split(';') {
+            let q: Vec<f32> = pt.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if q.len() < 3 {
+                continue;
+            }
+            println!("[fm2] probe at {:.1},{:.1},{:.1} (lightmap colours dark {dark:.3?} light {light:.3?}):", q[0], q[1], q[2]);
+            for p in pending.iter_mut() {
+                // The triangle under the point and its barycentric weights.
+                let mut hit = None;
+                for t in p.indices.chunks_exact(3) {
+                    let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
+                    if a >= p.positions.len() || b >= p.positions.len() || c >= p.positions.len() {
+                        continue;
+                    }
+                    let (pa, pb, pc) = (p.positions[a], p.positions[b], p.positions[c]);
+                    let det = (pb[2] - pc[2]) * (pa[0] - pc[0]) + (pc[0] - pb[0]) * (pa[2] - pc[2]);
+                    if det.abs() < 1e-6 {
+                        continue;
+                    }
+                    let wa = ((pb[2] - pc[2]) * (q[0] - pc[0]) + (pc[0] - pb[0]) * (q[2] - pc[2])) / det;
+                    let wb = ((pc[2] - pa[2]) * (q[0] - pc[0]) + (pa[0] - pc[0]) * (q[2] - pc[2])) / det;
+                    let wc = 1.0 - wa - wb;
+                    if wa < -1e-4 || wb < -1e-4 || wc < -1e-4 {
+                        continue;
+                    }
+                    let y = wa * pa[1] + wb * pb[1] + wc * pc[1];
+                    if (y - q[1]).abs() < 1.5 {
+                        hit = Some(([a, b, c], [wa, wb, wc]));
+                        break;
+                    }
+                }
+                let Some((tri, w)) = hit else { continue };
+                let lerp2 = |v: &[[f32; 2]]| -> Option<[f32; 2]> {
+                    let (a, b, c) = (v.get(tri[0])?, v.get(tri[1])?, v.get(tri[2])?);
+                    Some([w[0] * a[0] + w[1] * b[0] + w[2] * c[0], w[0] * a[1] + w[1] * b[1] + w[2] * c[1]])
+                };
+                // The lightmap light at the point (bilinear in the cropped tile, clamped, as the engine samples it).
+                let lm = p.lightmap.and_then(|(id, _, _)| {
+                    let uv = lerp2(&p.lm_uv)?;
+                    let (w_, h_, px) = cache.entry(dir.join("textures").join(format!("{id:08x}.dds"))).or_insert_with_key(|k| decode_rgba(k)).as_ref()?;
+                    let (wt, ht) = (*w_, *h_);
+                    let fx = (uv[0].clamp(0.0, 1.0) * wt as f32 - 0.5).clamp(0.0, wt as f32 - 1.0);
+                    let fy = (uv[1].clamp(0.0, 1.0) * ht as f32 - 0.5).clamp(0.0, ht as f32 - 1.0);
+                    let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+                    let (x1, y1) = ((x0 + 1).min(wt - 1), (y0 + 1).min(ht - 1));
+                    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+                    let g = |x: usize, y: usize| px[(y * wt + x) * 4] as f32 / 255.0;
+                    Some((g(x0, y0) * (1.0 - tx) + g(x1, y0) * tx) * (1.0 - ty) + (g(x0, y1) * (1.0 - tx) + g(x1, y1) * tx) * ty)
+                });
+                // Virtual vertex at the end of every per-vertex list, evaluated, then removed.
+                let n = p.positions.len();
+                p.positions.push([q[0], q[1], q[2]]);
+                let lm_uv_v = lerp2(&p.lm_uv);
+                if let Some(v) = lm_uv_v {
+                    p.lm_uv.push(v);
+                }
+                let keys: Vec<usize> = p.resolved.keys().copied().collect();
+                let mut grown = Vec::new();
+                for k in keys {
+                    let v = p.resolved.get(&k).and_then(|u| (u.len() == n).then(|| lerp2(u)).flatten());
+                    if let (Some(v), Some(u)) = (v, p.resolved.get_mut(&k)) {
+                        u.push(v);
+                        grown.push(k);
+                    }
+                }
+                let mut row = Vec::new();
+                for (name, mask) in [("family", None), ("none", Some(0u32)), ("BC4", Some(BC4)), ("colours", Some(0x7FFF_FFFF)), ("all", Some(0xFFFF_FFFF))] {
+                    let v = shader_eval_verts(p, &dir.join("textures"), &mut cache, &[], &[], &[n], mask).and_then(|o| o.first().map(|x| x.1));
+                    let lit = v.zip(lm).map(|(o, l)| o[1] * (dark[1] + (light[1] - dark[1]) * l));
+                    row.push(format!("{name} {}", lit.map_or("-".into(), |x| format!("{x:.3}"))));
+                }
+                p.positions.pop();
+                if lm_uv_v.is_some() {
+                    p.lm_uv.pop();
+                }
+                for k in grown {
+                    if let Some(u) = p.resolved.get_mut(&k) {
+                        u.pop();
+                    }
+                }
+                println!("[fm2]   model {} ps_sig {:016x} cands {:?} lightmap {:?} -> lit G: {}", p.model, ps_sig(p), p.candidates.iter().map(|c| c.0).collect::<Vec<_>>(), lm.map(|l| (l * 1000.0).round() / 1000.0), row.join(" | "));
+            }
+        }
+    }
     // Off by default (`FM2_FAMILY_COLOUR=1` turns it on): measured over the twelve tracks it did not improve the match (STATUS.md, 2026-10-22).
     if bc4_srgb_on() && std::env::var_os("FM2_FAMILY_COLOUR").is_some() {
         let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
@@ -1875,6 +1972,31 @@ fn shader_albedo(p: &Pending, texdir: &Path, cache: &mut HashMap<std::path::Path
 
 /// `shader_albedo` with constant overrides and interpolator-register overrides (applied after the neutral defaults), averaged over up to `samples` vertices.
 fn shader_eval(p: &Pending, texdir: &Path, cache: &mut HashMap<std::path::PathBuf, Option<(usize, usize, Vec<u8>)>>, const_over: &[(u32, [f32; 4])], reg_over: &[(usize, [f32; 4])], samples: usize) -> Option<[f32; 3]> {
+    let n = p.positions.len();
+    let step = (n / samples.max(1)).max(1);
+    let verts: Vec<usize> = (0..n).step_by(step).collect();
+    let out = shader_eval_verts(p, texdir, cache, const_over, reg_over, &verts, None)?;
+    let (mut sum, mut cnt) = ([0.0f32; 3], 0);
+    for (_, o) in &out {
+        for k in 0..3 {
+            sum[k] += o[k];
+        }
+        cnt += 1;
+    }
+    (cnt > 0).then(|| sum.map(|x| (x / cnt as f32).clamp(0.0, 4.0)))
+}
+
+/// The pixel shader run once per listed vertex (neutral light as `shader_eval`), with an optional sampler gamma mask instead of the family's:
+/// (vertex, output rgb) for the vertices that were not killed. None when the shader cannot run.
+fn shader_eval_verts(
+    p: &Pending,
+    texdir: &Path,
+    cache: &mut HashMap<std::path::PathBuf, Option<(usize, usize, Vec<u8>)>>,
+    const_over: &[(u32, [f32; 4])],
+    reg_over: &[(usize, [f32; 4])],
+    verts: &[usize],
+    gmask_over: Option<u32>,
+) -> Option<Vec<(usize, [f32; 3])>> {
     use fh1_shaders::ps_cpu::{fog_register, Machine};
     let ps = p.ps_run.as_ref()?;
     let n = p.positions.len();
@@ -1882,7 +2004,7 @@ fn shader_eval(p: &Pending, texdir: &Path, cache: &mut HashMap<std::path::PathBu
         return None;
     }
     // Samplers decoded as sRGB (the family's table entry; with FM2_BC4_SRGB on and no entry: the BC4 rule), and placeholder samplers read white.
-    let gmask = family_gamma(p).unwrap_or(if bc4_srgb_on() { BC4 } else { 0 });
+    let gmask = gmask_over.unwrap_or_else(|| family_gamma(p).unwrap_or(if bc4_srgb_on() { BC4 } else { 0 }));
     // Item position -> its texture file, and the textures themselves.
     let mut tex_of_item: HashMap<usize, std::path::PathBuf> = HashMap::new();
     for (k, c) in p.candidates.iter().enumerate() {
@@ -1908,9 +2030,8 @@ fn shader_eval(p: &Pending, texdir: &Path, cache: &mut HashMap<std::path::PathBu
         consts.insert(*r, *v);
     }
     let fog = fog_register(&ps.words)?;
-    let step = (n / samples.max(1)).max(1);
-    let (mut sum, mut cnt) = ([0.0f32; 3], 0);
-    for v in (0..n).step_by(step) {
+    let mut out = Vec::new();
+    for &v in verts.iter().filter(|&&v| v < n) {
         let sampler_tex: HashMap<u32, &(usize, usize, Vec<u8>)> = ps
             .item_sampler
             .iter()
@@ -1955,12 +2076,9 @@ fn shader_eval(p: &Pending, texdir: &Path, cache: &mut HashMap<std::path::PathBu
         if m.killed {
             continue;
         }
-        for k in 0..3 {
-            sum[k] += m.out[k];
-        }
-        cnt += 1;
+        out.push((v, [m.out[0], m.out[1], m.out[2]]));
     }
-    (cnt > 0).then(|| sum.map(|x| (x / cnt as f32).clamp(0.0, 4.0)))
+    Some(out)
 }
 
 /// The game's specular term of a draw's pixel shader per unit of `GlobalSpecularLevel` and light colour, with the highlight at its peak (half vector

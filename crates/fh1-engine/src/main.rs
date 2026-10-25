@@ -422,7 +422,7 @@ fn main() -> AppExit {
         .add_systems(Update, objects::teleport.before(scenery::stream))
         .init_resource::<smash::PropCollision>()
         .add_systems(Update, (smash::update.after(scenery::stream), smash::test_drive))
-        .add_systems(Update, autotest);
+        .add_systems(Update, (autotest, shot_probe));
     // Mesh slabs (2026-10-08, 47's analysis of log 133825: the streaming hitches are bevy's allocate_and_free_meshes, which
     // regrows a slab by x1.5 from 1 MiB = a new buffer + a full copy each time the resident scenery set grows): start at
     // FH1_MESH_SLAB_MB (16; global, so every vertex layout's slab starts that big: watch vram_mb) and double.
@@ -829,6 +829,39 @@ fn autotest(mut commands: Commands, time: Res<Time<Real>>, mut done: Local<u8>, 
     } else if *done == 2 && t > at + 1.5 {
         exit.write(AppExit::Success);
         *done = 3;
+    }
+}
+
+/// `FH1_SHOT_PROBE=1` (with FH1_SHOT): at the screenshot time, logs the world points (collision ground hits) under a grid of
+/// points in the comparison bands of `data/work/cmp_bands.py` (left: x 8..30 %, y 78..94 %; right: x 66..78 %, y 78..88 %), so the
+/// importer can evaluate the draws' shaders at exactly those spots (`FM2_PROBE_AT`).
+fn shot_probe(time: Res<Time<Real>>, track: Res<Track>, cams: Query<(&Camera, &GlobalTransform), With<Camera3d>>, mut done: Local<bool>) {
+    if *done || std::env::var_os("FH1_SHOT_PROBE").is_none() {
+        return;
+    }
+    let at: f32 = std::env::var("FH1_SHOT_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(4.0);
+    if time.elapsed_secs() <= at {
+        return;
+    }
+    *done = true;
+    // The main 3D camera: the active one with the lowest order.
+    let Some((cam, gt)) = cams.iter().filter(|(c, _)| c.is_active).min_by_key(|(c, _)| c.order) else { return };
+    let Some(size) = cam.logical_viewport_size() else { return };
+    for (name, (x0, x1, y0, y1)) in [("left", (0.08f32, 0.30f32, 0.78f32, 0.94f32)), ("right", (0.66, 0.78, 0.78, 0.88))] {
+        let mut pts = Vec::new();
+        for i in 0..3 {
+            for j in 0..3 {
+                let s = Vec2::new(x0 + (x1 - x0) * (i as f32 + 0.5) / 3.0, y0 + (y1 - y0) * (j as f32 + 0.5) / 3.0) * size;
+                let Ok(ray) = cam.viewport_to_world(gt, s) else { continue };
+                if let Some(h) = track.ground.ray(ray.origin, *ray.direction, 500.0) {
+                    pts.push(h.point);
+                }
+            }
+        }
+        let n = pts.len().max(1) as f32;
+        let c = pts.iter().fold(Vec3::ZERO, |a, p| a + *p) / n;
+        let r = pts.iter().map(|p| p.distance(c)).fold(0.0f32, f32::max);
+        info!("shot probe {name}: centre {:.2},{:.2},{:.2} radius {:.2} ({} hits) points {:?}", c.x, c.y, c.z, r, pts.len(), pts.iter().map(|p| [p.x.round(), p.y.round(), p.z.round()]).collect::<Vec<_>>());
     }
 }
 
