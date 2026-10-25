@@ -429,3 +429,11 @@ Tile crop is correct; the strip's darkness is in the bake; the slab (f9fbef3a) i
 
 ## 2026-10-25 (20): comparison of interpreter setups
 `fm2_ps_run` and the importer's `shader_eval` agree; the lightmap-uv sweep in the scratch scripts is overridden by the mesh uvs, so their "lit max" numbers are real-lightmap values. Documented in STATUS.md. Nothing committed beyond notes.
+
+## 2026-10-26: FM2 lightmap tile crop reads a negative scale as a clamp flag (absolute crop)
+
+**Changed:** `fm2_scenery.rs` `convert_lightmaps`: tile region = offset + |scale| * t (the game shader's `|c170|`); `FM2_LM_MIRROR=1` restores the old mirrored crop. Diagnostics: `FM2_LM_SEAMS=1` (lightmap jump across tile seams), `FM2_LM_FLIPU` / `FM2_LM_FLIPV`.
+**Why:** shader code and the Sebring page layout; seam jumps drop on 5 of 6 tracks.
+**Result:** band sum 16.02 -> 16.20 (Sebring strip now too bright, Suzuka worse, Test Track left 0.96 -> 0.77); seam metric better. All FM2 tracks re-imported, remaster tables rebuilt.
+**Test it:** `FM2_LM_SEAMS=1 FM2_TRACKS=tsukuba ./target/debug/fh1setup.exe import-fm2 data/work_fm2/disc --only maps` prints `lightmap seams (absolute crop): ... mean jump 0.199`; with `FM2_LM_MIRROR=1` 0.230. Engine: `./target/release/fh1-engine.exe --track fm2/sebring_00` shows the pit lane without the dark diagonal strip.
+**Revert:** `FM2_LM_MIRROR=1` and re-import.

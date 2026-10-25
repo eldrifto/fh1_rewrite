@@ -319,6 +319,44 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         println!("[fm2] lightmap tile brightness: {:?}", DEBUG_TILES.lock().unwrap());
         println!("[fm2] lightmaps: {} of {} tiles cropped from {} pages", lm.len(), tiles.len(), stx.as_ref().map_or(0, |(_, e)| e.len()));
         textures.extend(lm);
+        // FM2_LM_SEAMS=1 (diagnostic): where draws with DIFFERENT lightmap tiles share a vertex position, compare the lightmap values they read
+        // there. A right crop gives the same light on both sides of a seam; a crop from the wrong page region gives jumps.
+        if std::env::var_os("FM2_LM_SEAMS").is_some() {
+            let mut cache: HashMap<u32, Option<(usize, usize, Vec<u8>)>> = HashMap::new();
+            let mut at: HashMap<[i32; 3], Vec<(u32, f32)>> = HashMap::new();
+            for p in &pending {
+                let Some((id, _, _)) = p.lightmap else { continue };
+                if p.lm_uv.len() != p.positions.len() {
+                    continue;
+                }
+                let Some((w, h, px)) = cache.entry(id).or_insert_with(|| decode_rgba(&dir.join("textures").join(format!("{id:08x}.dds")))).as_ref() else { continue };
+                let (w, h) = (*w, *h);
+                for (q, uv) in p.positions.iter().zip(&p.lm_uv) {
+                    // Bilinear, clamped (the engine's sampler).
+                    let fx = (uv[0].clamp(0.0, 1.0) * w as f32 - 0.5).clamp(0.0, w as f32 - 1.0);
+                    let fy = (uv[1].clamp(0.0, 1.0) * h as f32 - 0.5).clamp(0.0, h as f32 - 1.0);
+                    let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+                    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+                    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+                    let g = |x: usize, y: usize| px[(y * w + x) * 4] as f32 / 255.0;
+                    let v = (g(x0, y0) * (1.0 - tx) + g(x1, y0) * tx) * (1.0 - ty) + (g(x0, y1) * (1.0 - tx) + g(x1, y1) * tx) * ty;
+                    let key = q.map(|c| (c * 20.0).round() as i32);
+                    at.entry(key).or_default().push((id, v));
+                }
+            }
+            let (mut n, mut sum, mut big) = (0usize, 0.0f64, 0usize);
+            for list in at.values() {
+                let tiles: std::collections::BTreeSet<u32> = list.iter().map(|x| x.0).collect();
+                if tiles.len() < 2 {
+                    continue;
+                }
+                let (lo, hi) = list.iter().fold((f32::MAX, f32::MIN), |a, x| (a.0.min(x.1), a.1.max(x.1)));
+                n += 1;
+                sum += (hi - lo) as f64;
+                big += (hi - lo > 0.2) as usize;
+            }
+            println!("[fm2] lightmap seams ({}): {n} shared vertices across tiles, mean jump {:.4}, jumps > 0.2: {big} ({:.1} %)", if std::env::var_os("FM2_LM_MIRROR").is_some() { "mirrored crop" } else { "absolute crop" }, sum / n.max(1) as f64, 100.0 * big as f64 / n.max(1) as f64);
+        }
     }
     // Foliage sheets are DXT1 with black as the colour key (the game's pixel shader discards the black texels): without
     // alpha they draw as black boxes. Rewrite those textures with the black texels transparent.
@@ -1530,12 +1568,22 @@ fn convert_lightmaps(
             continue;
         }
         // Page texel index of tile coordinate `t` (0..1) along an axis: page = offset + scale * t.
-        let texel = |t: f32, o: f32, s: f32, n: u32| ((o + s * t) * n as f32 - 0.5).round().clamp(0.0, n as f32 - 1.0) as usize;
+        // The game's pixel shader reads the tile transform with `|c170|` for scale and offset and uses the SIGN of `c170.x` only to pick clamped or
+        // raw uvs (`cndgt -c170.x`): a negative scale is not a mirror (page dump of Sebring tile 152: the 32 texel tile sits at +|su| from the offset,
+        // inside an 8 texel gutter; the mirrored reading cut the neighbouring cell). `FM2_LM_MIRROR=1` restores the old mirrored crop.
+        let mirror = std::env::var_os("FM2_LM_MIRROR").is_some();
+        // Diagnostics: FM2_LM_FLIPU / FM2_LM_FLIPV read the tile reversed along that axis (t -> 1 - t) inside its region.
+        let (flip_u, flip_v) = (std::env::var_os("FM2_LM_FLIPU").is_some(), std::env::var_os("FM2_LM_FLIPV").is_some());
+        let texel = |t: f32, o: f32, s: f32, n: u32| {
+            let s = if mirror { s } else { s.abs() };
+            ((o + s * t) * n as f32 - 0.5).round().clamp(0.0, n as f32 - 1.0) as usize
+        };
+        let (ft_u, ft_v) = (|t: f32| if flip_u { 1.0 - t } else { t }, |t: f32| if flip_v { 1.0 - t } else { t });
         let mut px = Vec::with_capacity(w * h * 4);
         for y in 0..h {
-            let sy = texel((y as f32 + 0.5) / h as f32, ov, sv, *ph);
+            let sy = texel(ft_v((y as f32 + 0.5) / h as f32), ov, sv, *ph);
             for x in 0..w {
-                let sx = texel((x as f32 + 0.5) / w as f32, ou, su, *pw);
+                let sx = texel(ft_u((x as f32 + 0.5) / w as f32), ou, su, *pw);
                 px.extend_from_slice(&rgba[(sy * *pw as usize + sx) * 4..][..4]);
             }
         }
