@@ -414,3 +414,6 @@ FM2 camera settings already match Xenia's framing (car 274 vs 278 px); earlier c
 
 ## 2026-10-25 (15): FM2 camera default on; Sebring road shaders measured
 `FH1_FM2_CAMERA` default on (engine main.rs). Sebring families measured with `data/work/seb_lit.py`; nothing added to FAMILY_GAMMA. Documented in STATUS.md.
+
+## 2026-10-25 (16): Sebring painting test, family f1fe1fd4
+Texture 161 paints the left foreground strip; engine 2.5x darker than the interpreter; global x2 tried and rejected. `FAMILY_GAMMA` gained `f1fe1fd4779c1604 -> 0` (no behaviour change). Documented in STATUS.md.
