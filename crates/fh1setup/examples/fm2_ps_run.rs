@@ -321,7 +321,10 @@ impl M<'_> {
             self.unsupported.insert(format!("fetch opcode {}", t.opcode));
             return;
         }
+        // PS_WHITE=<sampler list>: probe-only, those samplers read solid white (a runtime / system texture the draw does not bind).
+        let white = std::env::var("PS_WHITE").is_ok_and(|l| l.split(',').any(|x| x.trim().parse::<u32>().ok() == Some(t.const_index as u32)));
         let value = match self.tex.get(&(t.const_index as u32)) {
+            _ if white => [1.0; 4],
             Some(tex) if t.dimension == 1 => sample(tex, [src[sw[0]], src[sw[1]]]),
             _ => [0.0; 4],
         };

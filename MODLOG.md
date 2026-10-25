@@ -450,3 +450,6 @@ Tile crop is correct; the strip's darkness is in the bake; the slab (f9fbef3a) i
 
 ## 2026-10-26 (4): Suzuka road in FAMILY_GAMMA (BC4)
 Fits Xenia with the corrected lightmaps (0.045 vs 0.040). Twelve-track sum 14.22. BC4-for-all tried and rejected (15.42). All FM2 tracks re-imported with the table.
+
+## 2026-10-26 (5): Sunset road search
+`fm2_ps_run`: `PS_WHITE=<samplers>` probe option. Sunset's road found by painting (texture 261, model 79 `534d74061a777a9a`); no gamma choice fits on the draw average. Nothing added. Documented in STATUS.md.
