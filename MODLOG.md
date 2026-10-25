@@ -408,3 +408,6 @@ Documented in STATUS.md. Nothing committed beyond the notes.
 
 ## 2026-10-25 (12): FM2 camera bases read from the game, FH1_FM2_CAMERA_FOV
 Base height / radius are the same as FH1's (0.35 / 2.95, 0.6 / 3.1). Added `FH1_FM2_CAMERA_FOV`. FOV 62 matches Xenia's framing; band sum 15.96 -> 17.47 (metric not stable under camera changes). Documented in STATUS.md.
+
+## 2026-10-25 (14): car size and camera check (no code change)
+FM2 camera settings already match Xenia's framing (car 274 vs 278 px); earlier camera conclusions corrected in STATUS.md. Sebring's difference is a surface (blend mask) problem. Nothing committed beyond notes.
