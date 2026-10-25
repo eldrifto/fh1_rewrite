@@ -314,6 +314,13 @@ fn main() -> AppExit {
         match std::fs::read_to_string(assets.join("imported/fm2/camera/CameraSettings.ini")) {
             Ok(ini) => {
                 camera_data.settings = fh1_formats::camera::Settings::parse_fm2(&ini);
+                // FH1_FM2_CAMERA_FOV=<degrees>: the follow cameras' FOV (FM2's own widens from 53 at standstill to 62 / 64 with speed; the Xenia shots are
+                // rolling starts), for like-for-like frames of a car that stands still.
+                if let Some(f) = std::env::var("FH1_FM2_CAMERA_FOV").ok().and_then(|v| v.parse::<f32>().ok()) {
+                    for sec in ["FollowLowCam", "FollowHighCam"] {
+                        camera_data.settings.values.insert(format!("{sec}\\FOV"), f);
+                    }
+                }
                 bevy::log::info!("FH1_FM2_CAMERA: FM2 follow-camera settings loaded (Low FOV {:?})", camera_data.settings.get("FollowLowCam\\FOV"));
             }
             Err(e) => bevy::log::warn!("FH1_FM2_CAMERA: imported/fm2/camera/CameraSettings.ini missing ({e}); run fh1setup import-fm2"),
