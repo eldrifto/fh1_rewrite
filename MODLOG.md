@@ -417,3 +417,6 @@ FM2 camera settings already match Xenia's framing (car 274 vs 278 px); earlier c
 
 ## 2026-10-25 (16): Sebring painting test, family f1fe1fd4
 Texture 161 paints the left foreground strip; engine 2.5x darker than the interpreter; global x2 tried and rejected. `FAMILY_GAMMA` gained `f1fe1fd4779c1604 -> 0` (no behaviour change). Documented in STATUS.md.
+
+## 2026-10-25 (17): two-layer colour scaling (tried, removed)
+`fm2_scenery.rs`: only the corrected Sebring hash `f1fe1fd4779c1604` remains. The strip's darkness is a lightmap-tile issue (tiles 159 / 165). Documented in STATUS.md. Sebring re-imported to default.

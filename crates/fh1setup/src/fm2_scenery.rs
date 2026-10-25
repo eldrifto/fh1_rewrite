@@ -86,7 +86,7 @@ const FAMILY_GAMMA: &[(u64, u32)] = &[
     (0xa851_b0ab_5755_db49, 1 << 1),     // New York h_diff_1 (BC3 colour tf1)
     (0x1eb3_44c3_a908_6634, 1 << 4),     // Laguna Seca palette road family (BC1 colour tf4)
     (0xbef0_b122_d3da_f8b8, 0),          // Sunset Infield road family (BC1 colour stays linear)
-    (0xf1fe_1fd4_7791_c604, 0),          // Sebring asphalt family (models 153 / 158; texture 161 paints the left foreground; no gamma fits Xenia at the typical lightmap level)
+    (0xf1fe_1fd4_779c_1604, 0),          // Sebring asphalt family (models 153 / 158; texture 161 paints the left foreground; no gamma fits Xenia at the typical lightmap level)
 ];
 
 /// The gamma sampler mask of a draw's shader (see `FAMILY_GAMMA`), or None when the family is not in the table.
