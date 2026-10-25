@@ -482,3 +482,10 @@ main.rs: an explicit `FH1_RM_FM2_SHADOW_COL` wins over the track's ShadowColor (
 
 ## 2026-10-26 (23): drive test and STATUS summary
 40 s automatic drive on Test Track and Laguna Seca with the projected car shadow on and off: no errors, frame time 6.94 ms mean in both (144 Hz cap), p99 7.7 to 8.4 ms, no hitches; the shadow follows the car on dirt and grass. STATUS.md top summary updated (sum 9.38, car shadow, switch table).
+
+## 2026-10-26 (27): AI races on imported circuits
+**Changed:** `ai/line.rs` (`RacingLine::load_imported` from `imported/<map>/ai/line.json`), `ai/plugin.rs` (route 0 on imported maps uses it; `FH1_AI_RACE` uses the track's grid slots and imported cars, counts laps through `track.json`'s finish gate, 4th field = laps; `FH1_AI_LOG=1` 5 s AI log with resets), `ai/tests.rs` (`imported_line_matches_file`).
+**Tested:** Laguna Seca 2 laps and Test Track 1 lap, 5 AI cars: all finish, 0 resets, 16.68 ms mean frame (60 fps cap), no errors. Details in STATUS.md update 27.
+**Not tested:** the player in the race (not driven), FM4 circuits.
+**Test it:** `FH1_AI_LOG=1 FH1_AI_RACE=0:5::2 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: five FM2 cars on the grid ahead of you, they go after 3 s; the log shows `FH1_AI_RACE lap:` lines at about 125 s and `FH1_AI_RACE finish:` P1 to P5 at about 250 to 270 s.
+**Revert:** the commit; without `FH1_AI_RACE` nothing changes.

@@ -70,6 +70,45 @@ impl RacingLine {
         Self::parse_owt(&std::fs::read(path)?, mirror_z)
     }
 
+    /// An imported map's racing line (`imported/<map>/ai/line.json`, written by `fh1setup` for FM2 / FM4): `centre` (the
+    /// centreline), `points` (the game's optimal line), `left_wall_m` / `right_wall_m` (distances from the centre to each wall,
+    /// both positive), `closed`. Coordinates are the importer's (game) space, so z is flipped like `spawns.json`. The road is
+    /// re-centred between the walls; the lateral vector is the centreline's left normal scaled to half the wall-to-wall width,
+    /// and the offset is the optimal point's position across it.
+    pub fn parse_imported(bytes: &[u8], mirror_z: bool) -> Result<Self> {
+        let j: serde_json::Value = serde_json::from_slice(bytes)?;
+        let mz = if mirror_z { -1.0 } else { 1.0 };
+        let vecs = |k: &str| -> Vec<Vec3> {
+            j[k].as_array().map_or_else(Vec::new, |a| {
+                a.iter().map(|p| Vec3::new(p[0].as_f64().unwrap_or(0.0) as f32, p[1].as_f64().unwrap_or(0.0) as f32, p[2].as_f64().unwrap_or(0.0) as f32 * mz)).collect()
+            })
+        };
+        let nums = |k: &str| -> Vec<f32> { j[k].as_array().map_or_else(Vec::new, |a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect()) };
+        let (centre0, opt, left, right) = (vecs("centre"), vecs("points"), nums("left_wall_m"), nums("right_wall_m"));
+        let n = centre0.len();
+        ensure!(n >= 2 && opt.len() == n && left.len() == n && right.len() == n, "ai/line.json: {n} centre points, {} line points, {} / {} walls", opt.len(), left.len(), right.len());
+        let closed = j["closed"].as_bool().unwrap_or(true);
+        let (mut centre, mut lateral, mut offset) = (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        for i in 0..n {
+            let prev = if i == 0 { if closed { n - 1 } else { 0 } } else { i - 1 };
+            let next = if i + 1 == n { if closed { 0 } else { n - 1 } } else { i + 1 };
+            let fwd = (centre0[next] - centre0[prev]).with_y(0.0).normalize_or(Vec3::NEG_Z);
+            // Left of travel (engine space, +Y up).
+            let left_dir = Vec3::Y.cross(fwd).normalize_or(Vec3::X);
+            let half = ((left[i] + right[i]) * 0.5).max(1.0);
+            let c = centre0[i] + left_dir * ((left[i] - right[i]) * 0.5);
+            let lat = left_dir * half;
+            centre.push(c);
+            lateral.push(lat);
+            offset.push(((opt[i] - c).dot(left_dir) / half).clamp(-1.0, 1.0));
+        }
+        Ok(Self::new(closed, centre, lateral, offset))
+    }
+
+    pub fn load_imported(path: &std::path::Path, mirror_z: bool) -> Result<Self> {
+        Self::parse_imported(&std::fs::read(path)?, mirror_z)
+    }
+
     pub fn new(closed: bool, centre: Vec<Vec3>, lateral: Vec<Vec3>, offset: Vec<f32>) -> Self {
         let points: Vec<Vec3> = (0..centre.len()).map(|i| centre[i] + lateral[i] * offset[i]).collect();
         let mut s = Vec::with_capacity(points.len());

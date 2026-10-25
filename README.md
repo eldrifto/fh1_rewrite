@@ -123,6 +123,10 @@ cargo run --release -p fh1setup --features fm4 -- import-fm4 "path/to/FM4 Play D
 cargo run --release -p fh1setup --features fm3 -- import-fm3 "path/to/FM3 Play Disc.iso" --disc2 "path/to/FM3 Content Install Disc.iso"
 ```
 
+Imported circuits can be raced against AI cars from the command line (dev hook, not in the menus yet):
+`FH1_AI_RACE=0:5::2 fh1-engine --track fm2/lagunaseca_00` (route 0, 5 AI cars, any car, 2 laps). Tested on FM2's
+Laguna Seca and Test Track; the player's car is placed on the grid but not driven.
+
 `tools\release.ps1` builds the Windows release zip. Vendored crates keep their own licenses: `vendor/lzxd` (patched for
 XMemCompress streams), `vendor/bevy_pbr` (shadow cascade caching, cached bind groups, static atmosphere LUTs),
 `vendor/wgpu-core` (bind group tracking once per pass / command buffer) and `vendor/bevy_solarik`; each patched crate

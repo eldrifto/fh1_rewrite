@@ -49,6 +49,7 @@ impl Plugin for AiPlugin {
             .init_resource::<DevRace>()
             .add_systems(Startup, (setup_driving_line, setup_game_line))
             .add_systems(Update, (dev_race, spawn_ai, despawn_ai).chain())
+            .add_systems(Update, (log_ai, dev_laps))
             .add_systems(Update, tag_ai_wheels.before(crate::tag_wheels))
             .add_systems(Update, (sync_ai_visuals, ai_drop_shadow).chain().after(crate::sync_visuals))
             .add_systems(Update, (draw_driving_line, draw_game_line).after(crate::sync_visuals))
@@ -80,11 +81,19 @@ impl AiLines {
     fn line(&mut self, assets: &std::path::Path, track: &str, route: u32) -> Option<Arc<RacingLine>> {
         self.lines
             .entry(route)
-            .or_insert_with(|| match RacingLine::load(&line_path(assets, track, route), MIRROR_Z) {
-                Ok(l) => Some(Arc::new(l)),
-                Err(e) => {
-                    warn!("AI line {track} route {route}: {e:#} (run fh1setup --only ailines)");
-                    None
+            .or_insert_with(|| {
+                // An imported circuit (FM2 / FM4): route 0 is its own racing line, `imported/<map>/ai/line.json`.
+                let imported = assets.join("imported").join(track).join("ai/line.json");
+                let loaded = if route == 0 && imported.exists() { RacingLine::load_imported(&imported, MIRROR_Z) } else { RacingLine::load(&line_path(assets, track, route), MIRROR_Z) };
+                match loaded {
+                    Ok(l) => {
+                        info!("AI line {track} route {route}: {} points, {:.0} m, {}", l.len(), l.length, if l.closed { "closed" } else { "open" });
+                        Some(Arc::new(l))
+                    }
+                    Err(e) => {
+                        warn!("AI line {track} route {route}: {e:#} (run fh1setup --only ailines)");
+                        None
+                    }
                 }
             })
             .clone()
@@ -261,7 +270,7 @@ fn drive_ai(
         others.extend(obstacles.iter().filter(|(s, _)| *s != racer.slot).map(|(_, o)| *o));
         let sit = Situation {
             hold: control.hold || dev.hold,
-            finished: control.finished.contains(&racer.slot),
+            finished: control.finished.contains(&racer.slot) || dev.finished.contains(&racer.slot),
             player_progress: pp,
             positions_from_player: rank(racer.slot) - rank(0),
             obstacles: &others,
@@ -390,6 +399,44 @@ struct DevRace {
     go_at: f32,
     hold: bool,
     route_file: Option<String>,
+    /// Imported circuit: its `track.json` `timing.finish` gate (engine space). None = no lap counting.
+    gate: Option<FinishGate>,
+    /// Race length in laps (`FH1_AI_RACE` 4th field, default 2).
+    laps: u32,
+    /// Per car (slot; 0 = the player): signed distance past the gate last frame, gate crossings, lap start time.
+    lapping: std::collections::HashMap<u32, (f32, u32, f32)>,
+    /// Slots that completed `laps` laps, in finishing order (AI slots slow to a cruise).
+    finished: Vec<u32>,
+}
+
+/// A finish line: centre, direction of travel (horizontal, unit) and width.
+#[derive(Clone, Copy, Debug)]
+struct FinishGate {
+    centre: Vec3,
+    forward: Vec3,
+    width: f32,
+}
+
+impl FinishGate {
+    /// `imported/<map>/track.json` `timing.finish` (`centre` xyz, `forward` xz, `width`; game space, z flipped when `mirror_z`).
+    fn load(path: &std::path::Path, mirror_z: bool) -> Option<Self> {
+        let j: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+        let f = &j["timing"]["finish"];
+        let num = |v: &serde_json::Value| v.as_f64().map(|x| x as f32);
+        let c = f["centre"].as_array()?;
+        let fw = f["forward"].as_array()?;
+        let z = if mirror_z { -1.0 } else { 1.0 };
+        let centre = Vec3::new(num(&c[0])?, num(&c[1])?, z * num(&c[2])?);
+        let forward = Vec3::new(num(&fw[0])?, 0.0, z * num(&fw[1])?).normalize_or_zero();
+        Some(Self { centre, forward, width: num(&f["width"])? })
+    }
+
+    /// Signed distance past the line along the direction of travel, and whether `p` is across the gate's width (+5 m).
+    fn side(&self, p: Vec3) -> (f32, bool) {
+        let d = p - self.centre;
+        let across = d.dot(Vec3::Y.cross(self.forward)).abs();
+        (d.dot(self.forward), across < 0.5 * self.width + 5.0)
+    }
 }
 
 fn dev_race(
@@ -416,22 +463,37 @@ fn dev_race(
     let mut parts = spec.split(':');
     let route: u32 = parts.next().and_then(|s| s.trim().parse().ok()).unwrap_or(5);
     let n: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(5).clamp(1, 11);
-    let only_car = parts.next().map(str::to_owned);
+    let only_car = parts.next().map(str::to_owned).filter(|s| !s.is_empty());
+    st.laps = parts.next().and_then(|s| s.parse().ok()).unwrap_or(2).max(1);
     let Some(line) = lines.line(&garage.assets, &track.id, route) else { return };
+    st.gate = FinishGate::load(&garage.assets.join("imported").join(&track.id).join("track.json"), MIRROR_Z);
+    match st.gate {
+        Some(g) => info!("FH1_AI_RACE: finish gate at {:.1},{:.1},{:.1} facing {:.2},{:.2}, {:.1} m wide, {} laps", g.centre.x, g.centre.y, g.centre.z, g.forward.x, g.forward.z, g.width, st.laps),
+        None => info!("FH1_AI_RACE: no finish gate (not an imported circuit): no lap counting"),
+    }
     const FIELD: [&str; 7] = ["ALF_8C_08", "BMW_M3E92_08", "CHE_CamaroSS_69", "DOD_ViperSRT10ACRX_12", "FOR_MustangBOSS429_70", "VW_Corrado_95", "AUD_R8_08"];
     let route_file = format!("Ribbon_00/TrackRoute{route:03}.xml");
     // Two-wide grid, 8 m rows, player last; circuits start just behind the line's start.
     let total = n + 1;
     let rows = total.div_ceil(2);
     let base = if line.closed { 0.0 } else { 8.0 * rows as f32 + 4.0 };
+    // An imported circuit has its own start grid (`spawns.json` `grid_NN`, in the track's spawn list): AI on slots 0.., the player
+    // behind them. Colorado (no grid spawns): the line-based grid.
+    let grid: Vec<(Vec3, f32)> = track.spawn_names.iter().zip(&track.spawns).filter(|(name, _)| name.starts_with("grid_")).map(|(_, s)| *s).collect();
     let pose = |k: u32| {
+        if let Some(g) = grid.get(k as usize) {
+            return *g;
+        }
         let s = base - 8.0 * (k / 2) as f32 - 4.0;
         let (c, lat, _) = line.road_at(s);
         let side = if k % 2 == 0 { 0.35 } else { -0.35 };
         (c + lat * side, line.yaw_at(s))
     };
+    // Cars: on an imported map the AI drive that game's own imported cars (`../imported/<game>/cars/...`), else FH1's field.
+    let prefix = track.id.split('/').next().unwrap_or("");
+    let own: Vec<String> = if track.id.contains('/') { garage.cars.iter().filter(|c| c.contains(&format!("imported/{prefix}/cars/"))).cloned().collect() } else { Vec::new() };
     for k in 0..n {
-        let car = only_car.clone().unwrap_or_else(|| FIELD[k as usize % FIELD.len()].to_owned());
+        let car = only_car.clone().unwrap_or_else(|| if own.is_empty() { FIELD[k as usize % FIELD.len()].to_owned() } else { own[(k as usize * 7 + 3) % own.len()].clone() });
         let car = if garage.cars.iter().any(|c| *c == car) { car } else { garage.cars[garage.current].clone() };
         spawn.write(SpawnRaceAi { slot: k + 1, car_id: car, pose: pose(k), skill: 20 + 8 * k, route_file: route_file.clone(), circuit: line.closed, ..default() });
     }
@@ -443,6 +505,77 @@ fn dev_race(
     st.route_file = Some(route_file);
     st.go_at = t + 3.0;
     info!("FH1_AI_RACE: route {route} ({:.0} m, {}), {n} AI cars, go in 3 s", line.length, if line.closed { "circuit" } else { "sprint" });
+}
+
+/// FH1_AI_RACE on an imported circuit: counts each car's crossings of the finish gate. A car that starts behind the gate
+/// (the grid) begins lap 1 on its first crossing; backing over the line takes a crossing off. Logs lap times and the finish.
+fn dev_laps(mut st: ResMut<DevRace>, time: Res<Time<Real>>, ai: Query<(&AiRacer, &AiCar)>, player: Query<&Car>) {
+    let Some(gate) = st.gate else { return };
+    if !st.started || st.hold {
+        return;
+    }
+    let t = time.elapsed_secs();
+    let go = st.go_at;
+    let laps = st.laps;
+    let cars: Vec<(u32, Vec3)> = ai.iter().map(|(r, c)| (r.slot, c.0.position)).chain(player.iter().next().map(|c| (0, c.0.position))).collect();
+    for (slot, pos) in cars {
+        let (d, inside) = gate.side(pos);
+        // First frame after the go: a car already past the line counts as having crossed it once (lap 1 under way).
+        let e = st.lapping.entry(slot).or_insert((d, u32::from(d >= 0.0), go));
+        let (prev, mut crossings, mut lap_start) = *e;
+        let mut done_lap = None;
+        if inside && prev < 0.0 && d >= 0.0 {
+            crossings += 1;
+            if crossings >= 2 {
+                done_lap = Some((crossings - 1, t - lap_start));
+            }
+            lap_start = t;
+        } else if inside && prev >= 0.0 && d < 0.0 {
+            crossings = crossings.saturating_sub(1);
+        }
+        *e = (d, crossings, lap_start);
+        if let Some((lap, secs)) = done_lap {
+            let who = if slot == 0 { "player".to_string() } else { format!("AI slot {slot}") };
+            info!("FH1_AI_RACE lap: {who} lap {lap}/{laps} in {secs:.2} s (race time {:.2} s)", t - go);
+            if lap >= laps && !st.finished.contains(&slot) {
+                st.finished.push(slot);
+                info!("FH1_AI_RACE finish: {who} P{} at {:.2} s", st.finished.len(), t - go);
+            }
+        }
+    }
+}
+
+
+/// `FH1_AI_LOG=1` (dev): every 5 s, each AI car's lap, distance along its line, offset from the road centre (and the road's
+/// half width there), distance from the racing line, speed and position, to check AI races without looking.
+fn log_ai(time: Res<Time<Real>>, mut last: Local<f32>, cars: Query<(&AiRacer, &AiCar, &AiBrain)>) {
+    if std::env::var_os("FH1_AI_LOG").is_none() {
+        return;
+    }
+    let t = time.elapsed_secs();
+    if t - *last < 5.0 {
+        return;
+    }
+    *last = t;
+    for (r, c, b) in &cars {
+        let d = &b.driver;
+        info!(
+            "AI log t={t:.0}s slot {}: lap {} progress {:.0} m (line {:.0} m), lateral {:.1} m of +-{:.1}, off line {:.1} m, speed {:.0} km/h, resets {} off-road {}, at {:.0},{:.0},{:.0}",
+            r.slot,
+            d.lap,
+            d.progress,
+            d.line.length,
+            d.proj.lateral,
+            d.proj.half_width,
+            d.proj.distance,
+            c.0.speed() * 3.6,
+            d.resets,
+            d.off_track,
+            c.0.position.x,
+            c.0.position.y,
+            c.0.position.z
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

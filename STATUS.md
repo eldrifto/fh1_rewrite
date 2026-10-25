@@ -18,7 +18,7 @@ Twelve FM2 tracks are compared with your Xenia screenshots on two road patches e
 - **New York:** the engine is close (0.76) only because an old importer heuristic darkens it; the game's own shader evaluates 2.4x brighter than Xenia there, cause unknown (not the post-process).
 - **Laguna Seca's foreground** is in a real-time shadow in Xenia that our sun does not produce; caster unknown.
 - **FM2's final colour step** (`FH1_FM2_POST`) cannot be reproduced: the engine's frame average stays below every track's adaptation limits.
-- Tested on 2026-10-26: a 40 s automatic drive on Test Track and Laguna Seca (no errors, frame time 6.94 ms mean either way, car shadow follows the car on dirt and grass). Not tested: a full race with AI cars.
+- Tested on 2026-10-26: a 40 s automatic drive on Test Track and Laguna Seca (no errors, frame time 6.94 ms mean either way, car shadow follows the car on dirt and grass). AI races on FM2 circuits now work through the dev hook `FH1_AI_RACE` (update 27: Laguna Seca 2 laps and Test Track 1 lap, 5 AI cars, all finish, no resets, 60 fps cap held). Not tested: a race through the game's menus (the event list does not offer FM2 circuits), the player in that race.
 
 ## Decided: no Xenia GPU trace
 It does not work in your Xenia build (tried 2026-10-19). Questions that would need it stay empirical.
@@ -825,3 +825,21 @@ New variant `FH1_RM_FM2_SHADOW_DIR=height` (`light.rs`): our sun's compass direc
 ## Update 2026-10-26 (26): race test on FM2: AI cannot race on imported tracks yet
 
 `FH1_AI_RACE=0:5` on `fm2/testtrackinfield_00`: no AI cars spawn: "AI line fm2/testtrackinfield_00 route 0: The system cannot find the path specified". The engine loads AI racing lines only from FH1's format (`<assets>/ailines/<track>/route_NNN.owt`, `ai.rs line_path`); the FM2 (and FM4) importer writes `imported/<map>/ai/line.json` (points of the racing line) and `track.json` timing gates, which only the hot-lap timer reads. So a race with AI cars on an FM2 track is not possible yet; it needs the engine to build a `RacingLine` from `ai/line.json` (feature work, not done). The player car alone was checked earlier (40 s drive, no errors). One warning seen in every FM2 run, "No previous asset to copy from for image" (a 256x256 RGBA image), appears with the projected car shadow on and off alike, so it is not from today's changes.
+
+## Update 2026-10-26 (27): AI races on imported circuits (plan in docs/DESIGN.md, steps 1-5)
+
+What changed (engine only, `crates/fh1-engine/src/ai/`):
+- `line.rs`: `RacingLine::parse_imported` / `load_imported` build the AI's racing line from the importer's `imported/<map>/ai/line.json` (centre line, racing line, left / right wall distances; z flipped into engine space). Test `imported_line_matches_file`: rebuilt points within 0.005 to 0.09 m mean of the file on Test Track, Laguna Seca, Suzuka, Nurburgring and New York.
+- `plugin.rs`: route 0 on an imported map is that line. `FH1_AI_RACE=<route>:<cars>:<car>:<laps>` on an imported map puts the AI on the track's own grid slots (`spawns.json` `grid_NN`) in that game's imported cars, the player on the next slot, and counts laps through the `track.json` finish gate (a car on the grid behind the line starts lap 1 on its first crossing; laps default 2). Finished cars cruise. `FH1_AI_LOG=1` logs each AI car every 5 s (lap, progress, offset from road centre and racing line, speed, resets, position).
+
+Tested (release build, 60 fps cap, `FH1_PERF_LOG=1`, logs in `data/work/race5_*.log`):
+- Laguna Seca, `FH1_AI_RACE=0:5::2` (earlier full run): all 5 AI finished 2 laps, laps 122 to 135 s (the AI's own prediction 113 to 122 s), finish order slots 2, 4, 1, 3, 5, 0 resets. Run with perf log to 131 s: frame time mean 16.68 ms, p99 17.9 ms, max 19.0 ms, no frames over 1.5x.
+- Test Track, `FH1_AI_RACE=0:5::1`: all 5 finished 1 lap in 294 to 324 s, 0 resets, cars 0.2 to 1 m from the racing line at speed; frame time mean 16.68 ms, p99 17.5 to 17.7 ms, max 19.0 ms over 330 s.
+- Errors: none. The one warning in every FM2 run ("No previous asset to copy from for image") is the known one from update 26.
+- Screenshots: `screenshots/race_lag_131.png` (an AI Mercedes 300SL passing the parked player at the end of lap 1, its projected shadow under it), `screenshots/race_tt_14.png` (the field up the straight at 14 s).
+
+Not done / not tested:
+- The player's car is placed on the grid but nothing drives it, and its laps are only counted if you drive it yourself (not tested).
+- The `off-road` counter in the AI log stayed 0 in every run; I did not check that it can count at all, so it is not proof the AI never left the road. Positions and the road half-width in the log show them inside the road at every 5 s sample I read.
+- The line's own lap counter (`lap` in `FH1_AI_LOG`) reads one higher than the gate count, because the grid sits behind the line's start; the gate count is what decides the finish.
+- FM4 circuits: not tested (same file format, same code path).

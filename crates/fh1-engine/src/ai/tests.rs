@@ -380,3 +380,32 @@ fn ai_spun_car_resets_without_reversing() {
     let fwd = v.rotation * bevy::math::Vec3::NEG_Z;
     assert!(fwd.dot(l.tangent_at(drv.proj.s)) > 0.9, "not facing along the line after the reset");
 }
+
+/// An imported FM2 circuit's line (`imported/fm2/<map>/ai/line.json`): the rebuilt racing points stay on the file's optimal
+/// line and the lap length matches the map's `track.json` length. AI_MAP=<id> (default fm2/testtrackinfield_00); skipped
+/// without the import.
+#[test]
+fn imported_line_matches_file() {
+    let data = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data");
+    let Ok(assets) = private_assets(&data) else { return };
+    let map: String = var("AI_MAP", "fm2/testtrackinfield_00".to_string());
+    let dir = assets.join("imported").join(&map);
+    let Ok(bytes) = std::fs::read(dir.join("ai/line.json")) else { return };
+    let line = RacingLine::parse_imported(&bytes, MIRROR_Z).expect("line");
+    let j: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let mz = if MIRROR_Z { -1.0 } else { 1.0 };
+    let (mut worst, mut sum) = (0.0f32, 0.0f32);
+    for (i, p) in j["points"].as_array().unwrap().iter().enumerate() {
+        let want = bevy::math::Vec3::new(p[0].as_f64().unwrap() as f32, p[1].as_f64().unwrap() as f32, p[2].as_f64().unwrap() as f32 * mz);
+        let e = line.points[i].distance(want);
+        worst = worst.max(e);
+        sum += e;
+    }
+    let mean = sum / line.len().max(1) as f32;
+    let track: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("track.json")).unwrap()).unwrap();
+    let length = track["length_m"].as_f64().unwrap_or(0.0) as f32;
+    eprintln!("{map}: {} points, closed {}, lap {:.0} m (track.json {length:.0} m), point error mean {mean:.3} m, worst {worst:.3} m", line.len(), line.closed, line.length);
+    // Sharp corners: the game's normal differs a little from the centreline's, so single points can be a metre or two off.
+    assert!(mean < 0.2 && worst < 3.0, "rebuilt line is {mean} m (mean) / {worst} m (worst) off the file's optimal line");
+    // The lap length is printed, not asserted: Nurburgring's line (24.3 km) is longer than its listed length (20.8 km).
+}
