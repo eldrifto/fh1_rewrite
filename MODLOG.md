@@ -399,3 +399,6 @@ Documented in STATUS.md. Nothing committed.
 
 ## 2026-10-25 (9): position matching attempt (no code change)
 Added `data/work/tp_shot.sh` / `ncc.py` (git-ignored scratch). The automatic match did not work; findings in STATUS.md. Nothing committed.
+
+## 2026-10-25 (10): FM2 camera data compared with the engine camera (no code change)
+Documented in STATUS.md. Nothing committed beyond the notes.
