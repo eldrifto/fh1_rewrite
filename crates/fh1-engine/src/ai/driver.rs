@@ -517,7 +517,10 @@ impl Driver {
         let parked = self.history.iter().find(|h| self.clock - h.0 <= 25.25).is_some_and(|h| self.clock - h.0 >= 24.75 && h.2.distance(v.position) < 2.0);
         // Moving 20 m cancels the waypoint rules (the history window is the reference).
         let moved = self.history.front().is_some_and(|h| h.2.distance(v.position) > RESET_CANCEL_MOVED_M) && self.clock < 25.0;
-        let fallen = v.position.y < RESET_FELL_BELOW || v.position.y < self.line.point_at(p.s).y - 15.0;
+        // The world floor: -50 m (Colorado), or 15 m under the line's lowest point on a route that goes deeper (FM4's
+        // Bernese Alps reach -76 m).
+        let floor = RESET_FELL_BELOW.min(self.line.min_y - 15.0);
+        let fallen = v.position.y < floor || v.position.y < self.line.point_at(p.s).y - 15.0;
         (!moved && (stuck || parked))
             || self.slow_timer > RESET_SLOW_S
             || self.flip_timer > RESET_UPSIDE_DOWN_S

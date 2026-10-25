@@ -843,3 +843,34 @@ Not done / not tested:
 - The `off-road` counter in the AI log stayed 0 in every run; I did not check that it can count at all, so it is not proof the AI never left the road. Positions and the road half-width in the log show them inside the road at every 5 s sample I read.
 - The line's own lap counter (`lap` in `FH1_AI_LOG`) reads one higher than the gate count, because the grid sits behind the line's start; the gate count is what decides the finish.
 - FM4 circuits: not tested (same file format, same code path).
+
+## Update 2026-10-26 (28): FM4 circuits, a reset bug on deep tracks, and an off-road (grass) count
+
+FM4 test, `FH1_AI_RACE=0:5::1`, 5 AI in FM4's own cars:
+- **Catalunya** (4.56 km): all finished, laps 133 to 172 s (the AI's prediction 126 to 164 s), 0 resets, frame time mean 16.68 ms (60 fps cap), p99 17.9 ms.
+- **Bernese Alps festival circuit** (5.76 km): first run **broken**. No car finished, and each logged about 25,000 resets, one per physics tick, from about 50 s in. Cause: the AI's "fell out of the world" rule used a fixed floor of y = -50 m (made for Colorado); this circuit goes down to -99 m, so below -50 every car was put back on the line at 15 m/s every tick (the 54 km/h crawl in the log). **Fix** (`ai/driver.rs`, `ai/line.rs`): the floor is 15 m below the line's lowest point, or -50 m, whichever is lower. After the fix: all 5 finished in 135 to 167 s, 1 reset in total, Colorado: not re-tested; its floor only changes on a route whose lowest point is below -35 m, and then only gets lower (more lenient). I did not check whether any Colorado route goes that deep.
+
+Off-road counter: the existing `off-road` count (past the line's half width + 1 m) cannot see leaving the tarmac on imported tracks, because their half width is the wall distance (Laguna wall to wall: median 32 m, up to 120 m; the tarmac is about 12 to 15 m). New count in the `FH1_AI_LOG` line: `grass N (s)`, the times two or more wheels went onto a surface with the game's OffRoadness > 0 (Dirt, Grass, Gravel traps...), using the vehicle's own `offroad_wheels`. Each excursion is logged with the wheels' surface ids, position and line position (`AI log grass:`).
+- Control: the player on `FH1_AUTODRIVE` (circling) went onto grass and stayed there: `grass 1 (28.9 s)`. The count works.
+- Finding, **not explained**: the AI do put two wheels off the tarmac often. In 60 s: Laguna 1 to 7 excursions per car (6 to 18 s on dirt), Catalunya 0 to 9 (up to 13 s), Bernese Alps 0. Checked from the files: the imported racing line itself is 100 % on asphalt on Laguna, Test Track, Catalunya and the Alps (`data/work/line_surf.py`), and the surface lists match the game's (FM4's 61 names extend FM2's 38 in order), so the dirt is real track-side data. Two spot checks: Catalunya's start straight runs the line 2 m from the grass, and a 1 m wobble puts the left wheels on it; on Laguna several excursions are right after the start, 7.5 m off the line, while the field merges from the grid slots. Possibly related: Laguna laps are 8 to 10 % slower than the AI's own prediction. Not fixed; it is step 4 of the race plan in `docs/DESIGN.md`.
+
+## Update 2026-10-26 (29): a real race on imported circuits (race module), tarmac road width, and a correction
+
+**Correction to update 27:** the `FH1_AI_RACE` dev race did **not** use the track's grid slots, as I wrote. `Track.spawn_names` holds display labels ("Grid 00"), and my filter looked for "grid_", so it never matched and every dev race used the old line-based grid. Fixed in `ai/plugin.rs` (accepts "Grid " too). The update 27 / 28 lap times are from line-based grids.
+
+What changed (plan in `docs/DESIGN.md`, "a real race on imported circuits"):
+- `race.rs` `Events::load_imported` (loaded in `ui/world_load.rs` for imported maps): one race per imported circuit from its own files. Grid = `spawns.json` `kind: grid` (player last). Gates = `track.json` sectors in waypoint order, then the finish (`start_gate` 0: the grid is behind the line). Path = the racing line. Route 0 = the imported AI line. Field = 7 of the game's own cars. Laps 3 (`FH1_RACE_LAPS` overrides). The game's car names come from its `cars/index.json` (FM4's repeated make dropped: "Nissan GT-R R34", not "Nissan Nissan GT-R R34"). The race module's Colorado-only check is gone; event-start markers stay Colorado-only.
+- `FH1_RACE=0` starts it; `FH1_RACE_LOG=1` logs every racer's gate crossings and the results table.
+- `FH1_AI_ROAD=1` (off by default): on imported lines the AI's road is the tarmac, measured at load from the collision surfaces (walk out from each racing-line point until the game's OffRoadness > 0.25, a 0.3 m step or no ground), instead of the wall-to-wall width. The AI use that width for passing, defending and merging room (`driver.rs` 663).
+- Unit test `race::tests::imported_race_definition` (Laguna Seca, Catalunya): gates in race order along the line, the finish at the line's start, every grid slot behind the finish, field not empty. Passes.
+
+Tested (release, 7 AI, 2 laps, player finished by `FH1_RACE_AUTOFINISH`, logs `data/work/race9_*.log`, `race10_*.log`):
+- Laguna Seca and Catalunya: grid, countdown, all 7 AI pass the gates in order, laps counted, results with places and names. The return to free roam after the results pages: not checked (nothing logs it). Frame time 6.94 to 6.97 ms mean (144 Hz cap), p99 8.1 ms.
+- Colorado regression check (`FH1_RACE=0`, Recaro Rush): starts with 7 named FH1 drivers, results as before.
+- Grass / dirt time per AI car over the race, without / with `FH1_AI_ROAD=1`: Laguna 30 to 42 s -> 0 to 2.2 s; Catalunya 58 to 134 s -> 0.1 to 1.0 s. Resets 1 to 6 -> 0 to 2.
+
+Not solved / not tested:
+- **The AI are slow in a full race.** Lap 1 from the grid: Laguna 134 to 180 s, Catalunya 170 to 197 s, with or without `FH1_AI_ROAD`; lap 2: Laguna 101 to 125 s, Catalunya 143 to 150 s. In 260 / 330 s only 1 or 2 of 7 finished 2 laps. Keeping them on tarmac did not make them faster. Not investigated; one suspect: the start merge row for route 0 (`tables.start_merge(route)`) is FH1's own Colorado route 0 row, applied to the imported line too.
+- The player in these tests was not driven (auto-finish). A race you drive yourself: not tested.
+- The F6 event list / career screen with the imported race: not tested.
+- FM2 / FM4 per-event lap counts and AI difficulty: not read (3 laps and FH1's medium AI ids used).

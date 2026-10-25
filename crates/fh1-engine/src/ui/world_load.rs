@@ -112,7 +112,8 @@ pub fn load_world(assets: &Path, name: &str) -> LoadedWorld {
     // Colorado's scenery (and with it grass, crowds, props, smashables) only on Colorado; a native import (FH2) has its
     // own scenery group; other imported maps stream their own glTF tiles.
     let colorado = track.id == "colorado";
-    let events = if colorado { race::Events::load(assets) } else { race::Events::default() };
+    // Colorado: its career events; an imported circuit (FM2 / FM4): one race built from its own files (race.rs).
+    let events = if colorado { race::Events::load(assets) } else if track.world.is_some() && track.id.contains('/') { race::Events::load_imported(assets, &track.id) } else { race::Events::default() };
     let native = (!colorado && track.world.is_some()).then(|| track::native_track_dir(assets, &track.id)).flatten();
     let scenery = if colorado && track.world.is_some() {
         scenery::Scenery::load(assets)

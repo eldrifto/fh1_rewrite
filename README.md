@@ -123,9 +123,10 @@ cargo run --release -p fh1setup --features fm4 -- import-fm4 "path/to/FM4 Play D
 cargo run --release -p fh1setup --features fm3 -- import-fm3 "path/to/FM3 Play Disc.iso" --disc2 "path/to/FM3 Content Install Disc.iso"
 ```
 
-Imported circuits can be raced against AI cars from the command line (dev hook, not in the menus yet):
-`FH1_AI_RACE=0:5::2 fh1-engine --track fm2/lagunaseca_00` (route 0, 5 AI cars, any car, 2 laps). Tested on FM2's
-Laguna Seca and Test Track; the player's car is placed on the grid but not driven.
+Imported circuits (FM2, FM4) have a race against 7 of that game's cars, through the same race code as Colorado's events
+(grid, countdown, laps, results): `FH1_RACE=0 fh1-engine --track fm2/lagunaseca_00` (`FH1_RACE_LAPS=n`, default 3;
+`FH1_AI_ROAD=1` keeps the AI on the tarmac). Tested on FM2 Laguna Seca and FM4 Catalunya with a non-driven player; the
+AI are still slow in a full field. Not in the menus yet.
 
 `tools\release.ps1` builds the Windows release zip. Vendored crates keep their own licenses: `vendor/lzxd` (patched for
 XMemCompress streams), `vendor/bevy_pbr` (shadow cascade caching, cached bind groups, static atmosphere LUTs),

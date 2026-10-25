@@ -218,6 +218,144 @@ impl Events {
         info!("race: {} events installed (career tables: {})", races.len(), if career.installed { "events-2" } else { "built-in" });
         Self { races, scoring, object_bounds, barrier_templates, career, assets: assets.to_path_buf() }
     }
+
+    /// An imported circuit (FM2 / FM4, `imported/<map>/`): one race built from the importer's files, run by the same race
+    /// module as Colorado's events. Grid = `world/spawns.json` `kind: grid` slots; gates = `track.json` `timing` sectors (in
+    /// waypoint order) then the finish line, `start_gate` 0 (the grid sits behind the line: lap 1 = grid -> sectors -> finish);
+    /// path = the AI racing line (`ai/line.json` points); route 0 = that line (ai/plugin.rs); field = the game's own imported
+    /// cars. Laps: 3 (`FH1_RACE_LAPS` overrides; FM2 / FM4 set laps per career event, not read). Empty when the map is not a
+    /// circuit or a file is missing.
+    pub fn load_imported(assets: &Path, map: &str) -> Self {
+        let mut ev = Self { career: crate::progression::data::CareerData::from_json(&serde_json::Value::Null, assets), assets: assets.to_path_buf(), ..default() };
+        // The game's own cars by their garage ids (`../imported/<game>/cars/<media>`), so labels read "Toyota 2000GT" (its
+        // `cars/index.json`: maker, model, PI). Class stays 0 (FM classes are not FH1's CarClasses ids).
+        let game = map.split('/').next().unwrap_or(map);
+        let rows: serde_json::Value = std::fs::read(assets.join("imported").join(game).join("cars/index.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        for r in rows.as_array().into_iter().flatten() {
+            let Some(m) = r["media_name"].as_str() else { continue };
+            let s = |k: &str| r[k].as_str().unwrap_or("").to_owned();
+            // FM4's model repeats the make ("Nissan GT-R R34", maker "Nissan"; "Mercedes 300SL", maker "Mercedes-Benz").
+            let (maker, mut model) = (s("maker"), s("model"));
+            if let Some((first, rest)) = model.split_once(' ') {
+                if !rest.is_empty() && maker.to_ascii_lowercase().split(['-', ' ']).any(|w| w == first.to_ascii_lowercase()) {
+                    model = rest.to_owned();
+                }
+            }
+            let info = crate::progression::data::CarInfo {
+                class: 0,
+                pi: r["pi"].as_u64().unwrap_or(0) as u32,
+                drive: 0,
+                year: r["year"].as_u64().unwrap_or(0) as u32,
+                make: maker,
+                name: model,
+                selectable: r["selectable"].as_bool().unwrap_or(true),
+                installed: r["has_model"].as_bool().unwrap_or(false),
+                price: 0,
+                unicorn: false,
+            };
+            // The player's car goes by its bare media name (`VehicleData::media_name`); an FH1 car of that name wins.
+            ev.career.cars.entry(m.to_owned()).or_insert_with(|| info.clone());
+            ev.career.cars.insert(format!("../imported/{game}/cars/{m}"), info);
+        }
+        match imported_race(assets, map) {
+            Ok(def) => {
+                info!(
+                    "race: imported circuit {} ({:.0} m, {} laps, {} gates, {} grid slots, {} cars in the field, path {} points)",
+                    def.name,
+                    def.length_m,
+                    def.laps,
+                    def.gates.len(),
+                    def.grid.len(),
+                    def.field.len(),
+                    def.path.len()
+                );
+                ev.races.push(def);
+            }
+            Err(e) => info!("race: no imported race on {map}: {e:#}"),
+        }
+        ev
+    }
+}
+
+/// [`Events::load_imported`]'s race.
+fn imported_race(assets: &Path, map: &str) -> anyhow::Result<RaceDef> {
+    use anyhow::Context;
+    let dir = assets.join("imported").join(map);
+    let read = |p: &str| -> anyhow::Result<serde_json::Value> { Ok(serde_json::from_slice(&std::fs::read(dir.join(p)).with_context(|| p.to_owned())?)?) };
+    let tj = read("track.json")?;
+    anyhow::ensure!(tj["type"].as_str() == Some("circuit"), "not a circuit (type {})", tj["type"]);
+    let mz = if fh1_engine::world::MIRROR_Z { -1.0 } else { 1.0 };
+    let f = |v: &serde_json::Value| v.as_f64().unwrap_or(0.0) as f32;
+    let v3 = |v: &serde_json::Value| Vec3::new(f(&v[0]), f(&v[1]), mz * f(&v[2]));
+    let gate_of = |g: &serde_json::Value| Gate { centre: v3(&g["centre"]), forward: Vec2::new(f(&g["forward"][0]), mz * f(&g["forward"][1])).normalize_or(Vec2::Y), half_width: 0.5 * f(&g["width"]) };
+    let timing = &tj["timing"];
+    let mut sectors: Vec<&serde_json::Value> = timing["sectors"].as_array().into_iter().flatten().collect();
+    sectors.sort_by_key(|g| g["waypoint"].as_u64().unwrap_or(0));
+    anyhow::ensure!(timing["finish"].is_object(), "track.json has no finish gate");
+    let gates: Vec<Gate> = sectors.into_iter().chain(std::iter::once(&timing["finish"])).map(gate_of).collect();
+    // Grid slots, as `Track` reads spawns (ground height, yaw from the facing).
+    let sp = read("world/spawns.json")?;
+    let mut grid: Vec<(usize, Vec3, f32)> = sp["spawns"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| s["kind"].as_str() == Some("grid"))
+        .map(|s| {
+            let p = &s["position"];
+            let y = s["ground_y"].as_f64().map_or(f(&p[1]), |y| y as f32);
+            let (fx, fz) = (f(&s["facing"][0]), mz * f(&s["facing"][2]));
+            (s["index"].as_u64().unwrap_or(0) as usize, Vec3::new(f(&p[0]), y, mz * f(&p[2])), (-fx).atan2(-fz))
+        })
+        .collect();
+    grid.sort_by_key(|g| g.0);
+    let grid: Vec<(Vec3, f32)> = grid.into_iter().map(|(_, p, y)| (p, y)).collect();
+    anyhow::ensure!(grid.len() >= 2, "{} grid slots in spawns.json", grid.len());
+    let line = read(tj["ai_line"].as_str().unwrap_or("ai/line.json"))?;
+    let path: Vec<Vec3> = line["points"].as_array().into_iter().flatten().map(v3).collect();
+    // The game's own cars, spread over its list the way the dev race picks them; the player takes the last slot.
+    let game = map.split('/').next().unwrap_or(map);
+    let own: Vec<String> = crate::ui::browser::imported_car_folders(assets).into_iter().filter(|c| c.starts_with(&format!("../imported/{game}/cars/"))).collect();
+    let drivers = (grid.len() - 1).min(7);
+    let field = if own.is_empty() { Vec::new() } else { (0..drivers).map(|k| Entrant { car: Some(own[(k * 7 + 3) % own.len()].clone()), driver: 0, color_seq: 0 }).collect() };
+    let laps = std::env::var("FH1_RACE_LAPS").ok().and_then(|v| v.parse().ok()).unwrap_or(3u32).max(1);
+    Ok(RaceDef {
+        horizon_id: format!("imported:{map}"),
+        name: tj["name"].as_str().unwrap_or(map).to_owned(),
+        kind: "Race".into(),
+        mode: 0,
+        laps,
+        circuit: true,
+        credits: 0,
+        drivers: drivers as u32,
+        track_id: 0,
+        route_file: "Ribbon_00/TrackRoute000.xml".into(),
+        length_m: tj["length_m"].as_f64().unwrap_or(0.0) as f32,
+        marker: grid[0],
+        grid,
+        gates,
+        start_gate: 0,
+        path,
+        post_race: None,
+        barrier_bits: 0,
+        objects: Vec::new(),
+        field,
+        // AISkills / AITemperaments / AIRubberbands ids per difficulty (Easy..Pro); the difficulty cap (race/field.rs) applies.
+        ai: [(40, 5, 3), (20, 5, 3), (8, 5, 3), (1, 5, 3)],
+        event_id: 0,
+        career_type: 0,
+        level: 0,
+        hub: 0,
+        unlock_xp: 0,
+        popularity_req: 0,
+        event_order: 0,
+        target_class: None,
+        player_car: None,
+        restriction: None,
+        prize_car: None,
+        recommended: Vec::new(),
+        cannons: [Vec::new(), Vec::new()],
+        start_cannon: None,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -372,6 +510,12 @@ const BARRIER_WALL_R: f32 = 2.5;
 fn ghost_solids() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FH1_RACE_GHOST_SOLIDS").is_ok_and(|v| v == "1"))
+}
+
+/// `FH1_RACE_LOG=1` (dev): log every racer's gate crossings and finish, and the race phases, to check races without looking.
+pub fn race_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FH1_RACE_LOG").is_ok_and(|v| v == "1"))
 }
 
 pub fn races_on() -> bool {
@@ -600,7 +744,8 @@ pub fn race_update(
     mut link: crate::progression::RaceLink,
     mut auto_step: Local<f32>,
 ) {
-    if !races_on() || events.races.is_empty() || track.id != "colorado" {
+    // Colorado's events, or an imported circuit's race (Events::load_imported; no other map has races).
+    if !races_on() || events.races.is_empty() {
         return;
     }
     let starts = link.take_starts();
@@ -853,6 +998,11 @@ pub fn race_update(
             if let RacePhase::Finished { left_s } = rs.phase {
                 let left = left_s - dt;
                 rs.phase = if left <= 0.0 || confirm { RacePhase::Results } else { RacePhase::Finished { left_s: left } };
+                if rs.phase == RacePhase::Results && race_log() {
+                    for r in &rs.racers {
+                        info!("race log: results P{} {} ({}): gates {}, lap {}, finished {}", r.position, r.driver, r.car, r.gates_done, r.lap, r.finished_s.map_or("-".to_string(), |t| format!("{t:.2} s")));
+                    }
+                }
             }
             if keys.just_pressed(KeyCode::F7) {
                 end_race(&events, &mut rs, &mut cars, &track, &mut commands, &mut ai, false);
@@ -1231,5 +1381,34 @@ pub(crate) mod tests {
         assert!(v.last().unwrap().distance(Vec2::new(200.0, 400.0)) < 1e-3, "{v:?}");
         // Last lap: stops at the finish (gate 7 = (0, 200)).
         assert!(lookahead(&def, 5).last().unwrap().distance(Vec2::new(0.0, 200.0)) < 1e-3);
+    }
+
+    /// Imported circuits (needs an install with them; skipped otherwise): `RACE_MAPS` (comma list, default FM2 Laguna Seca
+    /// and FM4 Catalunya). The gates come in race order along the racing line, the finish sits at the line's start, every
+    /// grid slot is behind the finish line and within the road, the field has cars.
+    #[test]
+    fn imported_race_definition() {
+        let data = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../data");
+        let Ok(assets) = crate::data::private_assets(&data) else { return };
+        let maps = std::env::var("RACE_MAPS").unwrap_or_else(|_| "fm2/lagunaseca_00,fm4/catalunya_00".into());
+        for map in maps.split(',') {
+            if !assets.join("imported").join(map).join("track.json").exists() {
+                eprintln!("{map}: not installed, skipped");
+                continue;
+            }
+            let def = imported_race(&assets, map).expect("race");
+            // Index of the racing-line point nearest each gate.
+            let near = |p: Vec3| def.path.iter().enumerate().min_by(|a, b| a.1.distance(p).total_cmp(&b.1.distance(p))).map(|(i, q)| (i, q.distance(p))).unwrap();
+            let idx: Vec<(usize, f32)> = def.gates.iter().map(|g| near(g.centre)).collect();
+            let fin = def.gates.last().unwrap();
+            let behind: Vec<f32> = def.grid.iter().map(|(p, _)| Vec2::new(p.x - fin.centre.x, p.z - fin.centre.z).dot(fin.forward)).collect();
+            eprintln!("{map}: {} gates at line points {idx:?} of {}, grid {} slots, behind the finish by {behind:.1?} m, field {:?}", def.gates.len(), def.path.len(), def.grid.len(), def.field.iter().map(|e| e.car.clone().unwrap_or_default()).collect::<Vec<_>>());
+            let (fi, fd) = *idx.last().unwrap();
+            assert!(fi < 5 || fi + 5 > def.path.len(), "{map}: finish gate at line point {fi}, not at the line's start");
+            assert!(fd < 10.0, "{map}: finish gate {fd:.1} m from the racing line");
+            assert!(idx[..idx.len() - 1].windows(2).all(|w| w[0].0 < w[1].0), "{map}: sector gates out of order {idx:?}");
+            assert!(behind.iter().all(|&b| b < 0.0), "{map}: a grid slot is past the finish line {behind:?}");
+            assert!(!def.field.is_empty(), "{map}: no imported cars for the field");
+        }
     }
 }

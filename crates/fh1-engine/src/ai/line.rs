@@ -28,6 +28,8 @@ pub struct RacingLine {
     /// Distance along the racing line at each point (m); `length` = full lap (closing segment included when closed).
     pub s: Vec<f32>,
     pub length: f32,
+    /// Lowest road-centre height on the line (m), for the "fell out of the world" reset.
+    pub min_y: f32,
 }
 
 /// Where a position sits relative to the line.
@@ -105,6 +107,26 @@ impl RacingLine {
         Ok(Self::new(closed, centre, lateral, offset))
     }
 
+    /// Re-fit the road around the racing line to measured edges: `left_m` / `right_m` = distance from each racing-line point
+    /// to the road's edge on its left / right (imported lines: the tarmac edge from the collision surfaces instead of the wall
+    /// distance). The racing line itself is unchanged; the centre, half width and offset follow the new edges. Each side is
+    /// the minimum over +-2 points (one stray sample does not widen the road), at least 1.5 m.
+    pub fn refit_road(&mut self, left_m: &[f32], right_m: &[f32]) {
+        let n = self.points.len();
+        let near_min = |v: &[f32], i: usize| (0..5).map(|k| v[(i + n + k - 2) % n]).fold(f32::INFINITY, f32::min);
+        for i in 0..n {
+            let dir = self.lateral[i].normalize_or_zero();
+            let (l, r) = (near_min(left_m, i).max(1.5), near_min(right_m, i).max(1.5));
+            let half = 0.5 * (l + r);
+            let p = self.points[i];
+            let c = p + dir * (0.5 * (l - r));
+            self.centre[i] = c;
+            self.lateral[i] = dir * half;
+            self.offset[i] = ((p - c).dot(dir) / half).clamp(-1.0, 1.0);
+        }
+        self.min_y = self.centre.iter().map(|c| c.y).fold(f32::INFINITY, f32::min);
+    }
+
     pub fn load_imported(path: &std::path::Path, mirror_z: bool) -> Result<Self> {
         Self::parse_imported(&std::fs::read(path)?, mirror_z)
     }
@@ -120,7 +142,8 @@ impl RacingLine {
             s.push(acc);
         }
         let length = if closed { acc + points[points.len() - 1].distance(points[0]) } else { acc };
-        Self { closed, centre, lateral, offset, points, s, length }
+        let min_y = centre.iter().map(|c| c.y).fold(f32::INFINITY, f32::min);
+        Self { closed, centre, lateral, offset, points, s, length, min_y }
     }
 
     pub fn len(&self) -> usize {

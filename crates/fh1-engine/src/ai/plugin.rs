@@ -78,26 +78,84 @@ impl AiLines {
             .clone()
     }
 
-    fn line(&mut self, assets: &std::path::Path, track: &str, route: u32) -> Option<Arc<RacingLine>> {
+    fn line(&mut self, assets: &std::path::Path, track: &Track, route: u32) -> Option<Arc<RacingLine>> {
+        let id = track.id.as_str();
         self.lines
             .entry(route)
             .or_insert_with(|| {
                 // An imported circuit (FM2 / FM4): route 0 is its own racing line, `imported/<map>/ai/line.json`.
-                let imported = assets.join("imported").join(track).join("ai/line.json");
-                let loaded = if route == 0 && imported.exists() { RacingLine::load_imported(&imported, MIRROR_Z) } else { RacingLine::load(&line_path(assets, track, route), MIRROR_Z) };
+                let imported = assets.join("imported").join(id).join("ai/line.json");
+                let is_imported = route == 0 && imported.exists();
+                let loaded = if is_imported { RacingLine::load_imported(&imported, MIRROR_Z) } else { RacingLine::load(&line_path(assets, id, route), MIRROR_Z) };
                 match loaded {
-                    Ok(l) => {
-                        info!("AI line {track} route {route}: {} points, {:.0} m, {}", l.len(), l.length, if l.closed { "closed" } else { "open" });
+                    Ok(mut l) => {
+                        info!("AI line {id} route {route}: {} points, {:.0} m, {}", l.len(), l.length, if l.closed { "closed" } else { "open" });
+                        if is_imported && road_edges_on() {
+                            fit_tarmac(&mut l, track);
+                        }
                         Some(Arc::new(l))
                     }
                     Err(e) => {
-                        warn!("AI line {track} route {route}: {e:#} (run fh1setup --only ailines)");
+                        warn!("AI line {id} route {route}: {e:#} (run fh1setup --only ailines)");
                         None
                     }
                 }
             })
             .clone()
     }
+}
+
+/// `FH1_AI_ROAD=1`: on imported circuits the AI's road is the tarmac (measured from the collision surfaces at load) instead
+/// of the wall-to-wall width in `ai/line.json` (run-off and gravel traps count as road there, so the AI pass and defend on
+/// them). Off by default while it is tested.
+fn road_edges_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FH1_AI_ROAD").is_ok_and(|v| v == "1"))
+}
+
+/// Distance from `p` (on the road) to the road's edge along `dir`: walked out in 0.5 m steps (at most `max` m) until the
+/// surface is off-road (the game's OffRoadness > 0.25: dirt, grass, gravel traps; kerbs and rumble strips stay road), the
+/// ground steps by more than 0.3 m (wall foot, ditch) or there is no ground, then 0.25 m back in.
+fn edge_distance(ground: &dyn fh1_engine::vehicle::Ground, p: Vec3, dir: Vec3, max: f32) -> f32 {
+    let mut last = p.y;
+    let mut d = 0.5;
+    while d <= max {
+        let q = p + dir * d;
+        match ground.ray(Vec3::new(q.x, last + 2.0, q.z), Vec3::NEG_Y, 4.0) {
+            Some(h) if (h.point.y - last).abs() < 0.3 && h.tyre.offroadness <= 0.25 => last = h.point.y,
+            _ => return (d - 0.75).max(0.0),
+        }
+        d += 0.5;
+    }
+    max
+}
+
+/// [`road_edges_on`]: measure the tarmac either side of every racing-line point and re-fit the line's road to it. Logs the
+/// median half width before and after.
+fn fit_tarmac(line: &mut RacingLine, track: &Track) {
+    let ground = track.ground.as_ref();
+    let mut left = Vec::with_capacity(line.len());
+    let mut right = Vec::with_capacity(line.len());
+    for i in 0..line.len() {
+        let dir = line.lateral[i].normalize_or_zero();
+        let p = ground.ray(line.points[i] + Vec3::Y * 2.0, Vec3::NEG_Y, 6.0).map_or(line.points[i], |h| h.point);
+        // No further than the walls (the file's distances, measured from the centre).
+        let c = line.centre[i];
+        let half = line.lateral[i].length();
+        let to_left_wall = (c + dir * half - p).dot(dir).max(1.5);
+        let to_right_wall = (p - (c - dir * half)).dot(dir).max(1.5);
+        left.push(edge_distance(ground, p, dir, to_left_wall));
+        right.push(edge_distance(ground, p, -dir, to_right_wall));
+    }
+    let median = |mut v: Vec<f32>| {
+        v.sort_by(f32::total_cmp);
+        v[v.len() / 2]
+    };
+    let before = median(line.lateral.iter().map(|l| l.length()).collect());
+    line.refit_road(&left, &right);
+    let after = median(line.lateral.iter().map(|l| l.length()).collect());
+    let narrow = line.lateral.iter().filter(|l| l.length() < 4.0).count();
+    info!("AI line {}: FH1_AI_ROAD tarmac fit, median half width {before:.1} m -> {after:.1} m ({narrow} of {} points under 4 m)", track.id, line.len());
 }
 
 /// An AI car's driver and its view of the player's progress on the same line.
@@ -146,7 +204,7 @@ fn spawn_ai(
             warn!("AI slot {}: no route number in {:?}", m.slot, m.route_file);
             continue;
         };
-        let Some(line) = lines.line(&garage.assets, &track.id, route) else { continue };
+        let Some(line) = lines.line(&garage.assets, &track, route) else { continue };
         let tables = lines.tables(&garage.assets);
         let dir = garage.assets.join("cars").join(&m.car_id);
         // Upgraded to the event's class (src/ai/upgrade.rs; `FH1_AI_UPGRADE=0` or no request = the stock car).
@@ -465,7 +523,7 @@ fn dev_race(
     let n: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(5).clamp(1, 11);
     let only_car = parts.next().map(str::to_owned).filter(|s| !s.is_empty());
     st.laps = parts.next().and_then(|s| s.parse().ok()).unwrap_or(2).max(1);
-    let Some(line) = lines.line(&garage.assets, &track.id, route) else { return };
+    let Some(line) = lines.line(&garage.assets, &track, route) else { return };
     st.gate = FinishGate::load(&garage.assets.join("imported").join(&track.id).join("track.json"), MIRROR_Z);
     match st.gate {
         Some(g) => info!("FH1_AI_RACE: finish gate at {:.1},{:.1},{:.1} facing {:.2},{:.2}, {:.1} m wide, {} laps", g.centre.x, g.centre.y, g.centre.z, g.forward.x, g.forward.z, g.width, st.laps),
@@ -477,9 +535,9 @@ fn dev_race(
     let total = n + 1;
     let rows = total.div_ceil(2);
     let base = if line.closed { 0.0 } else { 8.0 * rows as f32 + 4.0 };
-    // An imported circuit has its own start grid (`spawns.json` `grid_NN`, in the track's spawn list): AI on slots 0.., the player
+    // An imported circuit has its own start grid (`spawns.json` `grid_NN`, labelled "Grid NN" in the track's spawn list): AI on slots 0.., the player
     // behind them. Colorado (no grid spawns): the line-based grid.
-    let grid: Vec<(Vec3, f32)> = track.spawn_names.iter().zip(&track.spawns).filter(|(name, _)| name.starts_with("grid_")).map(|(_, s)| *s).collect();
+    let grid: Vec<(Vec3, f32)> = track.spawn_names.iter().zip(&track.spawns).filter(|(name, _)| name.starts_with("grid_") || name.starts_with("Grid ")).map(|(_, s)| *s).collect();
     let pose = |k: u32| {
         if let Some(g) = grid.get(k as usize) {
             return *g;
@@ -547,20 +605,49 @@ fn dev_laps(mut st: ResMut<DevRace>, time: Res<Time<Real>>, ai: Query<(&AiRacer,
 
 
 /// `FH1_AI_LOG=1` (dev): every 5 s, each AI car's lap, distance along its line, offset from the road centre (and the road's
-/// half width there), distance from the racing line, speed and position, to check AI races without looking.
-fn log_ai(time: Res<Time<Real>>, mut last: Local<f32>, cars: Query<(&AiRacer, &AiCar, &AiBrain)>) {
+/// half width there), distance from the racing line, speed and position, to check AI races without looking. "off-road" is the
+/// driver's count of excursions past the line's half width (on imported lines that is the wall distance, so it rarely fires);
+/// "grass" counts the times two or more wheels went onto a surface with the game's OffRoadness > 0 (dirt, grass), and the
+/// seconds spent there.
+fn log_ai(time: Res<Time<Real>>, mut last: Local<f32>, mut grass: Local<std::collections::HashMap<u32, (bool, u32, f32)>>, cars: Query<(&AiRacer, &AiCar, &AiBrain)>, player: Query<&Car>) {
     if std::env::var_os("FH1_AI_LOG").is_none() {
         return;
+    }
+    let dt = time.delta_secs();
+    let wheels = cars.iter().map(|(r, c, b)| (r.slot, &c.0, Some(b))).chain(player.iter().next().map(|p| (0, &p.0, None)));
+    for (slot, v, brain) in wheels {
+        let g = grass.entry(slot).or_default();
+        let off = v.offroad_wheels >= 2;
+        if off && !g.0 {
+            g.1 += 1;
+            let at = brain.map_or(String::new(), |b| format!(", line s {:.0} m lateral {:.1} of +-{:.1}", b.driver.proj.s, b.driver.proj.lateral, b.driver.proj.half_width));
+            info!(
+                "AI log grass: slot {slot} onto surfaces {:?} at {:.0},{:.0},{:.0}, {:.0} km/h{at}",
+                v.wheels.iter().map(|w| w.surface).collect::<Vec<_>>(),
+                v.position.x,
+                v.position.y,
+                v.position.z,
+                v.speed() * 3.6
+            );
+        }
+        if off {
+            g.2 += dt;
+        }
+        g.0 = off;
     }
     let t = time.elapsed_secs();
     if t - *last < 5.0 {
         return;
     }
     *last = t;
+    if let (Some(p), Some(g)) = (player.iter().next(), grass.get(&0)) {
+        info!("AI log t={t:.0}s player: speed {:.0} km/h, grass {} ({:.1} s), at {:.0},{:.0},{:.0}", p.0.speed() * 3.6, g.1, g.2, p.0.position.x, p.0.position.y, p.0.position.z);
+    }
     for (r, c, b) in &cars {
         let d = &b.driver;
+        let g = grass.get(&r.slot).copied().unwrap_or_default();
         info!(
-            "AI log t={t:.0}s slot {}: lap {} progress {:.0} m (line {:.0} m), lateral {:.1} m of +-{:.1}, off line {:.1} m, speed {:.0} km/h, resets {} off-road {}, at {:.0},{:.0},{:.0}",
+            "AI log t={t:.0}s slot {}: lap {} progress {:.0} m (line {:.0} m), lateral {:.1} m of +-{:.1}, off line {:.1} m, speed {:.0} km/h, resets {} off-road {} grass {} ({:.1} s), at {:.0},{:.0},{:.0}",
             r.slot,
             d.lap,
             d.progress,
@@ -571,6 +658,8 @@ fn log_ai(time: Res<Time<Real>>, mut last: Local<f32>, cars: Query<(&AiRacer, &A
             c.0.speed() * 3.6,
             d.resets,
             d.off_track,
+            g.1,
+            g.2,
             c.0.position.x,
             c.0.position.y,
             c.0.position.z
@@ -618,7 +707,7 @@ fn player_assist(
     };
     let stale = assist.line.as_ref().is_none_or(|l| l.route != route || l.car != car.0.data.media_name);
     if stale {
-        assist.line = lines.line(&garage.assets, &track.id, route).map(|l| PlayerLine::new(route, &l, &car.0));
+        assist.line = lines.line(&garage.assets, &track, route).map(|l| PlayerLine::new(route, &l, &car.0));
     }
     let Some(line) = assist.line.as_mut() else { return };
     line.update(&mut car.0, time.delta_secs());

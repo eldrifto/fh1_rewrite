@@ -489,3 +489,17 @@ main.rs: an explicit `FH1_RM_FM2_SHADOW_COL` wins over the track's ShadowColor (
 **Not tested:** the player in the race (not driven), FM4 circuits.
 **Test it:** `FH1_AI_LOG=1 FH1_AI_RACE=0:5::2 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: five FM2 cars on the grid ahead of you, they go after 3 s; the log shows `FH1_AI_RACE lap:` lines at about 125 s and `FH1_AI_RACE finish:` P1 to P5 at about 250 to 270 s.
 **Revert:** the commit; without `FH1_AI_RACE` nothing changes.
+
+## 2026-10-26 (28): AI fell-through floor follows the line; grass count in the AI log
+**Changed:** `ai/line.rs` (`RacingLine::min_y`), `ai/driver.rs` (reset floor = min(-50, lowest line point - 15 m)), `ai/plugin.rs` (`FH1_AI_LOG` counts excursions with 2+ wheels on OffRoadness > 0 surfaces, for AI and player, and logs each one).
+**Why:** on FM4's Bernese Alps (down to -99 m) every AI car was reset each tick below -50 m and none finished.
+**Tested:** Alps 5 AI 1 lap: all finish, 1 reset (was about 25,000 per car). Catalunya 5 AI: all finish, 0 resets. Player grass control fires. Colorado: not re-run; the floor only changes on routes lower than -35 m (not checked whether any exist), and then only gets more lenient.
+**Test it:** `FH1_AI_LOG=1 FH1_AI_RACE=0:5::1 ./target/release/fh1-engine.exe --track fm4/alps_00`: `FH1_AI_RACE finish:` P1 to P5 at about 140 to 170 s; `resets` stays 0 or 1 in the `AI log` lines.
+**Revert:** the commit.
+
+## 2026-10-26 (29): race module on imported circuits; FH1_AI_ROAD tarmac width; grid-slot filter fix
+**Changed:** `race.rs` (`Events::load_imported`, `imported_race`, `race_log` / `FH1_RACE_LOG`, results log, Colorado-only check removed from `race_update`, test `imported_race_definition`), `race/ai_link.rs` (gate log), `ui/world_load.rs` (load the imported race), `ai/plugin.rs` (`FH1_AI_ROAD`, `fit_tarmac`, `edge_distance`; `AiLines::line` takes the `Track`; dev-race grid filter fix), `ai/line.rs` (`RacingLine::refit_road`).
+**Tested:** Laguna Seca and Catalunya 2-lap races with 7 AI through the race module (start to the results table; the return to free roam not checked); Colorado's Recaro Rush still starts and finishes; `FH1_AI_ROAD=1` cuts AI off-tarmac time by 95 to 99 %. Unit test passes.
+**Not tested:** a race driven by a person; the F6 list on imported maps. AI lap times in a full field are slow (STATUS update 29).
+**Test it:** `FH1_RACE=0 FH1_RACE_LAPS=1 FH1_RACE_LOG=1 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: after 3 s you are put at the back of a 12-slot grid behind 7 FM2 cars, 3-2-1-GO, then drive; the log shows `race log: AI slot N gate 1/3 ...` lines, and after you cross the line a results table (`race log: results P1 ...`). Add `FH1_AI_ROAD=1` for the tarmac-width AI.
+**Revert:** the commit; without `FH1_RACE` the race only starts from the F6 list.

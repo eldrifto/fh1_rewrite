@@ -122,6 +122,9 @@ impl AiLink<'_, '_> {
                         } else {
                             racer.lap = racer.gates_done / per_lap.max(1) + 1;
                         }
+                        if super::race_log() {
+                            info!("race log: AI slot {} gate {}/{total} at {clock:.2} s (lap {}{})", r.slot, racer.gates_done, racer.lap, if racer.finished_s.is_some() { ", finished" } else { "" });
+                        }
                     }
                 }
             }
