@@ -317,6 +317,8 @@ fn car_of(mut e: Entity, parents: &Query<&ChildOf>, cars: &Query<(), With<FxDrop
 fn collect_silhouettes(
     mut commands: Commands,
     new: Query<(Entity, &Mesh3d, &Aabb, &GlobalTransform), (Added<MeshMaterial3d<FxCarMaterial>>, Without<super::FxWheelPart>)>,
+    new_gltf: Query<(Entity, &Mesh3d, &Aabb, &GlobalTransform), (Added<Aabb>, With<MeshMaterial3d<StandardMaterial>>)>,
+    names: Query<&Name>,
     parents: Query<&ChildOf>,
     car_marks: Query<(), With<FxDropShadow>>,
     mut cars: Query<(&GlobalTransform, Option<&mut DropShadowState>), With<FxDropShadow>>,
@@ -333,10 +335,35 @@ fn collect_silhouettes(
         let m = new.iter().filter(|(_, mesh, ..)| mesh_assets.get(&mesh.0).is_some()).count();
         info!("drop shadow: {} new car parts, {n} under an FxDropShadow car, {m} with mesh data", new.iter().count());
     }
-    for (e, mesh, aabb, gt) in &new {
+    // FM2 cars are plain glTF parts (no game-shaded `FxCarMaterial`): their body parts feed the same silhouette. Wheels, glass, lamps and the
+    // interior are skipped by node name (`FH1_FM2_DROPSHADOW=0` = off). The game draws this shadow for every car (`CDropShader`).
+    let gltf_on = !std::env::var("FH1_FM2_DROPSHADOW").is_ok_and(|v| v == "0");
+    let skip = ["wheel", "lexan", "light", "seat", "steering", "interior", "mirror", "glass", "window", "brake", "tire", "rim"];
+    let gltf_parts = new_gltf.iter().filter(|_| gltf_on).filter(|(e, ..)| {
+        let mut cur = *e;
+        loop {
+            if let Ok(n) = names.get(cur) {
+                let n = n.as_str().to_ascii_lowercase();
+                if skip.iter().any(|k| n.contains(k)) {
+                    return false;
+                }
+            }
+            match parents.get(cur) {
+                Ok(p) => cur = p.parent(),
+                Err(_) => return true,
+            }
+        }
+    });
+    for (e, mesh, aabb, gt) in new.iter().chain(gltf_parts) {
         let Some(car) = car_of(e, &parents, &car_marks) else { continue };
         let Ok((car_gt, _)) = cars.get(car) else { continue };
-        let Some(pos) = mesh_assets.get(&mesh.0).and_then(|m| crate::car_shadow::unpack_positions(m, aabb).zip(m.indices().map(|i| i.iter().collect::<Vec<_>>()))) else { continue };
+        let Some(pos) = mesh_assets.get(&mesh.0).and_then(|m| {
+            let verts = crate::car_shadow::unpack_positions(m, aabb).or_else(|| match m.attribute(Mesh::ATTRIBUTE_POSITION) {
+                Some(VertexAttributeValues::Float32x3(v)) => Some(v.iter().map(|p| Vec3::from(*p)).collect()),
+                _ => None,
+            })?;
+            Some((verts, m.indices()?.iter().collect::<Vec<_>>()))
+        }) else { continue };
         let to_car = car_gt.affine().inverse() * gt.affine();
         let local: Vec<Vec3> = pos.0.iter().map(|&p| to_car.transform_point3(p)).collect();
         let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);

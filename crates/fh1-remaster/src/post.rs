@@ -44,7 +44,7 @@ const GRADE_WGSL: &str = r#"
 @group(0) @binding(1) var src_s: sampler;
 @group(0) @binding(2) var lut: texture_3d<f32>;
 @group(0) @binding(3) var lut_s: sampler;
-struct Params { a: vec4<f32>, v: vec4<f32>, f1: vec4<f32>, f2: vec4<f32> };
+struct Params { a: vec4<f32>, v: vec4<f32>, f1: vec4<f32>, f2: vec4<f32>, m: vec4<f32>, lum: vec4<f32>, tint: vec4<f32>, lite: vec4<f32>, dark: vec4<f32> };
 @group(0) @binding(4) var<uniform> p: Params;
 
 struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
@@ -75,6 +75,31 @@ fn hable(x: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fragment(in: VsOut) -> @location(0) vec4<f32> {
     let c = textureSampleLevel(src, src_s, in.uv, 0.0);
+    if (p.m.x > 0.5) {
+        // FM2's own FinalCombineBloomTonemap (docs: STATUS.md, read from the game's post shader): desaturate toward the
+        // luminance, tint, then a luminance tone curve blending the dark and light parameter sets (xyzw = black point,
+        // white point, gamma, boost).
+        var x = max(c.rgb, vec3<f32>(0.0));
+        let l = dot(x, p.lum.xyz);
+        x = (vec3<f32>(l) + (x - vec3<f32>(l)) * p.m.y) * p.tint.xyz;
+        let y = dot(x, vec3<f32>(0.2125, 0.7154, 0.0721));
+        // The game's blend (vertex shader of the technique): t = saturate((average scene luminance - min) / (max - min)) with the track's
+        // TrackLumLimits; its average comes from a small adaptation texture, here a grid of samples of the frame. m.z >= 0 overrides t.
+        var t = p.m.z;
+        if (t < 0.0) {
+            var sum = 0.0;
+            for (var gy = 0; gy < 6; gy = gy + 1) {
+                for (var gx = 0; gx < 8; gx = gx + 1) {
+                    let sc = textureSampleLevel(src, src_s, vec2<f32>((f32(gx) + 0.5) / 8.0, (f32(gy) + 0.5) / 6.0), 0.0).rgb;
+                    sum = sum + dot(max(sc, vec3<f32>(0.0)), vec3<f32>(0.2125, 0.7154, 0.0721));
+                }
+            }
+            t = clamp((sum / 48.0 - p.lum.w) * p.tint.w, 0.0, 1.0);
+        }
+        let q = mix(p.dark, p.lite, t);
+        let y2 = pow(max(y - q.x, 0.0) / max(q.y - q.x, 1e-4), 1.0 / max(q.z, 0.1)) + q.w;
+        return vec4<f32>(x * (y2 / max(y, 1e-6)), c.a);
+    }
     var s: vec3<f32>;
     var g: vec3<f32>;
     if (p.a.y > 0.5) {
@@ -110,6 +135,52 @@ pub struct GradeSettings {
     pub game_tonemap: bool,
     /// (W, A, B, C, D, E, F, exposure EV), day/night blended.
     pub filmic: [f32; 8],
+    /// FM2's own final combine (`FH1_FM2_POST=1`, set up by the engine for FM2 tracks); replaces the whole grade.
+    pub fm2: Option<Fm2Post>,
+}
+
+/// FM2's `FinalCombineBloomTonemap` inputs from a track's `TrackSettings.xml` (`DesaturateAmount`, `DesatLuminosity`, `DesatPostMod`,
+/// `ToneMappingLevels`, `TrackLumLimits`). VERIFIED in the game's code (`0x82284bf0`): black points, white points, boosts and the luminance limits
+/// are scaled by 1/255 (the constant `0x82002e4c`), gammas are not. The dark / light curve blend `t` is
+/// `saturate((average frame luminance - min) * 1 / (max - min))` with the limits (the vertex shader of the technique, whose sign convention for
+/// the subtract is read from the intent, not verified); the engine estimates the average from a grid of samples of the frame. `FH1_FM2_POST_T`
+/// (0..1) forces `t`.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct Fm2Post {
+    pub desat: f32,
+    pub lum: [f32; 3],
+    pub tint: [f32; 3],
+    pub light: [f32; 4],
+    pub dark: [f32; 4],
+    /// Forced blend (`FH1_FM2_POST_T`); negative = computed from the frame.
+    pub t: f32,
+    /// `TrackLumLimits` min / 255 and 1 / ((max - min) / 255).
+    pub lum_min: f32,
+    pub lum_inv_range: f32,
+}
+
+impl Fm2Post {
+    pub fn from_xml(xml: &str) -> Option<Self> {
+        let attr = |tag: &str, a: &str| -> Option<f32> {
+            let i = xml.find(&format!("<{tag} "))?;
+            let end = xml[i..].find('>')? + i;
+            let t = &xml[i..end];
+            let j = t.find(&format!("{a}=\""))? + a.len() + 2;
+            t[j..].split('"').next()?.parse().ok()
+        };
+        let curve = |k: &str| [attr("ToneMappingLevels", &format!("{k}CurveBlackPoint")), attr("ToneMappingLevels", &format!("{k}CurveWhitePoint")), attr("ToneMappingLevels", &format!("{k}CurveGamma")), attr("ToneMappingLevels", &format!("{k}CurveBoost"))];
+        let pack = |c: [Option<f32>; 4]| Some([c[0]? / 255.0, c[1]? / 255.0, c[2]?, c[3]? / 255.0]);
+        Some(Self {
+            desat: attr("DesaturateAmount", "value")?,
+            lum: [attr("DesatLuminosity", "r")?, attr("DesatLuminosity", "g")?, attr("DesatLuminosity", "b")?],
+            tint: [attr("DesatPostMod", "r")?, attr("DesatPostMod", "g")?, attr("DesatPostMod", "b")?],
+            light: pack(curve("Light"))?,
+            dark: pack(curve("Dark"))?,
+            t: env_f32("FH1_FM2_POST_T", -1.0),
+            lum_min: attr("TrackLumLimits", "min")? / 255.0,
+            lum_inv_range: 255.0 / (attr("TrackLumLimits", "max")? - attr("TrackLumLimits", "min")?).max(1.0),
+        })
+    }
 }
 
 #[derive(Resource)]
@@ -128,7 +199,8 @@ struct GradeCache {
 pub(crate) fn plugin(app: &mut App) {
     motion_blur::plugin(app);
     let strength = env_f32("FH1_RM_LUT", 1.0);
-    if strength <= 0.0 {
+    let fm2 = app.world().get_resource::<Fm2Post>().cloned();
+    if strength <= 0.0 && fm2.is_none() {
         return;
     }
     app.insert_resource(GradeSettings {
@@ -137,6 +209,7 @@ pub(crate) fn plugin(app: &mut App) {
         vignette: env_f32("FH1_RM_VIGNETTE", 0.22),
         game_tonemap: game_tonemap(),
         filmic: [1.0, 0.7, 0.038, 0.634, 0.22, 0.003, 0.107, 0.31],
+        fm2,
     })
         .add_plugins(ExtractResourcePlugin::<GradeSettings>::default())
         .add_systems(PostUpdate, follow_lut);
@@ -261,7 +334,7 @@ fn grade_system(
     let size = extracted.viewport.zw().as_vec2();
     let aspect = size.x / size.y.max(1.0);
     let f = settings.filmic;
-    let params: [f32; 16] = [
+    let params: [f32; 36] = [
         settings.strength.min(1.0),
         settings.game_tonemap as u32 as f32,
         0.0,
@@ -271,6 +344,11 @@ fn grade_system(
         aspect,
         0.0,
         f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
+        settings.fm2.is_some() as u32 as f32, settings.fm2.as_ref().map_or(1.0, |m| m.desat), settings.fm2.as_ref().map_or(1.0, |m| m.t), 0.0,
+        settings.fm2.as_ref().map_or(0.0, |m| m.lum[0]), settings.fm2.as_ref().map_or(0.0, |m| m.lum[1]), settings.fm2.as_ref().map_or(0.0, |m| m.lum[2]), settings.fm2.as_ref().map_or(0.0, |m| m.lum_min),
+        settings.fm2.as_ref().map_or(1.0, |m| m.tint[0]), settings.fm2.as_ref().map_or(1.0, |m| m.tint[1]), settings.fm2.as_ref().map_or(1.0, |m| m.tint[2]), settings.fm2.as_ref().map_or(1.0, |m| m.lum_inv_range),
+        settings.fm2.as_ref().map_or(0.0, |m| m.light[0]), settings.fm2.as_ref().map_or(1.0, |m| m.light[1]), settings.fm2.as_ref().map_or(1.0, |m| m.light[2]), settings.fm2.as_ref().map_or(0.0, |m| m.light[3]),
+        settings.fm2.as_ref().map_or(0.0, |m| m.dark[0]), settings.fm2.as_ref().map_or(1.0, |m| m.dark[1]), settings.fm2.as_ref().map_or(1.0, |m| m.dark[2]), settings.fm2.as_ref().map_or(0.0, |m| m.dark[3]),
     ];
     let bytes: Vec<u8> = params.iter().flat_map(|f| f.to_le_bytes()).collect();
     let uniform = cache

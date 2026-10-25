@@ -296,6 +296,11 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
             r.flags |= FLAG_LM_LIGHT | fm2_two_sided();
             r.params[1] = [dark[0], dark[1], dark[2], 0.0];
             r.params[3][1..4].copy_from_slice(&[light[0] - dark[0], light[1] - dark[1], light[2] - dark[2]]);
+            // The road's own specular term (see the diffuse family below): ps[8] = (K, exponent) -> p0.y = K, p1.w = exponent.
+            if let Some(sp) = ps.get(8).filter(|sp| sp[1] > 0.5) {
+                r.params[1][3] = sp[1];
+                r.params[0][1] = sp[0];
+            }
         }
     } else if shader.starts_with("h_road") || shader.starts_with("h_vblnd") {
         // Road: A uv0 × c0.xy, B uv0 × c0.zw, C uv0 × c1.xy, noise uv0 × c1.zw, normal uv0 × c0.xy (strength c3.z),
@@ -355,6 +360,11 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
             // single-layer diffuse material).
             r.params[1] = [dark[0], dark[1], dark[2], 0.0];
             r.params[3][1..4].copy_from_slice(&[light[0] - dark[0], light[1] - dark[1], light[2] - dark[2]]);
+            // The draw's own specular term (`FM2_SPEC_MAT`, fm2_scenery.rs): ps[8] = (K per unit level, material exponent) -> p1.w = exponent, p2.y = K.
+            if let Some(sp) = ps.get(8).filter(|sp| sp[1] > 0.5) {
+                r.params[1][3] = sp[1];
+                r.params[0][1] = sp[0];
+            }
         }
     }
     r

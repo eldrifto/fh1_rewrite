@@ -9,7 +9,7 @@ fn section(d: &[u8], name: &[u8]) -> Option<usize> {
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut ar = Archive::open(&a[1]).unwrap();
-    let suffix = format!(".{:0>5}.rmb.bin", a[2].parse::<usize>().unwrap());
+    let suffix = if a[2] == "sky" { ".sky.rmb.bin".to_string() } else { format!(".{:0>5}.rmb.bin", a[2].parse::<usize>().unwrap()) };
     let e = ar.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(&suffix)).unwrap().clone();
     let d = ar.read(&e).unwrap();
     let (g, dt) = (section(&d, b".gpu").unwrap(), section(&d, b".data").unwrap());

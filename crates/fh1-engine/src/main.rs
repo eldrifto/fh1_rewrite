@@ -51,6 +51,7 @@ mod skidmarks;
 mod net;
 mod smoke;
 mod smash;
+mod fm2_sky;
 mod track;
 mod ui;
 
@@ -125,6 +126,10 @@ struct SpawnIndex(usize);
 /// Car (and its Combo_Colors paint sequence) of a plain launch: the red Corrado of the Xenia reference shots.
 const DEFAULT_CAR: (&str, u32) = ("VW_Corrado_95", 2);
 
+/// The imported FM2 Nissan Skyline GT-R V-Spec II (the car of the FM2 Xenia reference shots) is the default when FM2 cars are installed;
+/// the Corrado stays the fallback. (`../imported/fm2/cars/<media name>` is how `imported_car_folders` names it.)
+const DEFAULT_FM2_CAR: &str = "../imported/fm2/cars/NIS_SkylineGTRVSpecII_02";
+
 /// Last pose with all four wheels on the ground, to recover a car that falls off the world.
 #[derive(Resource, Default)]
 struct SafePose {
@@ -173,6 +178,7 @@ fn main() -> AppExit {
     cars.extend(ui::browser::imported_car_folders(&assets));
     let current = car
         .and_then(|c| cars.iter().position(|x| x.eq_ignore_ascii_case(&c) || x.rsplit('/').next().is_some_and(|t| t.eq_ignore_ascii_case(&c))))
+        .or_else(|| cars.iter().position(|x| x == DEFAULT_FM2_CAR))
         .or_else(|| cars.iter().position(|x| x == DEFAULT_CAR.0))
         .or_else(|| cars.iter().position(|x| x == "ALF_8C_08"))
         .unwrap_or(0);
@@ -203,7 +209,101 @@ fn main() -> AppExit {
     if let Some(t) = fh1_render::lighting::FxTimeOfDay::load(&track::time_of_day_path(&assets, &track.id), 960.0) {
         let mut t = t;
         t.rate_scale = 1.0;
+        if track.id.starts_with("fm2/") {
+            track::fm2_lighting(&mut t, &assets, &track.id);
+        }
         app.insert_resource(t);
+    }
+    // FM2 circuits carry no post-chain inputs of their own, so they borrow Colorado's: its grading LUT is FH1's warm late-afternoon look, which
+    // tints FM2's neutral roads beige (2026-10-16 comparison with the original). A weaker LUT unless the user set one.
+    // 2026-10-19: FM2 draws its pixel shaders straight to the screen with no filmic curve, so FH1's curve, LUT and vignette are all off
+    // (the interpreter on Sunset's road gives the Xenia pixel, the engine with the curve gave 73 against 111). FH1_RM_FM2_GRADE=1 restores the old look.
+    if track.id.starts_with("fm2/") && std::env::var_os("FH1_RM_FM2_GRADE").is_none() {
+        for (k, v) in [("FH1_RM_TONEMAP", "none"), ("FH1_RM_LUT", "0"), ("FH1_RM_VIGNETTE", "0")] {
+            if std::env::var_os(k).is_none() {
+                std::env::set_var(k, v);
+            }
+        }
+    } else if track.id.starts_with("fm2/") && std::env::var_os("FH1_RM_LUT").is_none() {
+        std::env::set_var("FH1_RM_LUT", "0.3");
+    }
+    // FH1_FM2_SPEC=<k>: the sun sheen of FM2 roads follows the game's own specular term: a highlight of power 9.7 (the specular exponent the road
+    // materials carry: 7.8 to 12.3, 9.68 on Nurburgring / Mugello) scaled by the track's TrackSettings `GlobalSpecularLevel` (green channel) times `k`
+    // (the interpreter gives 0.157 per unit level on Nurburgring's road, in the game's output units; the engine's own units need a calibration).
+    // Explicit FH1_RM_FM2_SHEEN / FH1_RM_FM2_SHEEN_POW win. Off unless the variable is set.
+    if track.id.starts_with("fm2/") {
+        if let Some(k) = std::env::var("FH1_FM2_SPEC").ok().and_then(|v| v.parse::<f32>().ok()) {
+            let gs = track::native_track_dir(&assets, &track.id)
+                .and_then(|d| std::fs::read_to_string(d.join("tracks/TrackSettings.xml")).ok())
+                .and_then(|x| {
+                    let i = x.find("<GlobalSpecularLevel ")?;
+                    let t = &x[i..i + x[i..].find('>')?];
+                    let j = t.find("g=\"")? + 3;
+                    t[j..].split('"').next()?.parse::<f32>().ok()
+                })
+                .unwrap_or(1.0);
+            if std::env::var_os("FH1_RM_FM2_SHEEN").is_none() {
+                std::env::set_var("FH1_RM_FM2_SHEEN", format!("{:.4}", k * gs));
+            }
+            if std::env::var_os("FH1_RM_FM2_SHEEN_POW").is_none() {
+                std::env::set_var("FH1_RM_FM2_SHEEN_POW", "9.7");
+            }
+            bevy::log::info!("FH1_FM2_SPEC: k {k} x GlobalSpecularLevel {gs} -> sheen gain {:.4}, power 9.7", k * gs);
+        }
+    }
+    // FH1_FM2_SPEC_MAT=1: FM2 road materials that carry their own specular term (importer `FM2_SPEC_MAT`) use it instead of the fixed sun sheen; the
+    // track's `GlobalSpecularLevel` (TrackSettings, green) scales it. Other materials keep the sheen.
+    if track.id.starts_with("fm2/") && std::env::var_os("FH1_FM2_SPEC_MAT").is_some() {
+        let gs = track::native_track_dir(&assets, &track.id)
+            .and_then(|d| std::fs::read_to_string(d.join("tracks/TrackSettings.xml")).ok())
+            .and_then(|x| {
+                let i = x.find("<GlobalSpecularLevel ")?;
+                let t = &x[i..i + x[i..].find('>')?];
+                let j = t.find("g=\"")? + 3;
+                t[j..].split('"').next()?.parse::<f32>().ok()
+            })
+            .unwrap_or(1.0);
+        std::env::set_var("FH1_RM_FM2_SPEC_MAT", "1");
+        if std::env::var_os("FH1_RM_FM2_SPEC_GS").is_none() {
+            std::env::set_var("FH1_RM_FM2_SPEC_GS", format!("{gs:.4}"));
+        }
+        bevy::log::info!("FH1_FM2_SPEC_MAT: GlobalSpecularLevel {gs}");
+    }
+    // FH1_FM2_SHADOW_GAME (on by default, =0 to disable): the real-time shadows on FM2 lightmap-lit surfaces follow the game's own rule (road pixel shader: light =
+    // min(1 - (1 - ShadowColor) * S, lerp(dark, light, lightmap))) with the track's TrackSettings `ShadowColor` (green) instead of the fixed strength.
+    if track.id.starts_with("fm2/") && std::env::var("FH1_FM2_SHADOW_GAME").map_or(true, |v| v != "0") {
+        let c = track::native_track_dir(&assets, &track.id)
+            .and_then(|d| std::fs::read_to_string(d.join("tracks/TrackSettings.xml")).ok())
+            .and_then(|x| {
+                let i = x.find("<ShadowColor ")?;
+                let t = &x[i..i + x[i..].find('>')?];
+                let j = t.find("g=\"")? + 3;
+                t[j..].split('"').next()?.parse::<f32>().ok()
+            })
+            .unwrap_or(0.4);
+        std::env::set_var("FH1_RM_FM2_SHADOW_GAME", "1");
+        std::env::set_var("FH1_RM_FM2_SHADOW_COL", format!("{c:.4}"));
+        bevy::log::info!("FH1_FM2_SHADOW_GAME: ShadowColor {c}");
+    }
+    // FH1_FM2_POST=1: FM2's own final combine (desaturate, tint, tone curve from the track's TrackSettings.xml) replaces the grade for FM2 tracks
+    // (post.rs `Fm2Post`; STATUS.md). Off by default.
+    if track.id.starts_with("fm2/") && std::env::var_os("FH1_FM2_POST").is_some() {
+        let xml = track::native_track_dir(&assets, &track.id).and_then(|d| std::fs::read_to_string(d.join("tracks/TrackSettings.xml")).ok());
+        match xml.as_deref().and_then(fh1_remaster::post::Fm2Post::from_xml) {
+            Some(p) => {
+                bevy::log::info!("FH1_FM2_POST: {p:?}");
+                app.insert_resource(p);
+            }
+            None => bevy::log::warn!("FH1_FM2_POST: no usable TrackSettings.xml for {}", track.id),
+        }
+    }
+    // FM2's own painted sky replaces Colorado's procedural one.
+    if track.id.starts_with("fm2/") {
+        if let Some(sky) = track::native_track_dir(&assets, &track.id).and_then(|d| fm2_sky::load(&d)) {
+            std::env::set_var("FH1_SKY", "0");
+            app.insert_resource(sky);
+            fm2_sky::plugin(&mut app);
+        }
     }
     // FH1's own post chain (bloom, adaptation, filmic, grading LUTs, vignette); neutral without the files.
     app.insert_resource(track::post_config(&assets, &track.id));

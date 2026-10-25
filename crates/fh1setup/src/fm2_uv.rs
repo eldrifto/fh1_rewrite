@@ -42,6 +42,59 @@ pub struct DrawUv {
     /// Item position -> the draw constant register holding the atlas sub-rectangle `[su, sv, ou, ov]` the shader maps its coordinate into
     /// (`frac(uv) * c.xy + c.zw`); the coordinate in `slots` is the unit coordinate before that transform.
     pub atlas: BTreeMap<usize, u32>,
+    /// The pixel shader the draw runs, for evaluating it on the CPU (`fh1_shaders::ps_cpu`).
+    pub ps: Option<PsRun>,
+}
+
+/// A draw's pixel shader and how its items feed it.
+#[derive(Default, Clone)]
+pub struct PsRun {
+    pub words: Vec<u32>,
+    pub literals: Vec<[f32; 4]>,
+    /// Item position -> the sampler index (`tfN`) it is bound to.
+    pub item_sampler: BTreeMap<usize, u32>,
+    /// Sampler index -> the interpolator register carrying its texture coordinate.
+    pub sampler_reg: BTreeMap<u32, u32>,
+    /// The specular exponent of the draw's material: the one pixel-shader constant the shader reads that the draw's stream records do not set, taken from the
+    /// model's material parameter block (`.data`, vectors with a 0x14 stride; STATUS.md "material block"). None when it cannot be found.
+    pub spec_exp: Option<(u32, f32)>,
+}
+
+/// The material block's value of the single constant register the pixel shader reads but the draw does not set (see [`PsRun::spec_exp`]).
+fn spec_exponent(text: &str, consts: &std::collections::BTreeMap<u32, [f32; 4]>, data: &[u8]) -> Option<(u32, f32)> {
+    // Constant registers (< 100) read by instruction lines: `   12  mad r0.xyz_, r1, c3.xxxx, ...` or a co-issued `+ mulsc ...` line.
+    let mut used = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        let t = line.trim_start();
+        if !(t.starts_with('+') || t.chars().next().is_some_and(|c| c.is_ascii_digit())) {
+            continue;
+        }
+        let b = line.as_bytes();
+        for (i, &c) in b.iter().enumerate() {
+            if c == b'c' && (i == 0 || !b[i - 1].is_ascii_alphanumeric()) {
+                let digits: String = line[i + 1..].chars().take_while(|d| d.is_ascii_digit()).collect();
+                if let Ok(r) = digits.parse::<u32>() {
+                    if !digits.is_empty() && r < 100 {
+                        used.insert(r);
+                    }
+                }
+            }
+        }
+    }
+    let missing: Vec<u32> = used.iter().copied().filter(|r| !consts.contains_key(r)).collect();
+    let [reg] = missing[..] else { return None };
+    let k0 = *consts.keys().next()?;
+    let vec_at = |o: usize| -> Option<[f32; 4]> {
+        let w = |j: usize| data.get(o + 4 * j..o + 4 * j + 4).map(|b| f32::from_be_bytes(b.try_into().unwrap()));
+        Some([w(0)?, w(1)?, w(2)?, w(3)?])
+    };
+    for o in (0..data.len().saturating_sub(16)).step_by(4) {
+        if consts.iter().all(|(k, v)| (*k >= k0) && vec_at(o + (*k - k0) as usize * 0x14).is_some_and(|x| x == *v)) {
+            let e = vec_at(o + (reg - k0) as usize * 0x14)?[0];
+            return (e.is_finite() && e > 0.5 && e < 200.0).then_some((reg, e));
+        }
+    }
+    None
 }
 
 pub fn resolve(raw_model: &[u8], model: &fm2::Model, kind: &dyn Fn(u32) -> ItemKind) -> Vec<DrawUv> {
@@ -122,16 +175,18 @@ pub fn resolve(raw_model: &[u8], model: &fm2::Model, kind: &dyn Fn(u32) -> ItemK
                 return DrawUv { slots: out, ..Default::default() };
             };
             let mut samp = samp0;
+            let mut ps_ix = pairs[gi].1;
             if let Some(p0) = pairs[gi].1 {
                 let want = shaders[p0].dwords;
                 let gap = |n: usize| (n as isize - d.items.len() as isize).abs();
-                if let Some((_, alt)) = (0..shaders.len())
+                if let Some((ai, alt)) = (0..shaders.len())
                     .filter(|&i| i != p0 && !shaders[i].vertex && shaders[i].dwords == want)
                     .filter_map(|i| Some((i, ps_samplers_all[i].as_ref()?)))
                     .filter(|(_, a)| gap(a.len()) < gap(samp0.len()))
                     .min_by_key(|(_, a)| gap(a.len()))
                 {
                     samp = alt;
+                    ps_ix = Some(ai);
                 }
             }
             // The draw's items fill the pixel shader's 2D samplers; when it lists fewer items than the shader samples, the leading samplers
@@ -229,7 +284,17 @@ pub fn resolve(raw_model: &[u8], model: &fm2::Model, kind: &dyn Fn(u32) -> ItemK
                 }
                 out.insert(slot as usize, uvs);
             }
-            DrawUv { slots: out, alpha_const, atlas }
+            let ps = ps_ix.map(|i| {
+                let t = &shaders[i];
+                PsRun {
+                    words: (0..t.dwords).filter_map(|k| be(gpu, t.code_offset + 4 * k)).collect(),
+                    literals: t.literals.clone(),
+                    item_sampler: (0..d.items.len()).filter_map(|j| Some((j, sampler_of(j)?.index))).collect(),
+                    sampler_reg: samp.iter().filter_map(|s| Some((s.index, s.direct?))).collect(),
+                    spec_exp: spec_exponent(&t.text, &d.constants, data),
+                }
+            });
+            DrawUv { slots: out, alpha_const, atlas, ps }
         })
         .collect()
 }

@@ -451,10 +451,25 @@ fn wgsl() -> String {
         .replace("RM_LM_LIGHT_GAIN", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_GAIN", 3.0)))
         .replace("RM_LM_LIGHT_BIAS", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_BIAS", 0.5)))
         .replace("RM_FM2_DYN_SHADOW", &format!("{:.3}", wenv("FH1_RM_FM2_DYN_SHADOW", 0.6)))
+        .replace("RM_FM2_DYN_LIT", &format!("{:.1}", wenv("FH1_RM_FM2_DYN_LIT", 0.0)))
+        .replace("RM_FM2_SHADOW_GAME", &format!("{:.1}", wenv("FH1_RM_FM2_SHADOW_GAME", 0.0)))
+        .replace("RM_FM2_SHADOW_DBG", &format!("{:.1}", wenv("FH1_RM_FM2_SHADOW_DBG", 0.0)))
+        .replace("RM_FM2_SHADOW_POW", &format!("{:.2}", wenv("FH1_RM_FM2_SHADOW_POW", 1.0)))
+        .replace("RM_FM2_SHADOW_COL", &format!("{:.4}", wenv("FH1_RM_FM2_SHADOW_COL", 0.4)))
         .replace("RM_FM2_SHEEN_POW", &format!("{:.1}", wenv("FH1_RM_FM2_SHEEN_POW", 24.0)))
+        .replace("RM_FM2_SPEC_MAT", &format!("{:.1}", wenv("FH1_RM_FM2_SPEC_MAT", 0.0)))
+        .replace("RM_FM2_SPEC_FIX", &format!("{:.1}", if std::env::var_os("FH1_RM_FM2_SPEC_DIR").is_some() { 1.0 } else { 0.0 }))
+        .replace("RM_FM2_SPEC_DIR", &{
+            let v: Vec<f32> = std::env::var("FH1_RM_FM2_SPEC_DIR").ok().map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
+            format!("vec3<f32>({:.4}, {:.4}, {:.4})", v.first().copied().unwrap_or(0.0), v.get(1).copied().unwrap_or(1.0), v.get(2).copied().unwrap_or(0.0))
+        })
+        .replace("RM_FM2_SPEC_GS", &format!("{:.3}", wenv("FH1_RM_FM2_SPEC_GS", 1.0)))
+        .replace("RM_FM2_SPEC_UNIT", &format!("{:.3}", wenv("FH1_RM_FM2_SPEC_UNIT", 0.32)))
         .replace("RM_FM2_SHEEN", &format!("{:.3}", wenv("FH1_RM_FM2_SHEEN", 0.1)))
         .replace("RM_LM_LIGHT_NOLM", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_NOLM", 0.75)))
         .replace("RM_LM_LIGHT_FLOOR", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_FLOOR", 0.12)))
+        .replace("RM_FM2_GAMMA_LM", &format!("{:.1}", wenv("FH1_RM_FM2_GAMMA_LM", 0.0)))
+        .replace("RM_FM2_DBG", &format!("{:.1}", wenv("FH1_RM_FM2_DBG", 0.0)))
         .replace("RM_LM_LIGHT_EXPOSURE", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_EXPOSURE", 1.0)))
         .replace("//BINDLESS_DECL", &decl_bindless).replace("//PLAIN_DECL", &decl_plain).replace("//SAMPLERS", &samplers)
 }
@@ -1021,6 +1036,7 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     // albedo by it and output unlit below rather than adding Bevy's sun/ambient, which double-counts.
     let lm_light = (flags & FLAG_LM_LIGHT) != 0u;
     if lm_light {
+        let albedo0 = col;
         // A draw without a lightmap tile (fences, trunks, signs, tree cards) gets a mid lightmap value: lit by the sun it would
         // go black wherever its (smoothed, up-biased) normal faces away from it.
         var lm = vec3<f32>(RM_LM_LIGHT_NOLM);
@@ -1032,7 +1048,15 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
         if any(p.p[3].yzw != vec3<f32>(0.0)) {
             // FLOOR: the game also lights shadow with the sky / bounce light (TrackSettings SH ambient), which its lightmap colours
             // do not include: without it fully shadowed faces draw black.
-            col = col * max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR)) * RM_LM_LIGHT_EXPOSURE;
+            if RM_FM2_GAMMA_LM > 0.5 {
+                // The game multiplies gamma-space values: display = texture x lerp(dark, light, stored lightmap value). The sampler decodes both
+                // textures to linear, so redo the product in gamma space and return to linear: (tex^(1/2.2) x L(lm^(1/2.2)))^2.2.
+                let lmg = pow(max(lm, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+                let lg = max(lmg * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR));
+                col = pow(max(pow(max(col, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2)) * lg, vec3<f32>(0.0)), vec3<f32>(2.2)) * RM_LM_LIGHT_EXPOSURE;
+            } else {
+                col = col * max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR)) * RM_LM_LIGHT_EXPOSURE;
+            }
         } else {
             col = col * (lm * RM_LM_LIGHT_GAIN + RM_LM_LIGHT_BIAS);
         }
@@ -1048,17 +1072,43 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
                 view_bindings::view.view_from_world[2].z,
                 view_bindings::view.view_from_world[3].z
             ), in.world_position);
-            let lit_lm = smoothstep(0.35, 0.75, (lm.r + lm.g + lm.b) * 0.3333);
+            let lit_lm = select(smoothstep(0.35, 0.75, (lm.r + lm.g + lm.b) * 0.3333), 1.0, RM_FM2_DYN_LIT > 0.5);
             for (var i = 0u; i < view_bindings::lights.n_directional_lights; i = i + 1u) {
                 if (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
                     let sh = shadows::fetch_directional_shadow(i, in.world_position, pbr.world_normal, view_z, in.position.xy);
-                    col = col * (1.0 - RM_FM2_DYN_SHADOW * lit_lm * (1.0 - sh));
+                    if RM_FM2_SHADOW_GAME > 0.5 && any(p.p[3].yzw != vec3<f32>(0.0)) {
+                        // The game's own rule (road pixel shader): light = min(1 - (1 - ShadowColor) * S, lerp(dark, light, lightmap)), S = 1 in full shadow,
+                        // so the shadow only darkens where the lightmap light is above the track's shadow level. `FH1_FM2_SHADOW_GAME=1`.
+                        let lerpv = max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(0.001));
+                        let lit = min(vec3<f32>(1.0 - (1.0 - RM_FM2_SHADOW_COL) * (1.0 - sh)), lerpv);
+                        col = col * pow(lit / lerpv, vec3<f32>(RM_FM2_SHADOW_POW));
+                        if RM_FM2_SHADOW_DBG > 0.5 { col = vec3<f32>(sh * sh * sh, lerpv.g / 2.0, 0.0); }
+                    } else {
+                        col = col * (1.0 - RM_FM2_DYN_SHADOW * lit_lm * (1.0 - sh));
+                    }
                     sun_vis = sh;
                     break;
                 }
             }
         }
-        if RM_FM2_SHEEN > 0.0 {
+        if RM_FM2_SPEC_MAT > 0.5 && p.p[1].w > 0.5 {
+            // The game's own specular term of this material (importer `FM2_SPEC_MAT`): K (p0.y, the highlight's peak per unit level, from the
+            // draw's pixel shader) x the track's GlobalSpecularLevel x (n.h)^exponent (p1.w, the material's), only where the lightmap light is above the
+            // shader's 0.45 gate. RM_FM2_SPEC_UNIT converts the game's output units to this renderer's (calibrated on Road Atlanta, STATUS.md).
+            let n = normalize(pbr.world_normal);
+            let lerpv = lm * p.p[3].yzw + p.p[1].xyz;
+            let gate = smoothstep(0.43, 0.47, lerpv.g);
+            var spec = vec3<f32>(0.0);
+            for (var i = 0u; i < view_bindings::lights.n_directional_lights; i = i + 1u) {
+                let light = &view_bindings::lights.directional_lights[i];
+                // FH1_RM_FM2_SPEC_DIR=x,y,z: the game's own light direction for this term (its code feeds `c101` from a fixed vector when the track has no
+                // directional light) instead of the engine sun's.
+                let ldir = select((*light).direction_to_light, normalize(RM_FM2_SPEC_DIR), RM_FM2_SPEC_FIX > 0.5);
+                let h = normalize(ldir + pbr.V);
+                spec += (*light).color.rgb * pow(max(dot(n, h), 0.0), p.p[1].w);
+            }
+            col += spec * gate * sun_vis * p.p[0].y * RM_FM2_SPEC_GS * RM_FM2_SPEC_UNIT * view.exposure;
+        } else if RM_FM2_SHEEN > 0.0 {
             let n = normalize(pbr.world_normal);
             let sat = max(max(col.r, col.g), col.b) - min(min(col.r, col.g), col.b);
             if n.y > 0.9 && sat < 0.25 * max(max(col.r, col.g), 1e-4) + 0.02 {
@@ -1072,6 +1122,16 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
                 }
                 col += spec * lit * sun_vis * RM_FM2_SHEEN * view.exposure;
             }
+        }
+        // Debug (FH1_RM_FM2_DBG): 1 = the albedo as the material holds it, 2 = the lightmap sample, 3 = the lightmap term (lerp of dark / light),
+        // 4 = albedo x term with no floor, exposure or sun effects. Flat colours, to read the pipeline's values off a screenshot.
+        if RM_FM2_DBG > 0.5 {
+            let term = lm * p.p[3].yzw + p.p[1].xyz;
+            if RM_FM2_DBG < 1.5 { col = albedo0; }
+            else if RM_FM2_DBG < 2.5 { col = lm; }
+            else if RM_FM2_DBG < 3.5 { col = term; }
+            else if RM_FM2_DBG < 4.5 { col = albedo0 * term; }
+            else { col = vec3<f32>((RM_FM2_DBG - 4.0) * 0.1); }
         }
     }
     if has(p, 9u) && (flags & FLAG_NIGHT_EMISSIVE) != 0u && p.night.y >= 0.5 {

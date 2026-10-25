@@ -455,7 +455,16 @@ fn update_lights(
         l.contact_shadows_enabled = l.shadow_maps_enabled && contact_shadows_on() && quality.as_ref().is_none_or(|q| q.contact_shadows);
         l.shadow_depth_bias = 0.02;
         l.shadow_normal_bias = 1.0;
-        *tf = Transform::default().looking_to(-sun_dir, Vec3::Y);
+        // Experiment `FH1_RM_FM2_SHADOW_DIR=full|fz|fx|fxz`: the light that casts the shadows (and lights non-lightmap things) takes the
+        // track's own TrackSettings direction, elevation included (fz / fx / fxz: z / x / both mirrored); the shading values above stay.
+        let cast_dir = match (track_shadow.as_ref().and_then(|t| t.0), std::env::var("FH1_RM_FM2_SHADOW_DIR").ok().as_deref()) {
+            (Some(v), Some("full")) => v,
+            (Some(v), Some("fz")) => Vec3::new(v.x, v.y, -v.z),
+            (Some(v), Some("fx")) => Vec3::new(-v.x, v.y, v.z),
+            (Some(v), Some("fxz")) => Vec3::new(-v.x, v.y, -v.z),
+            _ => sun_dir,
+        };
+        *tf = Transform::default().looking_to(-cast_dir, Vec3::Y);
         if !has_disk {
             commands.entity(e).insert(SunDisk::EARTH);
         }
