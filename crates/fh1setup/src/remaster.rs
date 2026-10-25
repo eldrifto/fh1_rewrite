@@ -180,7 +180,7 @@ fn fm2_light(map: &Path) -> Fm2Light {
 }
 
 /// The family rules (docs/REMASTER.md "Material rules").
-fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family>, fm4: bool, fm2: Option<Fm2Light>) -> Record {
+fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family>, fm4: bool, fm2: Option<Fm2Light>, colour_srgb: bool) -> Record {
     let c = |k: usize| ps.get(k).copied().unwrap_or([0.0; 4]);
     let one = |v: f32| if v == 0.0 { 1.0 } else { v };
     let mut r = Record {
@@ -218,7 +218,8 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
         };
         // FM2_RM_COLOUR_SRGB=1 (experiment): an FM2 map's colour layers (A / B / C) are uploaded as sRGB whatever the format word says (the patch-level
         // shader check puts Sebring's and Sunset's roads closer to Xenia that way; STATUS.md 2026-10-26).
-        if fm2.is_some() && matches!(role, A | B | C) && std::env::var_os("FM2_RM_COLOUR_SRGB").is_some() {
+        // The importer's per-material flag (`colour_srgb`: the draw's shader family decodes its colour textures as sRGB) does the same per family.
+        if fm2.is_some() && matches!(role, A | B | C) && (std::env::var_os("FM2_RM_COLOUR_SRGB").is_some() || colour_srgb) {
             gamma = true;
         }
         if gamma {
@@ -491,7 +492,7 @@ fn build_track(scenery: &Path, track_shaders: &Path, out: &Path, fm4: bool, fm2:
             .map(|v| [0, 1, 2, 3].map(|k| v.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32))
             .collect();
         let textures = m["textures"].as_array().cloned().unwrap_or_default();
-        let r = record(&shader, &ps, &textures, fam.as_ref(), fm4, fm2);
+        let r = record(&shader, &ps, &textures, fam.as_ref(), fm4, fm2, m["colour_srgb"].as_bool().unwrap_or(false));
         *counts.entry(format!("{:?}", r.class)).or_default() += 1;
         write(&r, &mut bin);
         dumps.push(dump(i, &shader, &r));

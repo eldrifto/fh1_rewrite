@@ -78,6 +78,8 @@ fn bc4_srgb_on() -> bool {
 /// shaders get the shader's own colour (neutral light, placeholder textures white) instead of the constants-based road colour, and a draw with a colour
 /// texture gets that texture scaled to the shader's brightness. `FM2_BC4_SRGB=0` turns the whole rule off; `FM2_BC4_SRGB_ALL=1` applies the BC4 rule to every road draw.
 const BC4: u32 = 0x8000_0000;
+/// Every sampler decoded as sRGB once (colour textures and BC4 grains); the engine then uploads the material's colour layers as sRGB.
+const COLOURS: u32 = 0x7FFF_FFFF;
 const FAMILY_GAMMA: &[(u64, u32)] = &[
     (0x4aa0_eec0_57a0_743d, BC4),        // Nurburgring road (its BC1 tf3 is a weight, stays linear)
     (0x1902_6bd2_5939_21ac, BC4),        // Tsukuba road (model 50)
@@ -88,8 +90,10 @@ const FAMILY_GAMMA: &[(u64, u32)] = &[
     (0xbef0_b122_d3da_f8b8, 0),          // Sunset Infield road family (BC1 colour stays linear)
     (0x52ff_81cb_ba90_1906, BC4),        // Suzuka road (model 867; fits Xenia once the lightmap uv is right: 0.045 against 0.040)
     (0xf1fe_1fd4_779c_1604, 0),          // Sebring asphalt family (models 153 / 158; texture 161 paints the left foreground; no gamma fits Xenia at the typical lightmap level)
-    (0xf9fb_ef3a_c366_0c4c, 0),          // Sebring concrete slab (h_diff_1_lm + dirt layers 160 / 162 / 163; no gamma, as the family above)
+    (0xf9fb_ef3a_c366_0c4c, COLOURS),    // Sebring concrete slab (h_diff_1_lm + dirt layers; patch probe: 0.37 against Xenia 0.465, no gamma 0.84)
     (0x3960_97bc_9fb8_d028, 0),          // Sebring colour + lightmap draws (models 85 / 95, texture 214)
+    (0x8b9b_73e9_195b_e7b9, COLOURS),    // Laguna Seca spawn road (patch probe, with Xenia's shadow there: 0.06 against 0.055)
+    (0x534d_7406_1a77_7a9a, COLOURS),    // Sunset Infield asphalt (patch probe: 0.085 against 0.157; no gamma 0.42)
 ];
 
 /// The gamma sampler mask of a draw's shader (see `FAMILY_GAMMA`), or None when the family is not in the table.
@@ -1513,6 +1517,15 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 }),
                 ATTR_UV0,
             )
+        };
+        // Families whose colour textures the console decodes as sRGB (`FAMILY_GAMMA` value `COLOURS`, checked at the patch with `FM2_PROBE_AT`): the
+        // material says so and the remaster table uploads its colour layers as sRGB (their format word alone says linear).
+        let (key, material_json) = if family_gamma(&p) == Some(COLOURS) {
+            let mut m = material_json;
+            m["colour_srgb"] = json!(true);
+            (format!("{key} colour-srgb"), m)
+        } else {
+            (key, material_json)
         };
         textured += 1;
         blends += blend as usize;

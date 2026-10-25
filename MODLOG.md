@@ -456,3 +456,7 @@ Fits Xenia with the corrected lightmaps (0.045 vs 0.040). Twelve-track sum 14.22
 
 ## 2026-10-26 (10): patch-level shader check and FM2_RM_COLOUR_SRGB
 Engine `FH1_SHOT_PROBE`, importer `FM2_PROBE_AT` / `FM2_PROBE_LERP`, `shader_eval_verts`; remaster `FM2_RM_COLOUR_SRGB` (off). Global colour sRGB: Laguna 3.12 -> 1.39, New York 0.76 -> 0.17; needs to be per family. Documented in STATUS.md.
+
+## 2026-10-26 (11): per-family colour sRGB in the engine
+`fm2_scenery.rs`: `COLOURS` table value and the `colour_srgb` material flag; `remaster.rs`: the flag uploads the material's colour layers as sRGB. Laguna, Sunset, Sebring families added. Twelve-track sum 14.33 -> 12.37.
+**Test it:** `./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: the start straight's asphalt is a darker grey than before (left band about 80 in bytes, was 114).
