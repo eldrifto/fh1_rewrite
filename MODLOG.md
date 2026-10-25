@@ -479,3 +479,6 @@ main.rs: an explicit `FH1_RM_FM2_SHADOW_COL` wins over the track's ShadowColor (
 
 ## 2026-10-26 (22): FH1_FM2_CAR_SHADOW on by default
 `drop_shadow.rs`: on unless `FH1_FM2_CAR_SHADOW=0` (FM2 tracks only). Test Track checked.
+
+## 2026-10-26 (23): drive test and STATUS summary
+40 s automatic drive on Test Track and Laguna Seca with the projected car shadow on and off: no errors, frame time 6.94 ms mean in both (144 Hz cap), p99 7.7 to 8.4 ms, no hitches; the shadow follows the car on dirt and grass. STATUS.md top summary updated (sum 9.38, car shadow, switch table).

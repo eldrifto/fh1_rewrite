@@ -3,21 +3,22 @@
 This note is the short version. The long, dated sections below are the evidence and the dead ends (newest at the bottom of the file).
 
 ## Where it stands
-Twelve FM2 tracks are compared with your Xenia screenshots on two road patches each (left / right band near the car, linear green, ours / Xenia; 1.0 = equal). The sum of |ln ratio| over all 24 patches (0 = perfect) went **17.68 -> 11.16** over this work. Current (left | right): Tsukuba 1.03 | 2.51, Test Track 1.22 | 9.09, Sunset 0.38 | 0.79, Silverstone 0.89 | 1.09, Sebring 0.64 | 1.11, Road Atlanta 1.44 | 1.31, Nurburgring 1.26 | 0.29, New York 0.76 | 0.84, Mugello 0.98 | 1.63, Maple Valley 0.51 | 2.41, Laguna Seca 1.43 | 1.09, Suzuka 0.47 | 0.94. Ratios differ by about 0.2 between runs of the same data (sun / exposure), so smaller changes are noise. Everything is committed.
+Twelve FM2 tracks are compared with your Xenia screenshots on two road patches each (left / right band near the car, linear green, ours / Xenia; 1.0 = equal). The sum of |ln ratio| over all 24 patches (0 = perfect) went **17.68 -> 9.38** over this work. Current (left | right): Tsukuba 1.03 | 1.33, Test Track 1.22 | 5.23, Sunset 0.38 | 0.79, Silverstone 0.89 | 1.09, Sebring 0.64 | 1.11, Road Atlanta 1.44 | 1.00, Nurburgring 1.26 | 0.29, New York 0.56 | 0.84, Mugello 0.98 | 1.63, Maple Valley 0.51 | 1.72, Laguna Seca 0.94 | 1.09, Suzuka 0.47 | 0.94. Ratios differ by about 0.2 between runs of the same data (sun / exposure), so smaller changes are noise. Everything is committed (except `docs/DESIGN.md`, which the whitelist `.gitignore` excludes).
 
 ## What was fixed (all from the game's own code and data)
 - **Lightmap crop:** a negative tile scale is the shader's clamp flag, not a mirror (`|c170|` in the road shaders; tile centred in its 48-texel page cell).
 - **Lightmap uv:** read through each draw's own vertex shader instead of a guessed offset / unorm decode. Lightmap seams on flat ground dropped from 0.46 to 0.10 (Test Track); baked shadows now sit where Xenia has them.
 - **Per-family gamma:** a table of road-shader families (by a hash of the shader code) says which textures the console decodes as sRGB: BC4 grains (Nurburgring, Tsukuba, Silverstone, Test Track, Suzuka) or all colour textures (Laguna, Sunset, Sebring slab). The importer bakes / scales accordingly and marks materials so the engine uploads their colour layers as sRGB.
+- **The car's own shadow** is drawn twice like the game does: in the sun shadow (road shader rule) and by a projected car-shadow decal that multiplies the ground towards the track's `ShadowColor` (the game's `RenderProjShadow`; its colour source traced to `CTrackPresentation` +0x5f0).
 - **Game shadow rule** on lightmap-lit surfaces (`min(1 - (1 - ShadowColor) S, lightmap light)`), the **car contact shadow** for FM2's glTF cars, **FM2's own follow-camera** settings, the **real-time shadow cascades** read from the road shaders (no static shadow map exists).
 - **Bugs:** importer passes overwrote each other's generated textures (shared id ranges); the engine cached each scenery texture in one colour space only.
 
 ## What is NOT solved
-- **Right-hand bands** with very dark Xenia values (Test Track 9.1x, Maple Valley 2.4x, Tsukuba 2.5x): mostly shadow areas whose placement / darkness differ from Xenia; not the car's real-time shadow rule (tested on / off).
+- **Right-hand bands** still too bright on Test Track (5.2x) and Maple Valley (1.7x): darker shadow areas in Xenia that the double car shadow does not fully reach.
 - **New York:** the engine is close (0.76) only because an old importer heuristic darkens it; the game's own shader evaluates 2.4x brighter than Xenia there, cause unknown (not the post-process).
 - **Laguna Seca's foreground** is in a real-time shadow in Xenia that our sun does not produce; caster unknown.
 - **FM2's final colour step** (`FH1_FM2_POST`) cannot be reproduced: the engine's frame average stays below every track's adaptation limits.
-- Not tested anywhere: a real race, any view other than the spawn screenshot.
+- Tested on 2026-10-26: a 40 s automatic drive on Test Track and Laguna Seca (no errors, frame time 6.94 ms mean either way, car shadow follows the car on dirt and grass). Not tested: a full race with AI cars.
 
 ## Decided: no Xenia GPU trace
 It does not work in your Xenia build (tried 2026-10-19). Questions that would need it stay empirical.
@@ -39,6 +40,7 @@ It does not work in your Xenia build (tried 2026-10-19). Questions that would ne
 | `FM2_NEAR`, `FM2_FIND_TEX`, `FM2_FIND_SIG`, `FM2_UNDER`, `FM2_ROAD_DBG` | importer | off | diagnostics (draws near a point / using a texture / shader hash) |
 | `FH1_FM2_SHADOW_GAME=0` | engine | on | fixed shadow strength instead of the game's rule |
 | `FH1_FM2_DROPSHADOW=0` | engine | on | no car contact shadow on FM2 cars |
+| `FH1_FM2_CAR_SHADOW=0` | engine | on | no projected car shadow (the second, ShadowColor darkening of the car's shadow) |
 | `FH1_FM2_CAMERA=0` | engine | on | FH1's follow camera instead of FM2's |
 | `FH1_FM2_CAMERA_FOV=deg` | engine | unset | force the follow camera's FOV |
 | `FH1_FM2_POST=1` (`FH1_FM2_POST_T`) | engine | off | FM2's final colour step (worse) |
@@ -56,7 +58,7 @@ Removed on 2026-10-26 (rejected or superseded): `FM2_LM_UV_SIGNED`, `FM2_LM_UV_V
 bash data/work/shoot_some.sh check tsukuba_00 testtrackinfield_00 sunsetinfield_00 silverstone_00 sebring_00 roadatlanta_00 nurburgring_00 newyork_01 mugello_00 maplevalley_00 lagunaseca_00 suzuka_00
 python data/work/cmp12.py check
 ```
-The last line should print a sum near 11.2.
+The last line should print a sum near 9.4.
 
 ---
 
