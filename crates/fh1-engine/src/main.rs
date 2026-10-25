@@ -308,9 +308,9 @@ fn main() -> AppExit {
     // FH1's own post chain (bloom, adaptation, filmic, grading LUTs, vignette); neutral without the files.
     app.insert_resource(track::post_config(&assets, &track.id));
     let mut camera_data = camera::CameraData::load(&assets);
-    // FH1_FM2_CAMERA=1: FM2 tracks use FM2's own follow-camera tuning (`imported/fm2/camera/CameraSettings.ini`, copied by `fh1setup import-fm2`):
-    // offsets, ground clearance, standstill FOV 53 and the springs, instead of FH1's. The speed FOV effect stays FH1's. Off unless set.
-    if track.id.starts_with("fm2/") && std::env::var_os("FH1_FM2_CAMERA").is_some_and(|v| v != "0") {
+    // FH1_FM2_CAMERA (on by default, =0 for FH1's camera): FM2 tracks use FM2's own follow-camera tuning (`imported/fm2/camera/CameraSettings.ini`, copied by `fh1setup import-fm2`):
+    // offsets, ground clearance, standstill FOV 53 and the springs, instead of FH1's (matches the Xenia framing, STATUS.md update 14). The speed FOV effect stays FH1's.
+    if track.id.starts_with("fm2/") && std::env::var("FH1_FM2_CAMERA").map_or(true, |v| v != "0") {
         match std::fs::read_to_string(assets.join("imported/fm2/camera/CameraSettings.ini")) {
             Ok(ini) => {
                 camera_data.settings = fh1_formats::camera::Settings::parse_fm2(&ini);

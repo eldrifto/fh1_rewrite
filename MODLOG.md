@@ -411,3 +411,6 @@ Base height / radius are the same as FH1's (0.35 / 2.95, 0.6 / 3.1). Added `FH1_
 
 ## 2026-10-25 (14): car size and camera check (no code change)
 FM2 camera settings already match Xenia's framing (car 274 vs 278 px); earlier camera conclusions corrected in STATUS.md. Sebring's difference is a surface (blend mask) problem. Nothing committed beyond notes.
+
+## 2026-10-25 (15): FM2 camera default on; Sebring road shaders measured
+`FH1_FM2_CAMERA` default on (engine main.rs). Sebring families measured with `data/work/seb_lit.py`; nothing added to FAMILY_GAMMA. Documented in STATUS.md.
