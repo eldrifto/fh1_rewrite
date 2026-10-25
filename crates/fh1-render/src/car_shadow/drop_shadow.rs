@@ -52,9 +52,10 @@ impl Plugin for DropShadowPlugin {
             return;
         }
         embedded_asset!(app, "drop_shadow.wgsl");
-        app.add_plugins(MaterialPlugin::<DropShadowMaterial>::default()).add_systems(
+        embedded_asset!(app, "proj_shadow.wgsl");
+        app.add_plugins((MaterialPlugin::<DropShadowMaterial>::default(), MaterialPlugin::<ProjShadowMaterial>::default())).add_systems(
             PostUpdate,
-            (collect_silhouettes, update_drop_shadows).chain().after(bevy::transform::TransformSystems::Propagate),
+            (collect_silhouettes, update_drop_shadows, update_proj_shadows).chain().after(bevy::transform::TransformSystems::Propagate),
         );
     }
 }
@@ -263,6 +264,210 @@ impl Material for DropShadowMaterial {
             ds.bias.slope_scale = 1.0;
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------- FM2 projected car shadow
+
+/// `FH1_FM2_CAR_SHADOW=1` on an FM2 track (the engine sets `FH1_RM_FM2_SHADOW_COL` = the track's ShadowColor there): the game's
+/// `RenderProjShadow` pass, the car's own shadow multiplied onto the ground towards ShadowColor on top of the scenery shadow
+/// (FM2 darkens the car's shadow twice; STATUS.md 2026-10-26 update 20). Off by default.
+fn proj_on() -> Option<f32> {
+    static V: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        if !std::env::var("FH1_FM2_CAR_SHADOW").is_ok_and(|v| v == "1") {
+            return None;
+        }
+        std::env::var("FH1_RM_FM2_SHADOW_COL").ok().and_then(|v| v.parse().ok())
+    })
+}
+
+/// How far from the body the ground quad reaches (m): the car's shadow at a low sun.
+const PROJ_REACH: f32 = 8.0;
+/// Heights sampled along the ray towards the light.
+const PROJ_SAMPLES: f32 = 6.0;
+
+/// `proj_shadow.wgsl` `ProjShadowParams`.
+#[derive(Clone, Copy, ShaderType, Debug, Default)]
+pub struct ProjShadowParams {
+    pub car_from_world: Mat4,
+    pub to_light: Vec4,
+    pub bounds: Vec4,
+    pub heights: Vec4,
+    pub colour: Vec4,
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
+pub struct ProjShadowMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    pub mask: Handle<Image>,
+    #[uniform(2)]
+    pub params: ProjShadowParams,
+}
+
+impl Material for ProjShadowMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "embedded://fh1_render/car_shadow/proj_shadow.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "embedded://fh1_render/car_shadow/proj_shadow.wgsl".into()
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Multiply
+    }
+    fn enable_prepass() -> bool {
+        false
+    }
+    fn enable_shadows() -> bool {
+        false
+    }
+    fn specialize(_: &MaterialPipeline, d: &mut RenderPipelineDescriptor, layout: &MeshVertexBufferLayoutRef, _: MaterialPipelineKey<Self>) -> Result<(), SpecializedMeshPipelineError> {
+        d.vertex.buffers = vec![layout.0.get_layout(&[Mesh::ATTRIBUTE_POSITION.at_shader_location(0)])?];
+        d.primitive.cull_mode = None;
+        // dst * src.
+        if let Some(f) = d.fragment.as_mut() {
+            for t in f.targets.iter_mut().flatten() {
+                t.blend = Some(BlendState {
+                    color: BlendComponent { src_factor: BlendFactor::Dst, dst_factor: BlendFactor::Zero, operation: BlendOperation::Add },
+                    alpha: BlendComponent { src_factor: BlendFactor::Zero, dst_factor: BlendFactor::One, operation: BlendOperation::Add },
+                });
+            }
+        }
+        if let Some(ds) = d.depth_stencil.as_mut() {
+            ds.depth_write_enabled = Some(false).into();
+            ds.bias.constant = 4;
+            ds.bias.slope_scale = 1.0;
+        }
+        Ok(())
+    }
+}
+
+/// One car's projected-shadow quad and its mask image.
+#[derive(Component)]
+struct ProjShadow {
+    quad: Entity,
+    mesh: Handle<Mesh>,
+    material: Handle<ProjShadowMaterial>,
+    image: Handle<Image>,
+    /// Checksum of the silhouette the image was made from.
+    mask_sum: u64,
+}
+
+/// The silhouette as a soft mask (three 5x5 box blurs of the 256² coverage; the game's variance map is soft-edged too).
+fn proj_mask_image(mask: &[u8]) -> Image {
+    let n = MASK;
+    let mut a: Vec<f32> = mask.iter().map(|&v| v as f32 / 255.0).collect();
+    for _ in 0..3 {
+        let mut b = a.clone();
+        for y in 0..n {
+            for x in 0..n {
+                let (mut s, mut c) = (0.0, 0.0);
+                for dy in -2i32..=2 {
+                    for dx in -2i32..=2 {
+                        let (xx, yy) = (x as i32 + dx, y as i32 + dy);
+                        if xx >= 0 && yy >= 0 && (xx as usize) < n && (yy as usize) < n {
+                            s += a[yy as usize * n + xx as usize];
+                            c += 1.0;
+                        }
+                    }
+                }
+                b[y * n + x] = s / c;
+            }
+        }
+        a = b;
+    }
+    let mut img = Image::new(
+        Extent3d { width: n as u32, height: n as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        a.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8).collect(),
+        TextureFormat::R8Unorm,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    img
+}
+
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn update_proj_shadows(
+    mut commands: Commands,
+    mut cars: Query<(Entity, &FxDropShadow, &GlobalTransform, &DropShadowState, Option<&mut ProjShadow>)>,
+    lights: Query<(&DirectionalLight, &GlobalTransform)>,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ProjShadowMaterial>>,
+    mut vis: Query<&mut Visibility>,
+) {
+    let Some(shadow_col) = proj_on() else { return };
+    // The light that casts the scenery shadow (the same direction doubles it).
+    let Some(to_light) = lights.iter().find(|(l, _)| l.shadow_maps_enabled).map(|(_, t)| -t.forward().as_vec3()) else { return };
+    for (car, input, gt, s, proj) in &mut cars {
+        if s.mask.is_empty() {
+            continue;
+        }
+        let sum = s.mask.iter().enumerate().fold(0u64, |a, (i, &v)| a.wrapping_add((i as u64 + 1) * v as u64));
+        let Some(proj) = proj else {
+            let image = images.add(proj_mask_image(&s.mask));
+            let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD);
+            m.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; 4]);
+            m.insert_indices(Indices::U16(vec![0, 1, 2, 0, 2, 3]));
+            let mesh = meshes.add(m);
+            let material = materials.add(ProjShadowMaterial { mask: image.clone(), params: ProjShadowParams::default() });
+            let quad = commands
+                .spawn((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone()), Transform::IDENTITY, Visibility::Inherited, NoFrustumCulling, NotShadowCaster, ChildOf(car)))
+                .id();
+            commands.entity(car).insert(ProjShadow { quad, mesh, material, image, mask_sum: sum });
+            continue;
+        };
+        let proj = proj.into_inner();
+        if proj.mask_sum != sum {
+            proj.mask_sum = sum;
+            if let Some(mut i) = images.get_mut(&proj.image) {
+                *i = proj_mask_image(&s.mask);
+            }
+        }
+        if let Ok(mut v) = vis.get_mut(proj.quad) {
+            let want = if s.far { Visibility::Hidden } else { Visibility::Inherited };
+            if *v != want {
+                *v = want;
+            }
+        }
+        // Ground plane under the car from the wheel ground points; the quad covers the body plus the shadow's reach.
+        let to_world = gt.affine();
+        let wg = input.wheels.map(|w| to_world.transform_point3(w.ground));
+        let mid = (wg[0] + wg[1] + wg[2] + wg[3]) * 0.25;
+        let n = {
+            let n = (wg[1] - wg[2]).cross(wg[0] - wg[3]).normalize_or(Vec3::Y);
+            if n.y < 0.0 { -n } else { n }
+        };
+        let half = ((s.max - s.min) * 0.5).length() + PROJ_REACH;
+        let t1 = n.cross(Vec3::X).normalize_or(Vec3::Z);
+        let t2 = n.cross(t1).normalize_or(Vec3::X);
+        let lift = n * LIFT;
+        let pos: Vec<[f32; 3]> = [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .iter()
+            .map(|(a, b)| (mid + lift + t1 * (a * half) + t2 * (b * half)).to_array())
+            .collect();
+        if let Some(mut m) = meshes.get_mut(&proj.mesh) {
+            m.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos);
+        }
+        let car_from_world = Mat4::from(to_world.inverse());
+        let l_car = car_from_world.transform_vector3(to_light).normalize_or(Vec3::Y);
+        if let Some(mut mat) = materials.get_mut(&proj.material) {
+            mat.params = ProjShadowParams {
+                car_from_world,
+                to_light: l_car.extend(n.dot(to_light).max(0.0)),
+                bounds: Vec4::new(s.min.x, s.min.z, s.max.x, s.max.z),
+                heights: Vec4::new(s.min.y + 0.1, s.max.y, PROJ_SAMPLES, 0.0),
+                colour: Vec4::new(shadow_col, shadow_col, shadow_col, 1.0),
+            };
+        }
     }
 }
 

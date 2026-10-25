@@ -470,3 +470,9 @@ Removed rejected / superseded switches (`FM2_LM_UV_SIGNED`, `FM2_LM_UV_VS`, `FM2
 
 ## 2026-10-26 (18): car shadow colour finding
 main.rs: an explicit `FH1_RM_FM2_SHADOW_COL` wins over the track's ShadowColor (for tests). Test Track's right band follows the car's own shadow drawn with DropShadowColor; design for a car-only shadow proposed in STATUS.md, not implemented.
+
+## 2026-10-26 (21): FM2 projected car shadow
+**Changed:** `fh1-render/src/car_shadow/drop_shadow.rs` (`ProjShadowMaterial`, `update_proj_shadows`), new `proj_shadow.wgsl`. Switch `FH1_FM2_CAR_SHADOW=1` (off by default).
+**Result:** twelve-track sum 10.94 -> 9.38 (Test Track right 9.09 -> 5.23, Tsukuba right 2.37 -> 1.33, Laguna left 1.43 -> 0.94; New York left 0.76 -> 0.56).
+**Test it:** `FH1_FM2_CAR_SHADOW=1 ./target/release/fh1-engine.exe --track fm2/testtrackinfield_00`: the car's shadow to the right of the car is clearly darker than without the variable.
+**Revert:** leave the variable unset.
