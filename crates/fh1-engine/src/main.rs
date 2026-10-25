@@ -282,7 +282,10 @@ fn main() -> AppExit {
             })
             .unwrap_or(0.4);
         std::env::set_var("FH1_RM_FM2_SHADOW_GAME", "1");
-        std::env::set_var("FH1_RM_FM2_SHADOW_COL", format!("{c:.4}"));
+        // An explicit FH1_RM_FM2_SHADOW_COL (tests) wins over the track's value.
+        if std::env::var_os("FH1_RM_FM2_SHADOW_COL").is_none() {
+            std::env::set_var("FH1_RM_FM2_SHADOW_COL", format!("{c:.4}"));
+        }
         bevy::log::info!("FH1_FM2_SHADOW_GAME: ShadowColor {c}");
     }
     // FH1_FM2_POST=1: FM2's own final combine (desaturate, tint, tone curve from the track's TrackSettings.xml) replaces the grade for FM2 tracks

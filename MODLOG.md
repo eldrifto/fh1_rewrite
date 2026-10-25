@@ -467,3 +467,6 @@ Engine `FH1_SHOT_PROBE`, importer `FM2_PROBE_AT` / `FM2_PROBE_LERP`, `shader_eva
 
 ## 2026-10-26 (13): switch clean-up
 Removed rejected / superseded switches (`FM2_LM_UV_SIGNED`, `FM2_LM_UV_VS`, `FM2_LM_FLIPU`, `FM2_LM_FLIPV`, `FH1_RM_FM2_DYN_LIT`, `FH1_RM_FM2_SHADOW_POW`, `FM2_RM_COLOUR_SRGB`); pictures unchanged (Laguna and Sebring bands identical before / after). STATUS.md's top summary rewritten with a switch table.
+
+## 2026-10-26 (18): car shadow colour finding
+main.rs: an explicit `FH1_RM_FM2_SHADOW_COL` wins over the track's ShadowColor (for tests). Test Track's right band follows the car's own shadow drawn with DropShadowColor; design for a car-only shadow proposed in STATUS.md, not implemented.
