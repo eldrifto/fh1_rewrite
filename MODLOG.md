@@ -393,3 +393,6 @@ Env exponent for the game-rule shadow factor (default 1). 2.2 fixes Test Track /
 
 ## 2026-10-25 (7): shadow factor numbers, New York vs Test Track (no default change)
 Added `FH1_RM_FM2_SHADOW_DBG` (debug paint of shadow-map visibility and lightmap lerp; default off). New York supports a linear factor, Test Track's right band cannot be read as a shadow ratio. Documented in STATUS.md. Nothing committed.
+
+## 2026-10-25 (8): Sebring comparison read as a framing difference (no code change)
+Documented in STATUS.md. Nothing committed.
