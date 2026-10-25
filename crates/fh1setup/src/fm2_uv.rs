@@ -284,6 +284,47 @@ pub fn resolve(raw_model: &[u8], model: &fm2::Model, kind: &dyn Fn(u32) -> ItemK
                 }
                 out.insert(slot as usize, uvs);
             }
+            // Lightmap tiles: the pixel shader computes their coordinate from an interpolator (`cndgt rA.xy, -cN.xxxx, rB.zw, rC.xyyy` then
+            // `* |cN|.xy + |cN|.zw`); rC is the tile uv, which the vertex shader fetches with its own format and scale. Stored under the tile item's
+            // slot like the other samplers (the coordinate before the atlas transform, 0..1 over the tile).
+            if let Some(t) = ps_ix.map(|i| &shaders[i]) {
+                // The tile uv interpolator is the source of the `max_sat` that clamps it (`max_sat rA, rI.xxxy, rI.xxxy`) when a `cnd*` on a
+                // lightmap transform constant (`c16x` / `c17x`) follows; that form covers every road family seen (Mugello `cndgt -c170`,
+                // Laguna / Sebring `cndge c168` / `cndgt -c168`).
+                let lines: Vec<&str> = t.text.lines().map(str::trim).collect();
+                let has_cnd = lines.iter().any(|l| (l.contains("cndgt ") || l.contains("cndge ")) && (l.contains(", -c16") || l.contains(", c16") || l.contains(", -c17") || l.contains(", c17")));
+                let lm_reg = has_cnd
+                    .then(|| {
+                        lines.iter().find_map(|l| {
+                            let rest = l.split_once("max_sat ")?.1;
+                            let parts: Vec<&str> = rest.split(", ").collect();
+                            (parts.len() == 3 && parts[1] == parts[2]).then(|| parts[1].trim_start_matches('r').split('.').next()?.parse::<u32>().ok()).flatten()
+                        })
+                    })
+                    .flatten();
+                if let Some(u) = lm_reg.and_then(|r| uv.get(&r)) {
+                    let m: Option<[[f32; 3]; 2]> = match u.map {
+                        sh::UvMap::Scale(k) => Some([[k, 0.0, 0.0], [0.0, k, 0.0]]),
+                        sh::UvMap::Raw => None,
+                        sh::UvMap::Matrix { reg } => group_mats[gi].iter().find(|(r, _)| *r == reg).map(|(_, m)| [[m[0][0], m[0][1], m[0][3]], [m[1][0], m[1][1], m[1][3]]]),
+                    };
+                    let o = u.dword as usize * 4;
+                    if let Some(m) = m.filter(|_| o + 4 <= d.stride) {
+                        let uvs: Vec<[f32; 2]> = (0..d.positions.len())
+                            .map(|i| {
+                                let v = &d.vertices[i * d.stride..(i + 1) * d.stride];
+                                let (h0, h1) = (i16::from_be_bytes([v[o], v[o + 1]]) as f32, i16::from_be_bytes([v[o + 2], v[o + 3]]) as f32);
+                                [m[0][0] * h0 + m[0][1] * h1 + m[0][2], m[1][0] * h0 + m[1][1] * h1 + m[1][2]]
+                            })
+                            .collect();
+                        for (slot, k) in item_kinds.iter().enumerate() {
+                            if *k == ItemKind::Tile && !out.contains_key(&slot) {
+                                out.insert(slot, uvs.clone());
+                            }
+                        }
+                    }
+                }
+            }
             let ps = ps_ix.map(|i| {
                 let t = &shaders[i];
                 PsRun {

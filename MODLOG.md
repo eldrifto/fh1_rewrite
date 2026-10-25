@@ -440,3 +440,10 @@ Tile crop is correct; the strip's darkness is in the bake; the slab (f9fbef3a) i
 
 ## 2026-10-26 (2): flat-ground seam figure
 `FM2_LM_SEAMS=1` adds a flat-ground-only seam figure; the absolute crop wins on all six tracks (e.g. Mugello 0.333 -> 0.187). Flip variants rejected.
+
+## 2026-10-26 (3): FM2 lightmap uv from the vertex shader
+
+**Changed:** `fm2_uv.rs` resolves the lightmap tile's uv through the draw's vertex shader (the interpolator the pixel shader clamps for the tile transform); `fm2_scenery.rs` uses it for the lightmap (`FM2_LM_UV_OLD=1` = old guess). Diagnostics `FM2_LM_UV_VS`, `FM2_LM_UV_SIGNED` (seam test only).
+**Result:** flat-ground lightmap seams Test Track 0.462 -> 0.101, Mugello 0.187 -> 0.091; baked shadows (Suzuka, Maple Valley) now where Xenia has them. Band sum 16.02 -> 17.86 (brightness rules were tuned against the old lightmaps).
+**Test it:** `FM2_LM_SEAMS=1 FM2_TRACKS=mugello ./target/debug/fh1setup.exe import-fm2 data/work_fm2/disc --only maps` prints `flat ground only: ... mean jump 0.0911`; `./target/release/fh1-engine.exe --track fm2/suzuka_00` shows the dark shadow left of the car.
+**Revert:** `FM2_LM_UV_OLD=1` and re-import.

@@ -101,6 +101,8 @@ fn family_gamma(p: &Pending) -> Option<u32> {
 }
 
 /// FNV-1a hash of a draw's pixel-shader microcode (big-endian bytes of its dwords); 0 when the draw has none: a shader family signature.
+static VS_UV_STATS: std::sync::Mutex<std::collections::BTreeMap<&'static str, usize>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
 fn ps_sig(p: &Pending) -> u64 {
     p.ps_run.as_ref().map_or(0, |ps| ps.words.iter().flat_map(|w| w.to_be_bytes()).fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3)))
 }
@@ -186,7 +188,24 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             let sep = if has_tile { d.separate_mask(uv0) } else { None };
             let lightmap_at = if let Some((lm, _)) = sep { Some(lm) } else { has_tile.then(|| d.lightmap_offset(uv0)).flatten() };
             let mask_raw = sep.map(|(_, mk)| d.uv_at(mk));
-            let lm_uv = lightmap_at.map(|o| d.uv_unorm(o)).unwrap_or_default();
+            let mut lm_uv = lightmap_at.map(|o| d.uv_unorm(o)).unwrap_or_default();
+            // The lightmap uv as the draw's own vertex shader produces it (fm2_uv: the interpolator the pixel shader clamps and runs through the
+            // tile transform, fetched with the shader's format and scale) replaces the unorm guess: flat-ground lightmap seams drop from 0.46 to 0.08
+            // (Test Track) and 0.19 to 0.10 (Mugello) (STATUS.md 2026-10-26). `FM2_LM_UV_OLD=1` keeps the unorm guess.
+            if std::env::var_os("FM2_LM_UV_OLD").is_none() {
+                let vs = candidates.iter().position(|t| matches!(t.1, 8 | 9 | 12)).and_then(|k| cand_slots.get(k)).and_then(|slot| shader_uv.get(di)?.slots.get(slot));
+                if let Some(v) = vs.filter(|v| v.len() == d.positions.len()) {
+                    lm_uv = v.clone();
+                }
+            }
+            // FM2_LM_UV_SIGNED=1 (diagnostic): read the lightmap uv as the vertex shader fetches it (16_16 signed integer x 1/32768) instead of unorm.
+            if std::env::var_os("FM2_LM_UV_SIGNED").is_some() {
+                for uv in lm_uv.iter_mut() {
+                    for c in uv.iter_mut() {
+                        *c = ((*c * 65535.0).round() as u16 as i16) as f32 / 32768.0;
+                    }
+                }
+            }
             if std::env::var_os("FM2_UNRES").is_some() {
                 let beyond: Vec<u32> = d.items.iter().copied().filter(|&it| it as usize >= list.len()).collect();
                 if !beyond.is_empty() && d.positions.len() <= 8 {
@@ -348,7 +367,18 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 }
                 let Some((w, h, px)) = cache.entry(id).or_insert_with(|| decode_rgba(&dir.join("textures").join(format!("{id:08x}.dds")))).as_ref() else { continue };
                 let (w, h) = (*w, *h);
-                for ((q, uv), n) in p.positions.iter().zip(&p.lm_uv).zip(&nrm) {
+                // FM2_LM_UV_VS=1: the lightmap uv as the draw's own vertex shader produces it (`resolved` for the tile's item) instead of the heuristic decode.
+                let vs_uv: Option<&Vec<[f32; 2]>> = std::env::var_os("FM2_LM_UV_VS").and_then(|_| {
+                    let k = p.candidates.iter().position(|t| t.0 == id)?;
+                    p.resolved.get(p.cand_slots.get(k)?).filter(|v| v.len() == p.positions.len())
+                });
+                if std::env::var_os("FM2_LM_UV_VS").is_some() {
+                    let k = p.candidates.iter().position(|t| t.0 == id);
+                    let slot = k.and_then(|k| p.cand_slots.get(k).copied());
+                    *VS_UV_STATS.lock().unwrap().entry(match (slot, vs_uv.is_some()) { (None, _) => "no slot", (Some(sl), false) if p.resolved.contains_key(&sl) => "wrong length", (Some(_), false) => "slot not resolved", (Some(_), true) => "used" }).or_insert(0usize) += 1;
+                }
+                let uvs: &Vec<[f32; 2]> = vs_uv.unwrap_or(&p.lm_uv);
+                for ((q, uv), n) in p.positions.iter().zip(uvs).zip(&nrm) {
                     let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
                     let flat = len > 0.0 && (n[1] / len).abs() > 0.99;
                     // Bilinear, clamped (the engine's sampler).
@@ -383,6 +413,9 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                     fsum += (hi - lo) as f64;
                     fbig += (hi - lo > 0.2) as usize;
                 }
+            }
+            if std::env::var_os("FM2_LM_UV_VS").is_some() {
+                println!("[fm2] lightmap uv from the vertex shader: {:?}", VS_UV_STATS.lock().unwrap());
             }
             println!("[fm2] lightmap seams, flat ground only: {fnn} shared vertices, mean jump {:.4}, jumps > 0.2: {fbig} ({:.1} %)", fsum / fnn.max(1) as f64, 100.0 * fbig as f64 / fnn.max(1) as f64);
             println!("[fm2] lightmap seams ({}): {n} shared vertices across tiles, mean jump {:.4}, jumps > 0.2: {big} ({:.1} %)", if std::env::var_os("FM2_LM_MIRROR").is_some() { "mirrored crop" } else { "absolute crop" }, sum / n.max(1) as f64, 100.0 * big as f64 / n.max(1) as f64);
