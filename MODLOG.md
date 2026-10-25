@@ -476,3 +476,6 @@ main.rs: an explicit `FH1_RM_FM2_SHADOW_COL` wins over the track's ShadowColor (
 **Result:** twelve-track sum 10.94 -> 9.38 (Test Track right 9.09 -> 5.23, Tsukuba right 2.37 -> 1.33, Laguna left 1.43 -> 0.94; New York left 0.76 -> 0.56).
 **Test it:** `FH1_FM2_CAR_SHADOW=1 ./target/release/fh1-engine.exe --track fm2/testtrackinfield_00`: the car's shadow to the right of the car is clearly darker than without the variable.
 **Revert:** leave the variable unset.
+
+## 2026-10-26 (22): FH1_FM2_CAR_SHADOW on by default
+`drop_shadow.rs`: on unless `FH1_FM2_CAR_SHADOW=0` (FM2 tracks only). Test Track checked.

@@ -269,13 +269,13 @@ impl Material for DropShadowMaterial {
 
 // ---------------------------------------------------------------- FM2 projected car shadow
 
-/// `FH1_FM2_CAR_SHADOW=1` on an FM2 track (the engine sets `FH1_RM_FM2_SHADOW_COL` = the track's ShadowColor there): the game's
+/// On by default on FM2 tracks (`FH1_FM2_CAR_SHADOW=0` turns it off; the engine sets `FH1_RM_FM2_SHADOW_COL` = the track's ShadowColor there): the game's
 /// `RenderProjShadow` pass, the car's own shadow multiplied onto the ground towards ShadowColor on top of the scenery shadow
-/// (FM2 darkens the car's shadow twice; STATUS.md 2026-10-26 update 20). Off by default.
+/// (FM2 darkens the car's shadow twice; STATUS.md 2026-10-26 update 20). Other maps never set that variable, so it stays off there.
 fn proj_on() -> Option<f32> {
     static V: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        if !std::env::var("FH1_FM2_CAR_SHADOW").is_ok_and(|v| v == "1") {
+        if std::env::var("FH1_FM2_CAR_SHADOW").is_ok_and(|v| v == "0") {
             return None;
         }
         std::env::var("FH1_RM_FM2_SHADOW_COL").ok().and_then(|v| v.parse().ok())
