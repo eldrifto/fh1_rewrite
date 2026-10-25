@@ -420,3 +420,6 @@ Texture 161 paints the left foreground strip; engine 2.5x darker than the interp
 
 ## 2026-10-25 (17): two-layer colour scaling (tried, removed)
 `fm2_scenery.rs`: only the corrected Sebring hash `f1fe1fd4779c1604` remains. The strip's darkness is a lightmap-tile issue (tiles 159 / 165). Documented in STATUS.md. Sebring re-imported to default.
+
+## 2026-10-25 (18): Sebring tile mapping check (no code change)
+Tile crop is correct; the strip's darkness is in the bake; the slab (f9fbef3a) is drawn too white because the engine does not blend its two colour layers like the shader. Documented in STATUS.md.
