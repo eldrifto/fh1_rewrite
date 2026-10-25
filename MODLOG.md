@@ -402,3 +402,6 @@ Added `data/work/tp_shot.sh` / `ncc.py` (git-ignored scratch). The automatic mat
 
 ## 2026-10-25 (10): FM2 camera data compared with the engine camera (no code change)
 Documented in STATUS.md. Nothing committed beyond the notes.
+
+## 2026-10-25 (11): FH1_FM2_CAMERA
+`fh1setup import-fm2 --only camera`, `Settings::parse_fm2`, main.rs hook (default off). Band sum unchanged (15.96 / 16.02); Xenia's camera is further back than ours. Documented in STATUS.md.

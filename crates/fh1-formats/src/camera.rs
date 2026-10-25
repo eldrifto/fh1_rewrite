@@ -45,6 +45,28 @@ impl Settings {
     pub fn get_or(&self, key: &str, default: f32) -> f32 {
         self.get(key).unwrap_or(default)
     }
+
+    /// FM2's `CameraSettings.ini` (disc `Media/Camera`): the same `FollowLowCam` / `FollowHighCam` offsets, but the FOV is `FOV\FOV0` (standstill)
+    /// and the springs are `Spring\m_YRotSpringK` etc. Aliases under FH1's key names let the follow camera read them.
+    pub fn parse_fm2(text: &str) -> Settings {
+        let mut s = Settings::parse(text);
+        for sec in ["FollowLowCam", "FollowHighCam"] {
+            for (to, from) in [
+                ("FOV", "FOV\\FOV0"),
+                ("Spring\\YRotSpringK", "Spring\\m_YRotSpringK"),
+                ("Spring\\YRotSpringD", "Spring\\m_YRotSpringD"),
+                ("Spring\\YRotCarDampScale", "Spring\\m_YRotCarDampScale"),
+                ("Spring\\YRotMaxSpeed", "Spring\\m_YRotMaxSpeed"),
+                ("Spring\\HeightSpringK", "Spring\\m_HeightSpringK"),
+                ("Spring\\HeightSpringD", "Spring\\m_HeightSpringD"),
+            ] {
+                if let Some(v) = s.values.get(&format!("{sec}\\{from}")).copied() {
+                    s.values.insert(format!("{sec}\\{to}"), v);
+                }
+            }
+        }
+        s
+    }
 }
 
 /// `InputToParamMapping` / `InputToNoiseFreqMapping`.

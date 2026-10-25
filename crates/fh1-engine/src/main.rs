@@ -307,7 +307,19 @@ fn main() -> AppExit {
     }
     // FH1's own post chain (bloom, adaptation, filmic, grading LUTs, vignette); neutral without the files.
     app.insert_resource(track::post_config(&assets, &track.id));
-    app.insert_resource(camera::CameraData::load(&assets));
+    let mut camera_data = camera::CameraData::load(&assets);
+    // FH1_FM2_CAMERA=1: FM2 tracks use FM2's own follow-camera tuning (`imported/fm2/camera/CameraSettings.ini`, copied by `fh1setup import-fm2`):
+    // offsets, ground clearance, standstill FOV 53 and the springs, instead of FH1's. The speed FOV effect stays FH1's. Off unless set.
+    if track.id.starts_with("fm2/") && std::env::var_os("FH1_FM2_CAMERA").is_some_and(|v| v != "0") {
+        match std::fs::read_to_string(assets.join("imported/fm2/camera/CameraSettings.ini")) {
+            Ok(ini) => {
+                camera_data.settings = fh1_formats::camera::Settings::parse_fm2(&ini);
+                bevy::log::info!("FH1_FM2_CAMERA: FM2 follow-camera settings loaded (Low FOV {:?})", camera_data.settings.get("FollowLowCam\\FOV"));
+            }
+            Err(e) => bevy::log::warn!("FH1_FM2_CAMERA: imported/fm2/camera/CameraSettings.ini missing ({e}); run fh1setup import-fm2"),
+        }
+    }
+    app.insert_resource(camera_data);
     fh1_remaster::pre_default_plugins(&mut app);
     // GPU upload budget per frame (2026-10-08, user: small skips with steady fps; log 133825 hitches = PrepareAssets
     // 50-93 ms while scenery streams in): Bevy uploads every new mesh/texture in the frame it appears; the limiter spreads a

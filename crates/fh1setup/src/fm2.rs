@@ -50,6 +50,13 @@ pub fn run() -> Result<()> {
         build_maps(&disc, &root, "fm2", "FM2", layouts)?;
         println!("[fm2] run `fh1setup <FH1 disc> --only remaster --force` to (re)build the FM2 remaster material tables");
     }
+    if want("camera") {
+        // The game's own follow-camera tuning (read by the engine behind FH1_FM2_CAMERA).
+        let ini = std::fs::read(disc.join("media/camera/CameraSettings.ini")).context("media/camera/CameraSettings.ini")?;
+        std::fs::create_dir_all(root.join("camera"))?;
+        std::fs::write(root.join("camera/CameraSettings.ini"), ini)?;
+        println!("[fm2] camera/CameraSettings.ini copied");
+    }
     if want("cars") {
         crate::fh2::swap(&root.join("cars"), |stage| crate::fm2_cars::cars(&disc, &private, stage))?;
         // The cars' own engine sounds (FM2 DSP / harmonic tuning + FSB3 banks) instead of an FH1 donor's: written to the shared audio folder as
