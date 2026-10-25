@@ -426,3 +426,6 @@ Tile crop is correct; the strip's darkness is in the bake; the slab (f9fbef3a) i
 
 ## 2026-10-25 (19): Sebring slab families in FAMILY_GAMMA; update 18's "3x" withdrawn
 `fm2_scenery.rs`: two more hashes in the table (gate only). Colour scaling shows no visible change on Sebring. Documented in STATUS.md.
+
+## 2026-10-25 (20): comparison of interpreter setups
+`fm2_ps_run` and the importer's `shader_eval` agree; the lightmap-uv sweep in the scratch scripts is overridden by the mesh uvs, so their "lit max" numbers are real-lightmap values. Documented in STATUS.md. Nothing committed beyond notes.
