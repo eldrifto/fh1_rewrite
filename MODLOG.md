@@ -423,3 +423,6 @@ Texture 161 paints the left foreground strip; engine 2.5x darker than the interp
 
 ## 2026-10-25 (18): Sebring tile mapping check (no code change)
 Tile crop is correct; the strip's darkness is in the bake; the slab (f9fbef3a) is drawn too white because the engine does not blend its two colour layers like the shader. Documented in STATUS.md.
+
+## 2026-10-25 (19): Sebring slab families in FAMILY_GAMMA; update 18's "3x" withdrawn
+`fm2_scenery.rs`: two more hashes in the table (gate only). Colour scaling shows no visible change on Sebring. Documented in STATUS.md.
