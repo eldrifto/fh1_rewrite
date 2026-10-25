@@ -86,6 +86,7 @@ const FAMILY_GAMMA: &[(u64, u32)] = &[
     (0xa851_b0ab_5755_db49, 1 << 1),     // New York h_diff_1 (BC3 colour tf1)
     (0x1eb3_44c3_a908_6634, 1 << 4),     // Laguna Seca palette road family (BC1 colour tf4)
     (0xbef0_b122_d3da_f8b8, 0),          // Sunset Infield road family (BC1 colour stays linear)
+    (0x52ff_81cb_ba90_1906, BC4),        // Suzuka road (model 867; fits Xenia once the lightmap uv is right: 0.045 against 0.040)
     (0xf1fe_1fd4_779c_1604, 0),          // Sebring asphalt family (models 153 / 158; texture 161 paints the left foreground; no gamma fits Xenia at the typical lightmap level)
     (0xf9fb_ef3a_c366_0c4c, 0),          // Sebring concrete slab (h_diff_1_lm + dirt layers 160 / 162 / 163; no gamma, as the family above)
     (0x3960_97bc_9fb8_d028, 0),          // Sebring colour + lightmap draws (models 85 / 95, texture 214)

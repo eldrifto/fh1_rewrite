@@ -447,3 +447,6 @@ Tile crop is correct; the strip's darkness is in the bake; the slab (f9fbef3a) i
 **Result:** flat-ground lightmap seams Test Track 0.462 -> 0.101, Mugello 0.187 -> 0.091; baked shadows (Suzuka, Maple Valley) now where Xenia has them. Band sum 16.02 -> 17.86 (brightness rules were tuned against the old lightmaps).
 **Test it:** `FM2_LM_SEAMS=1 FM2_TRACKS=mugello ./target/debug/fh1setup.exe import-fm2 data/work_fm2/disc --only maps` prints `flat ground only: ... mean jump 0.0911`; `./target/release/fh1-engine.exe --track fm2/suzuka_00` shows the dark shadow left of the car.
 **Revert:** `FM2_LM_UV_OLD=1` and re-import.
+
+## 2026-10-26 (4): Suzuka road in FAMILY_GAMMA (BC4)
+Fits Xenia with the corrected lightmaps (0.045 vs 0.040). Twelve-track sum 14.22. BC4-for-all tried and rejected (15.42). All FM2 tracks re-imported with the table.
