@@ -323,15 +323,34 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         // there. A right crop gives the same light on both sides of a seam; a crop from the wrong page region gives jumps.
         if std::env::var_os("FM2_LM_SEAMS").is_some() {
             let mut cache: HashMap<u32, Option<(usize, usize, Vec<u8>)>> = HashMap::new();
-            let mut at: HashMap<[i32; 3], Vec<(u32, f32)>> = HashMap::new();
+            // Per entry: (tile, value, flat): `flat` = the vertex's area-weighted normal is within ~8 degrees of straight up (road / ground), so
+            // the "flat" figure compares only ground seams, where both sides should carry the same light.
+            let mut at: HashMap<[i32; 3], Vec<(u32, f32, bool)>> = HashMap::new();
             for p in &pending {
                 let Some((id, _, _)) = p.lightmap else { continue };
                 if p.lm_uv.len() != p.positions.len() {
                     continue;
                 }
+                let mut nrm = vec![[0.0f32; 3]; p.positions.len()];
+                for t in p.indices.chunks_exact(3) {
+                    let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
+                    if a >= nrm.len() || b >= nrm.len() || c >= nrm.len() {
+                        continue;
+                    }
+                    let (pa, pb, pc) = (p.positions[a], p.positions[b], p.positions[c]);
+                    let (e1, e2) = ([pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]], [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]]);
+                    let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+                    for v in [a, b, c] {
+                        for k in 0..3 {
+                            nrm[v][k] += n[k];
+                        }
+                    }
+                }
                 let Some((w, h, px)) = cache.entry(id).or_insert_with(|| decode_rgba(&dir.join("textures").join(format!("{id:08x}.dds")))).as_ref() else { continue };
                 let (w, h) = (*w, *h);
-                for (q, uv) in p.positions.iter().zip(&p.lm_uv) {
+                for ((q, uv), n) in p.positions.iter().zip(&p.lm_uv).zip(&nrm) {
+                    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    let flat = len > 0.0 && (n[1] / len).abs() > 0.99;
                     // Bilinear, clamped (the engine's sampler).
                     let fx = (uv[0].clamp(0.0, 1.0) * w as f32 - 0.5).clamp(0.0, w as f32 - 1.0);
                     let fy = (uv[1].clamp(0.0, 1.0) * h as f32 - 0.5).clamp(0.0, h as f32 - 1.0);
@@ -341,10 +360,11 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                     let g = |x: usize, y: usize| px[(y * w + x) * 4] as f32 / 255.0;
                     let v = (g(x0, y0) * (1.0 - tx) + g(x1, y0) * tx) * (1.0 - ty) + (g(x0, y1) * (1.0 - tx) + g(x1, y1) * tx) * ty;
                     let key = q.map(|c| (c * 20.0).round() as i32);
-                    at.entry(key).or_default().push((id, v));
+                    at.entry(key).or_default().push((id, v, flat));
                 }
             }
             let (mut n, mut sum, mut big) = (0usize, 0.0f64, 0usize);
+            let (mut fnn, mut fsum, mut fbig) = (0usize, 0.0f64, 0usize);
             for list in at.values() {
                 let tiles: std::collections::BTreeSet<u32> = list.iter().map(|x| x.0).collect();
                 if tiles.len() < 2 {
@@ -354,7 +374,17 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 n += 1;
                 sum += (hi - lo) as f64;
                 big += (hi - lo > 0.2) as usize;
+                // Flat seams: only the flat entries, and still at least two tiles among them.
+                let flat: Vec<&(u32, f32, bool)> = list.iter().filter(|x| x.2).collect();
+                let ft: std::collections::BTreeSet<u32> = flat.iter().map(|x| x.0).collect();
+                if ft.len() >= 2 {
+                    let (lo, hi) = flat.iter().fold((f32::MAX, f32::MIN), |a, x| (a.0.min(x.1), a.1.max(x.1)));
+                    fnn += 1;
+                    fsum += (hi - lo) as f64;
+                    fbig += (hi - lo > 0.2) as usize;
+                }
             }
+            println!("[fm2] lightmap seams, flat ground only: {fnn} shared vertices, mean jump {:.4}, jumps > 0.2: {fbig} ({:.1} %)", fsum / fnn.max(1) as f64, 100.0 * fbig as f64 / fnn.max(1) as f64);
             println!("[fm2] lightmap seams ({}): {n} shared vertices across tiles, mean jump {:.4}, jumps > 0.2: {big} ({:.1} %)", if std::env::var_os("FM2_LM_MIRROR").is_some() { "mirrored crop" } else { "absolute crop" }, sum / n.max(1) as f64, 100.0 * big as f64 / n.max(1) as f64);
         }
     }
