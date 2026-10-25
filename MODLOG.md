@@ -396,3 +396,6 @@ Added `FH1_RM_FM2_SHADOW_DBG` (debug paint of shadow-map visibility and lightmap
 
 ## 2026-10-25 (8): Sebring comparison read as a framing difference (no code change)
 Documented in STATUS.md. Nothing committed.
+
+## 2026-10-25 (9): position matching attempt (no code change)
+Added `data/work/tp_shot.sh` / `ncc.py` (git-ignored scratch). The automatic match did not work; findings in STATUS.md. Nothing committed.
