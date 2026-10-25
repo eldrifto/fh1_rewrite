@@ -1,49 +1,62 @@
-# STATUS: FM2 road brightness, plain-language summary (2026-10-19, written at the end of a long session)
+# STATUS: FM2 road brightness, plain-language summary (updated 2026-10-26)
 
-This note is the short version. The long, dated sections below it are the evidence and the dead ends.
+This note is the short version. The long, dated sections below are the evidence and the dead ends (newest at the bottom of the file).
 
-## The problem
-Our FM2 (Forza Motorsport 2) roads do not match the roads in your Xenia screenshots: some are far too bright (Nurburgring about 5x, Test Track and Tsukuba about 2.5x), some a bit dark.
+## Where it stands
+Twelve FM2 tracks are compared with your Xenia screenshots on two road patches each (left / right band near the car, linear green, ours / Xenia; 1.0 = equal). The sum of |ln ratio| over all 24 patches (0 = perfect) went **17.68 -> 11.16** over this work. Current (left | right): Tsukuba 1.03 | 2.51, Test Track 1.22 | 9.09, Sunset 0.38 | 0.79, Silverstone 0.89 | 1.09, Sebring 0.64 | 1.11, Road Atlanta 1.44 | 1.31, Nurburgring 1.26 | 0.29, New York 0.76 | 0.84, Mugello 0.98 | 1.63, Maple Valley 0.51 | 2.41, Laguna Seca 1.43 | 1.09, Suzuka 0.47 | 0.94. Ratios differ by about 0.2 between runs of the same data (sun / exposure), so smaller changes are noise. Everything is committed.
 
-## What is solved (with numbers, all from the game's own shader and data)
-- **Single-channel (DXT5A / "BC4") textures are gamma-encoded on the console.** The road shaders read their asphalt grain from such textures. Treating them as linear made the roads far too bright; decoding them as sRGB brings the shader's value for sunlit road within 0.74x to 1.2x of Xenia on Nurburgring, Tsukuba and Test Track (Sunset is unaffected either way). Earlier "contradictions" were my mistake: I compared an average that included shadowed texels with Xenia's sunlit road.
-- **What the game's code says about that gamma (read afterwards):** the texture files carry no gamma bit, and the per-binding index in the model's stream (my "flag") does not carry it either (the state tables I decoded are identical for different indices and empty). So "BC4 = sRGB" is a proxy that fits the road shaders I checked, not the game's real rule; where the console really gets the gamma from is still unknown (candidates: a default of the texture-header builder or of the set-texture code, not yet read).
-- **Nurburgring's road is fixed behind a switch.** With `FM2_BC4_SRGB=1` the Nurburgring road drops from 0.19 to 0.04 (Xenia about 0.058) and nothing else changes (it applies only to that road shader, recognised by a hash of its code). **Off by default.**
-- **Tsukuba's road matches too, behind the same switch:** the sunlit road band reads 92,91,89 against Xenia's 97,92,80 (before: 115,114,111).
-- **The game's real constants and post-processing were read out of the game's code:** the shader registers for the sun, light colours and lightmap colours (c101 to c105, c184, c185) and what feeds them; the scene light list (no directional light on these tracks, so the sun colour is white); the final colour step (desaturate, per-track tint, a light/dark tone curve, all from each track's `TrackSettings.xml`, units confirmed as /255). It is implemented in the engine behind `FH1_FM2_POST=1` (off by default). It explains Tsukuba's warm tint but not the road brightness gap.
-- **Merged the `fm2-lightmaps` importer work into this working tree** (nothing committed) after I overwrote the installed FM2 data with the older importer; I repaired it and the data is back to the default import.
+## What was fixed (all from the game's own code and data)
+- **Lightmap crop:** a negative tile scale is the shader's clamp flag, not a mirror (`|c170|` in the road shaders; tile centred in its 48-texel page cell).
+- **Lightmap uv:** read through each draw's own vertex shader instead of a guessed offset / unorm decode. Lightmap seams on flat ground dropped from 0.46 to 0.10 (Test Track); baked shadows now sit where Xenia has them.
+- **Per-family gamma:** a table of road-shader families (by a hash of the shader code) says which textures the console decodes as sRGB: BC4 grains (Nurburgring, Tsukuba, Silverstone, Test Track, Suzuka) or all colour textures (Laguna, Sunset, Sebring slab). The importer bakes / scales accordingly and marks materials so the engine uploads their colour layers as sRGB.
+- **Game shadow rule** on lightmap-lit surfaces (`min(1 - (1 - ShadowColor) S, lightmap light)`), the **car contact shadow** for FM2's glTF cars, **FM2's own follow-camera** settings, the **real-time shadow cascades** read from the road shaders (no static shadow map exists).
+- **Bugs:** importer passes overwrote each other's generated textures (shared id ranges); the engine cached each scenery texture in one colour space only.
 
 ## What is NOT solved
-- **Suzuka and Mugello roads.** I checked the right shader/draws (painting test): the BC4 rule over-darkens Suzuka and brightens Mugello relative to the heuristic; Mugello's shader gives 0.06 to 0.08 against Xenia's 0.13. I then ruled out the likely causes one by one: its lightmap crop (lit texels already 0.78 to 0.87, full light would add only 1.17x), a sun term (that shader family has `c0 = 0`, so none), and constants inherited from earlier draws (the one constant each road shader reads but never sets is its specular exponent, which only feeds the sun term). Suzuka's Xenia shot is mostly in shadow, so there is no reliable reference.
-- **Untested idea:** if Xenia's pictures were decoded with display exponent 2.0 instead of 2.2, every Xenia "sunlit road" value I used would be about 1.2x higher, which would move several of the comparisons (this should be checked together with the gamma rule).
-- **The generalised switch is not safe as a default** (it helps Tsukuba and Nurburgring, hurts Suzuka and Mugello).
-- **The sun/specular term is now ruled out** as the cause of the leftover gaps: the specular exponent each road shader needs is stored in the model's material block (Nurburgring 9.68, Suzuka 8.47, Tsukuba 12.31, Test Track 7.78, Mugello 9.68), and with those values and the real sun and camera directions the sun term adds at most +0.004 to the lit road.
-- **The game's tone-curve blend** needs the frame's average luminance in the game's units; our frames average far lower than every track's limits, so `FH1_FM2_POST=1` brightens things in the wrong direction and stays off.
-- **Other tracks** (Silverstone, Road Atlanta, New York, Maple Valley, Sebring, Laguna Seca) were not looked at in detail; their roads use colour textures.
-- Not tested anywhere: a real race, and any engine behaviour beyond screenshots at the spawn point.
+- **Right-hand bands** with very dark Xenia values (Test Track 9.1x, Maple Valley 2.4x, Tsukuba 2.5x): mostly shadow areas whose placement / darkness differ from Xenia; not the car's real-time shadow rule (tested on / off).
+- **New York:** the engine is close (0.76) only because an old importer heuristic darkens it; the game's own shader evaluates 2.4x brighter than Xenia there, cause unknown (not the post-process).
+- **Laguna Seca's foreground** is in a real-time shadow in Xenia that our sun does not produce; caster unknown.
+- **FM2's final colour step** (`FH1_FM2_POST`) cannot be reproduced: the engine's frame average stays below every track's adaptation limits.
+- Not tested anywhere: a real race, any view other than the spawn screenshot.
 
 ## Decided: no Xenia GPU trace
-A trace of one frame would settle the real gamma rule, the light direction fed to the road specular term and the display transfer, but it does not work in the user's Xenia build (tried 2026-10-19), so those three questions stay open and everything above that depends on them is empirical (BC4 proxy, fixed sheen vs per-draw term, light direction literal). Do not spend more time on tracing.
+It does not work in your Xenia build (tried 2026-10-19). Questions that would need it stay empirical.
 
-## Where things are (nothing is committed)
-- Changed code: `crates/fh1setup/src/fm2_scenery.rs` and `fm2_uv.rs` (merged importer plus the `FM2_BC4_SRGB` switch and a richer `FM2_ROAD_DBG` print), `crates/fh1-remaster/src/post.rs` and `crates/fh1-engine/src/main.rs` (`FH1_FM2_POST`), `fh1setup/src/main.rs` (`mod fm2_sky`), `crates/fh1-shaders/src/lib.rs` (`ps_cpu`). Your own UI work in the engine is untouched.
-- New files: `crates/fh1-shaders/src/ps_cpu.rs` (CPU pixel-shader interpreter), `crates/fh1setup/src/fm2_sky.rs`, and probe tools in `crates/fh1setup/examples/` (`fm2_ps_run`, `fm2_bind_dump`, `fm2_data_dump`), `crates/fh1-shaders/examples/` (`fm2_fxlist`, `fm2_fxdump`, `fm2_ps_consts`), `crates/fh1-formats/examples/` (`fm2_pvs_unused`, `fm2_sky`, `fm2_state`).
-- Scratch (git-ignored, under `data/work`): decompressed game image and PowerPC listing (`fm2_xex/`), post-effect dumps (`fm2_fx/`), measurement scripts (`lit_all.py`, `lit_per.py`, `cmp_bands.py`, `band2.py`, `paint_some.py`, ...), the pre-merge copies of the importer (`premerge/`), and a Pillow install (`pylib/`). `target-fm3/` is an old build folder that can be deleted.
-- The game's own files were only read; nothing was written to the game installs.
+## Switches (FM2 lighting work; importer `fh1setup import-fm2`, engine `fh1-engine`)
+| Switch | Where | Default | What it does / status |
+|---|---|---|---|
+| `FM2_BC4_SRGB=0` | importer | on | turns the whole per-family gamma table off (old output) |
+| `FM2_BC4_SRGB_ALL=1` | importer | off | BC4 rule on every baked road (tested 2026-10-26: worse) |
+| `FM2_FAMILY_COLOUR=1` | importer | off | scale every family colour texture to its shader's brightness (worse; only `FAMILY_SCALE` families get it always) |
+| `FM2_SHADER_ROAD=1` | importer | off | shader albedo for baked roads without the table |
+| `FM2_LM_MIRROR=1` | importer | off | old mirrored lightmap crop |
+| `FM2_LM_UV_OLD=1` | importer | off | old guessed lightmap uv |
+| `FM2_SPEC_MAT=1` | importer | off | per-draw specular term into the materials (use with `FH1_FM2_SPEC_MAT`) |
+| `FM2_TRACKS=a,b` | importer | all | import only these tracks |
+| `--only camera` | importer | - | copy FM2's `CameraSettings.ini` |
+| `FM2_LM_SEAMS=1` | importer | off | diagnostic: lightmap jumps across tile seams (all / flat ground) |
+| `FM2_PROBE_AT=x,y,z;...` + `FM2_PROBE_LERP=d,l` | importer | off | diagnostic: run each draw's shader at a world point (patch check) |
+| `FM2_NEAR`, `FM2_FIND_TEX`, `FM2_FIND_SIG`, `FM2_UNDER`, `FM2_ROAD_DBG` | importer | off | diagnostics (draws near a point / using a texture / shader hash) |
+| `FH1_FM2_SHADOW_GAME=0` | engine | on | fixed shadow strength instead of the game's rule |
+| `FH1_FM2_DROPSHADOW=0` | engine | on | no car contact shadow on FM2 cars |
+| `FH1_FM2_CAMERA=0` | engine | on | FH1's follow camera instead of FM2's |
+| `FH1_FM2_CAMERA_FOV=deg` | engine | unset | force the follow camera's FOV |
+| `FH1_FM2_POST=1` (`FH1_FM2_POST_T`) | engine | off | FM2's final colour step (worse) |
+| `FH1_FM2_SPEC=k`, `FH1_FM2_SPEC_MAT=1` | engine | off | game-derived road specular (mixed results) |
+| `FH1_RM_FM2_SHADOW_DIR=full/fz/fx/fxz` | engine | off | track shadow direction for the sun (worse) |
+| `FH1_RM_FM2_SHADOW_DBG=1` | engine | off | debug: paint shadow visibility and lightmap light |
+| `FH1_SHOT_PROBE=1` | engine | off | log the ground points under the comparison bands at the screenshot |
+| `PS_GAMMA`, `PS_WHITE`, `PS_REGS` | `fm2_ps_run` probe | - | per-sampler sRGB / white samplers / register dump |
+Removed on 2026-10-26 (rejected or superseded): `FM2_LM_UV_SIGNED`, `FM2_LM_UV_VS`, `FM2_LM_FLIPU`, `FM2_LM_FLIPV`, `FH1_RM_FM2_DYN_LIT`, `FH1_RM_FM2_SHADOW_POW`, `FM2_RM_COLOUR_SRGB`. The many older `FM2_NO_*` / `FM2_ROAD_*` importer switches predate this work and are documented next to their code.
 
-## Switches (all off by default)
-- `FM2_BC4_SRGB=1` (importer): BC4 = sRGB; Nurburgring road blend (hash-gated) and shader-derived road albedo for baked roads.
-- `FM2_SHADER_ROAD=1` (importer): shader-derived road albedo without the gamma rule.
-- `FH1_FM2_POST=1` (engine; `FH1_FM2_POST_T` forces the tone-curve blend): the game's final colour step.
-Re-import FM2 only with the current `target/debug/fh1setup.exe` built with `--features fm2` (it now contains the merged importer).
-
-## How to test (examples)
+## How to test
 ```
-FM2_BC4_SRGB=1 FM2_TRACKS=tsukuba ./target/debug/fh1setup.exe import-fm2 data/work_fm2/disc --only maps
+./target/debug/fh1setup.exe import-fm2 data/work_fm2/disc --only maps
 ./target/debug/fh1setup.exe data/work/disc --only remaster --force
-FH1_OWNERSHIP=0 FH1_SHOT=screenshots/check.png FH1_SHOT_AT=28 ./target/release/fh1-engine.exe --track fm2/tsukuba_00
+bash data/work/shoot_some.sh check tsukuba_00 testtrackinfield_00 sunsetinfield_00 silverstone_00 sebring_00 roadatlanta_00 nurburgring_00 newyork_01 mugello_00 maplevalley_00 lagunaseca_00 suzuka_00
+python data/work/cmp12.py check
 ```
-Tsukuba's road in the shot should read about 92,91,89 on the left band (97,92,80 in Xenia); without `FM2_BC4_SRGB=1` about 115,114,111. Reset by repeating the first two commands without the variable.
+The last line should print a sum near 11.2.
 
 ---
 

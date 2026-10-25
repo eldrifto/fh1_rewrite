@@ -451,10 +451,8 @@ fn wgsl() -> String {
         .replace("RM_LM_LIGHT_GAIN", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_GAIN", 3.0)))
         .replace("RM_LM_LIGHT_BIAS", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_BIAS", 0.5)))
         .replace("RM_FM2_DYN_SHADOW", &format!("{:.3}", wenv("FH1_RM_FM2_DYN_SHADOW", 0.6)))
-        .replace("RM_FM2_DYN_LIT", &format!("{:.1}", wenv("FH1_RM_FM2_DYN_LIT", 0.0)))
         .replace("RM_FM2_SHADOW_GAME", &format!("{:.1}", wenv("FH1_RM_FM2_SHADOW_GAME", 0.0)))
         .replace("RM_FM2_SHADOW_DBG", &format!("{:.1}", wenv("FH1_RM_FM2_SHADOW_DBG", 0.0)))
-        .replace("RM_FM2_SHADOW_POW", &format!("{:.2}", wenv("FH1_RM_FM2_SHADOW_POW", 1.0)))
         .replace("RM_FM2_SHADOW_COL", &format!("{:.4}", wenv("FH1_RM_FM2_SHADOW_COL", 0.4)))
         .replace("RM_FM2_SHEEN_POW", &format!("{:.1}", wenv("FH1_RM_FM2_SHEEN_POW", 24.0)))
         .replace("RM_FM2_SPEC_MAT", &format!("{:.1}", wenv("FH1_RM_FM2_SPEC_MAT", 0.0)))
@@ -1072,7 +1070,7 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
                 view_bindings::view.view_from_world[2].z,
                 view_bindings::view.view_from_world[3].z
             ), in.world_position);
-            let lit_lm = select(smoothstep(0.35, 0.75, (lm.r + lm.g + lm.b) * 0.3333), 1.0, RM_FM2_DYN_LIT > 0.5);
+            let lit_lm = smoothstep(0.35, 0.75, (lm.r + lm.g + lm.b) * 0.3333);
             for (var i = 0u; i < view_bindings::lights.n_directional_lights; i = i + 1u) {
                 if (view_bindings::lights.directional_lights[i].flags & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
                     let sh = shadows::fetch_directional_shadow(i, in.world_position, pbr.world_normal, view_z, in.position.xy);
@@ -1081,7 +1079,7 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
                         // so the shadow only darkens where the lightmap light is above the track's shadow level. `FH1_FM2_SHADOW_GAME=1`.
                         let lerpv = max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(0.001));
                         let lit = min(vec3<f32>(1.0 - (1.0 - RM_FM2_SHADOW_COL) * (1.0 - sh)), lerpv);
-                        col = col * pow(lit / lerpv, vec3<f32>(RM_FM2_SHADOW_POW));
+                        col = col * (lit / lerpv);
                         if RM_FM2_SHADOW_DBG > 0.5 { col = vec3<f32>(sh * sh * sh, lerpv.g / 2.0, 0.0); }
                     } else {
                         col = col * (1.0 - RM_FM2_DYN_SHADOW * lit_lm * (1.0 - sh));

@@ -216,10 +216,9 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
             Some(w) => ((w >> 8) & 0x3F) == 0x3F,
             None => !matches!(role, N | NB),
         };
-        // FM2_RM_COLOUR_SRGB=1 (experiment): an FM2 map's colour layers (A / B / C) are uploaded as sRGB whatever the format word says (the patch-level
-        // shader check puts Sebring's and Sunset's roads closer to Xenia that way; STATUS.md 2026-10-26).
-        // The importer's per-material flag (`colour_srgb`: the draw's shader family decodes its colour textures as sRGB) does the same per family.
-        if fm2.is_some() && matches!(role, A | B | C) && (std::env::var_os("FM2_RM_COLOUR_SRGB").is_some() || colour_srgb) {
+        // The importer's per-material flag (`colour_srgb`: the draw's shader family decodes its colour textures as sRGB): its colour layers are
+        // uploaded as sRGB whatever the format word says.
+        if fm2.is_some() && matches!(role, A | B | C) && colour_srgb {
             gamma = true;
         }
         if gamma {
