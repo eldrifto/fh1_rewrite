@@ -80,6 +80,9 @@ fn bc4_srgb_on() -> bool {
 const BC4: u32 = 0x8000_0000;
 /// Every sampler decoded as sRGB once (colour textures and BC4 grains); the engine then uploads the material's colour layers as sRGB.
 const COLOURS: u32 = 0x7FFF_FFFF;
+/// Shader families whose single colour texture is always scaled to the shader's brightness (see the family-albedo pass).
+const FAMILY_SCALE: &[u64] = &[0xf9fb_ef3a_c366_0c4c];
+
 const FAMILY_GAMMA: &[(u64, u32)] = &[
     (0x4aa0_eec0_57a0_743d, BC4),        // Nurburgring road (its BC1 tf3 is a weight, stays linear)
     (0x1902_6bd2_5939_21ac, BC4),        // Tsukuba road (model 50)
@@ -825,7 +828,11 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         }
     }
     // Off by default (`FM2_FAMILY_COLOUR=1` turns it on): measured over the twelve tracks it did not improve the match (STATUS.md, 2026-10-22).
-    if bc4_srgb_on() && std::env::var_os("FM2_FAMILY_COLOUR").is_some() {
+    // Families whose importer material keeps one colour layer of a shader that blends in more (dirt / wear layers): their colour texture is always
+    // brought to the shader's own brightness, `FM2_FAMILY_COLOUR` or not (Sebring's concrete slab: white texture 161 under dark layers 160 / 162 / 163).
+    let scale_always = |p: &Pending| FAMILY_SCALE.contains(&ps_sig(p));
+    let family_colour = std::env::var_os("FM2_FAMILY_COLOUR").is_some();
+    if bc4_srgb_on() && (family_colour || pending.iter().any(scale_always)) {
         let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
         let mut scaled: HashMap<(u32, [u32; 3]), u32> = HashMap::new();
         let mut scaled_new: Vec<u32> = Vec::new();
@@ -833,7 +840,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         let mut shader_cache: HashMap<u64, Option<[f32; 3]>> = HashMap::new();
         let mut changed = 0usize;
         for p in pending.iter_mut() {
-            if family_gamma(p).is_none() || NB_ROAD_SIGS.contains(&ps_sig(p)) {
+            if family_gamma(p).is_none() || NB_ROAD_SIGS.contains(&ps_sig(p)) || !(family_colour || scale_always(p)) {
                 continue;
             }
             let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0) && !normal_ids.contains(&t.0) && !placeholder_ids.contains(&t.0);
@@ -868,7 +875,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                     }
                     px.push(if q[3] == 250 { 255 } else { q[3] });
                 }
-                let id = 0xFFFF_5000 + scaled_new.len() as u32;
+                let id = 0xFFFF_6000 + scaled_new.len() as u32;
                 if let Ok(c) = crate::textures::rgba_to_dds(px, w as u32, hh as u32) {
                     let _ = std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds);
                 }
@@ -1041,7 +1048,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             }
             let (m, c) = (first_mask.unwrap_or(0), cols[0]);
             let id = *made.entry((m, c)).or_insert_with(|| {
-                let id = 0xFFFF_4000 + made_new.len() as u32;
+                let id = 0xFFFF_8000 + made_new.len() as u32;
                 let read = |id: u32, fmt: texpresso::Format| {
                     let b = std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).ok()?;
                     let u = |o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
@@ -1137,7 +1144,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 continue;
             }
             let id = *made.entry(src).or_insert_with(|| {
-                let id = 0xFFFF_5000 + made_new.len() as u32;
+                let id = 0xFFFF_7000 + made_new.len() as u32;
                 let made = (|| {
                     let b = std::fs::read(dir.join("textures").join(format!("{src:08x}.dds"))).ok()?;
                     let (w, h) = dims(src);

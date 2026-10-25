@@ -58,7 +58,8 @@ pub struct RemasterScenery {
     materials: HashMap<MatKey, Handle<RemasterMaterial>>,
     /// Handle -> (track, record index, mirrored), to rebuild / mirror.
     origin: HashMap<AssetId<RemasterMaterial>, (usize, usize, bool, Option<u32>)>,
-    images: HashMap<(usize, u32), Handle<Image>>,
+    /// (track, texture id, uploaded as sRGB): one texture can be bound as sRGB by one material family and linear by another.
+    images: HashMap<(usize, u32, bool), Handle<Image>>,
     loading: Vec<(Handle<Image>, bool, usize, Task<Option<Image>>)>,
     provider: AssetHandleProvider,
     /// Night values last written into the materials.
@@ -123,19 +124,19 @@ impl RemasterScenery {
 
     /// The DDS file behind a scenery texture handle (RTX proxies read a splat weight map's 1x1 mip, rtx.rs).
     pub fn image_path(&self, id: AssetId<Image>) -> Option<PathBuf> {
-        let (&(track, tex), _) = self.images.iter().find(|(_, h)| h.id() == id)?;
+        let (&(track, tex, _), _) = self.images.iter().find(|(_, h)| h.id() == id)?;
         Some(self.tracks[track].scenery_dir.join("textures").join(format!("{tex:08x}.dds")))
     }
 
     fn image(&mut self, track: usize, id: u32, srgb: bool, role: usize) -> Handle<Image> {
-        if let Some(h) = self.images.get(&(track, id)) {
+        if let Some(h) = self.images.get(&(track, id, srgb)) {
             return h.clone();
         }
         let h: Handle<Image> = self.provider.reserve_handle().typed();
         let path = self.tracks[track].scenery_dir.join("textures").join(format!("{id:08x}.dds"));
         let task = AsyncComputeTaskPool::get().spawn(async move { fh1_render::scenery::read_dds(&path) });
         self.loading.push((h.clone(), srgb, role, task));
-        self.images.insert((track, id), h.clone());
+        self.images.insert((track, id, srgb), h.clone());
         h
     }
 

@@ -460,3 +460,7 @@ Engine `FH1_SHOT_PROBE`, importer `FM2_PROBE_AT` / `FM2_PROBE_LERP`, `shader_eva
 ## 2026-10-26 (11): per-family colour sRGB in the engine
 `fm2_scenery.rs`: `COLOURS` table value and the `colour_srgb` material flag; `remaster.rs`: the flag uploads the material's colour layers as sRGB. Laguna, Sunset, Sebring families added. Twelve-track sum 14.33 -> 12.37.
 **Test it:** `./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: the start straight's asphalt is a darker grey than before (left band about 80 in bytes, was 114).
+
+## 2026-10-26 (12): texture-id ranges, image cache key, Sebring slab scaling
+`fm2_scenery.rs`: `FAMILY_SCALE` (Sebring slab), separate generated-texture id ranges per pass. `fh1-remaster/src/scenery.rs`: image cache keyed by colour space too. All FM2 tracks re-imported, remaster tables rebuilt. Twelve-track sum 12.37 -> 11.16.
+**Test it:** `./target/release/fh1-engine.exe --track fm2/sebring_00`: no chequer streaks over the pit lane; `--track fm2/sunsetinfield_00`: road a mid grey (left band about 71 in bytes).
