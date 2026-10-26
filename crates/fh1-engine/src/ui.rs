@@ -26,6 +26,7 @@ pub mod fh1_launch;
 pub mod fm2_dial;
 pub mod fm2_hud;
 pub mod fm2_minimap;
+pub mod fm2_pause;
 pub mod garage;
 pub mod graphics;
 pub mod thumbs;
@@ -109,7 +110,7 @@ impl Plugin for UiPlugin {
             // L1c: the front-end menu from the game's own `120_P_PRE_SPLASH` scene (ui/fh1_launch.rs).
             .add_plugins(fh1_launch::Fh1LaunchPlugin)
             // FM2 circuits: the game's own in-race HUD (ui/fm2_hud.rs) replaces FH1's.
-            .add_plugins(fm2_hud::Fm2HudPlugin)
+            .add_plugins((fm2_hud::Fm2HudPlugin, fm2_pause::Fm2PausePlugin))
             // L1: launch screen and loading covers (FH1_LAUNCH_SCREEN=0 / FH1_LOADING=0).
             .add_plugins(loading::LoadingPlugin)
             // L1b: Motorsport hot-lap timer (tracks with track.json timing).
@@ -540,10 +541,11 @@ fn find_below(p: &Player, from: usize, name: &str) -> Option<usize> {
 }
 
 /// Show FH1's pause scene for the main page and drive its button slides from the cursor.
-fn drive_fh1_pause(fh1: Option<ResMut<Fh1Pause>>, menu: Res<Menu>, mut scenes: Query<&mut scene::AnarkScene>) {
+fn drive_fh1_pause(fh1: Option<ResMut<Fh1Pause>>, menu: Res<Menu>, mut scenes: Query<&mut scene::AnarkScene>, fm2: Option<Res<fm2_pause::Fm2PauseOn>>) {
     let Some(mut fh1) = fh1 else { return };
     let Ok(mut sc) = scenes.get_mut(fh1.entity) else { return };
-    if !(menu.open && menu.page == Page::Main) {
+    // FM2 circuits draw FM2's own pause screen (ui/fm2_pause.rs) over the same rows.
+    if !(menu.open && menu.page == Page::Main) || fm2.is_some() {
         sc.visible = false;
         fh1.shown = None;
         return;
