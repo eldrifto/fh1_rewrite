@@ -4,6 +4,9 @@ This is the long-form overview of the whole project: what it is, how it is put t
 
 Terms used once and then freely: **engine** = the game program (`fh1-engine`); **importer / setup tool** = `fh1setup`, which converts a game disc into files the engine reads; **imported map / circuit** = a track converted from another Forza game; **AI** = the computer-driven opponents; **racing line** = the path an AI car tries to follow; **lap gate** = an invisible line across the road that counts as a checkpoint; **Xenia** = the Xbox 360 emulator the user runs the original games in, used here only as a reference picture.
 
+## 0. FM2 UI work (2026-10-26, after this summary was written)
+FM2's HUD, minimap and pause screen are drawn from the disc's own UI scenes (details and what is guessed: MODLOG entries 35 to 39). Compared with the Xenia shots the HUD layout, tach, boost gauge and minimap match closely; the 3D scene still differs in tone / contrast, sky clouds, road surface detail and car finish. Uncommitted.
+
 ## 1. What this project is
 
 A new PC engine, written in Rust with the Bevy game framework, that plays **Forza Horizon 1** (Xbox 360, 2012) from the user's own disc, and can add content from other Xbox 360 Forza games the user owns: Forza Horizon 2, Forza Motorsport 4, 3, 2, and cars from the original Xbox Forza Motorsport (FM1). It is a reimplementation, not an emulator: the setup tool reads the disc's archives, models, textures, database and audio and converts them; the engine is rebuilt system by system from the game's own data and from reverse-engineering research.

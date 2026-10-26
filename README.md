@@ -134,6 +134,9 @@ cargo run --release -p fh1setup --features fm4 -- import-fm4 "path/to/FM4 Play D
 cargo run --release -p fh1setup --features fm3 -- import-fm3 "path/to/FM3 Play Disc.iso" --disc2 "path/to/FM3 Content Install Disc.iso"
 ```
 
+FM2 circuits use FM2's own in-race HUD (LAPS, RACE / Lap timer, tach and boost gauge, minimap) and pause screen, drawn from the disc's UI
+files (`fh1setup import-fm2 <disc> --only ui`); not done: the countdown lights, results pages, the main menus (see MODLOG 35 to 39).
+
 Imported circuits (FM2, FM4) have a race against 7 of that game's cars, through the same race code as Colorado's events
 (grid, countdown, laps, results): `FH1_RACE=0 fh1-engine --track fm2/lagunaseca_00` (`FH1_RACE_LAPS=n`, default 3). The AI follow the
 game's own racing line and stay on the tarmac (`FH1_AI_ROAD=0` turns that off). Tested on FM2 Laguna Seca and FM4 Catalunya with a
