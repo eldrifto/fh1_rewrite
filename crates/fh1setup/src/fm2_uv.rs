@@ -42,6 +42,19 @@ pub struct DrawUv {
     /// Item position -> the draw constant register holding the atlas sub-rectangle `[su, sv, ou, ov]` the shader maps its coordinate into
     /// (`frac(uv) * c.xy + c.zw`); the coordinate in `slots` is the unit coordinate before that transform.
     pub atlas: BTreeMap<usize, u32>,
+    /// The pixel shader the draw runs, for evaluating it on the CPU (`fh1_shaders::ps_cpu`).
+    pub ps: Option<PsRun>,
+}
+
+/// A draw's pixel shader and how its items feed it.
+#[derive(Default, Clone)]
+pub struct PsRun {
+    pub words: Vec<u32>,
+    pub literals: Vec<[f32; 4]>,
+    /// Item position -> the sampler index (`tfN`) it is bound to.
+    pub item_sampler: BTreeMap<usize, u32>,
+    /// Sampler index -> the interpolator register carrying its texture coordinate.
+    pub sampler_reg: BTreeMap<u32, u32>,
 }
 
 pub fn resolve(raw_model: &[u8], model: &fm2::Model, kind: &dyn Fn(u32) -> ItemKind) -> Vec<DrawUv> {
@@ -122,16 +135,18 @@ pub fn resolve(raw_model: &[u8], model: &fm2::Model, kind: &dyn Fn(u32) -> ItemK
                 return DrawUv { slots: out, ..Default::default() };
             };
             let mut samp = samp0;
+            let mut ps_ix = pairs[gi].1;
             if let Some(p0) = pairs[gi].1 {
                 let want = shaders[p0].dwords;
                 let gap = |n: usize| (n as isize - d.items.len() as isize).abs();
-                if let Some((_, alt)) = (0..shaders.len())
+                if let Some((ai, alt)) = (0..shaders.len())
                     .filter(|&i| i != p0 && !shaders[i].vertex && shaders[i].dwords == want)
                     .filter_map(|i| Some((i, ps_samplers_all[i].as_ref()?)))
                     .filter(|(_, a)| gap(a.len()) < gap(samp0.len()))
                     .min_by_key(|(_, a)| gap(a.len()))
                 {
                     samp = alt;
+                    ps_ix = Some(ai);
                 }
             }
             // The draw's items fill the pixel shader's 2D samplers; when it lists fewer items than the shader samples, the leading samplers
@@ -229,7 +244,16 @@ pub fn resolve(raw_model: &[u8], model: &fm2::Model, kind: &dyn Fn(u32) -> ItemK
                 }
                 out.insert(slot as usize, uvs);
             }
-            DrawUv { slots: out, alpha_const, atlas }
+            let ps = ps_ix.map(|i| {
+                let t = &shaders[i];
+                PsRun {
+                    words: (0..t.dwords).filter_map(|k| be(gpu, t.code_offset + 4 * k)).collect(),
+                    literals: t.literals.clone(),
+                    item_sampler: (0..d.items.len()).filter_map(|j| Some((j, sampler_of(j)?.index))).collect(),
+                    sampler_reg: samp.iter().filter_map(|s| Some((s.index, s.direct?))).collect(),
+                }
+            });
+            DrawUv { slots: out, alpha_const, atlas, ps }
         })
         .collect()
 }
