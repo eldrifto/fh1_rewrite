@@ -23,6 +23,9 @@ pub mod customize;
 pub mod customize_upgrades;
 pub mod fmv;
 pub mod fh1_launch;
+pub mod fm2_dial;
+pub mod fm2_hud;
+pub mod fm2_minimap;
 pub mod garage;
 pub mod graphics;
 pub mod thumbs;
@@ -105,6 +108,8 @@ impl Plugin for UiPlugin {
             .add_plugins((fmv::FmvPlugin, intro::IntroPlugin, sfx::UiSfxPlugin))
             // L1c: the front-end menu from the game's own `120_P_PRE_SPLASH` scene (ui/fh1_launch.rs).
             .add_plugins(fh1_launch::Fh1LaunchPlugin)
+            // FM2 circuits: the game's own in-race HUD (ui/fm2_hud.rs) replaces FH1's.
+            .add_plugins(fm2_hud::Fm2HudPlugin)
             // L1: launch screen and loading covers (FH1_LAUNCH_SCREEN=0 / FH1_LOADING=0).
             .add_plugins(loading::LoadingPlugin)
             // L1b: Motorsport hot-lap timer (tracks with track.json timing).
@@ -770,8 +775,9 @@ fn update_hud(
     )>,
     fh1: Option<Res<hud::Fh1Hud>>,
     frontend: Option<Res<fh1_launch::Fh1LaunchOn>>,
+    fm2: Option<Res<fm2_hud::Fm2HudOn>>,
 ) {
-    let show = settings.hud && !menu.open && !rig.photo && !crate::cutscene::hide_hud() && !frontend.as_deref().is_some_and(|f| f.0);
+    let show = settings.hud && !menu.open && !rig.photo && !crate::cutscene::hide_hud() && !frontend.as_deref().is_some_and(|f| f.0) && fm2.is_none();
     for (mut v, telemetry) in &mut hud {
         // The placeholder dial only stands in when FH1's own HUD isn't installed.
         let on = if telemetry { settings.telemetry } else { fh1.is_none() };

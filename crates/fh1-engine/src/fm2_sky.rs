@@ -90,7 +90,9 @@ pub fn plugin(app: &mut App) {
 
 fn spawn(sky: Option<Res<Fm2Sky>>, mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>) {
     let Some(sky) = sky else { return };
-    for d in &sky.draws {
+    info!("fm2 sky: {} draws ({} caps)", sky.draws.len(), sky.draws.iter().filter(|d| d.cap).count());
+    let layered = std::env::var("FH1_FM2_SKY_LAYERS").map_or(true, |v| v != "0");
+    for (order, d) in sky.draws.iter().enumerate() {
         let Some(mut img) = dds_image(&d.dds) else {
             warn!("fm2 sky: a texture failed to load");
             continue;
@@ -110,17 +112,28 @@ fn spawn(sky: Option<Res<Fm2Sky>>, mut commands: Commands, mut meshes: ResMut<As
         let normals: Vec<[f32; 3]> = positions.iter().map(|p| { let v = Vec3::from(*p); (-v).normalize_or(Vec3::Y).to_array() }).collect();
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, d.uv.clone());
+        let flip = std::env::var("FH1_FM2_SKY_FLIPV").is_ok();
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, d.uv.iter().map(|t| if flip { [t[0], 1.0 - t[1]] } else { *t }).collect::<Vec<[f32; 2]>>());
         mesh.insert_indices(Indices::U32(idx));
         let material = StandardMaterial {
             base_color_texture: Some(images.add(img)),
             unlit: true,
             cull_mode: None,
             fog_enabled: false,
-            alpha_mode: if d.cap { AlphaMode::Blend } else { AlphaMode::Opaque },
+            // The panoramas of one dome are passes over the same sphere (Tsukuba's five share one bounding box): sky and clouds with their own
+            // alpha, drawn in file order, each over the last. `FH1_FM2_SKY_LAYERS=0` = the old opaque panoramas.
+            alpha_mode: if d.cap || layered { AlphaMode::Blend } else { AlphaMode::Opaque },
+            depth_bias: order as f32,
             ..default()
         };
-        commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(materials.add(material)), Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster, bevy::light::NotShadowReceiver, SkyDome));
+        // `FH1_FM2_SKY_PASSES=n` draws each layer n times (alpha ~ n x): the textures' alpha tops out at 0.44.
+        let passes = std::env::var("FH1_FM2_SKY_PASSES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).clamp(1, 6);
+        let mesh_h = meshes.add(mesh);
+        for k in 0..passes {
+            let mut m = material.clone();
+            m.depth_bias = (order * 8 + k) as f32;
+            commands.spawn((Mesh3d(mesh_h.clone()), MeshMaterial3d(materials.add(m)), Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster, bevy::light::NotShadowReceiver, SkyDome));
+        }
     }
 }
 

@@ -94,6 +94,7 @@ pub fn race_hud(
     rs: Res<RaceState>,
     rewards: Option<Res<crate::progression::LastRewards>>,
     anark: Option<Res<super::anark_hud::AnarkRaceHud>>,
+    fm2: Option<Res<crate::ui::fm2_hud::Fm2HudOn>>,
     mut last_px: Local<f32>,
     mut texts: Query<(&HudText, &mut Text, &mut TextColor, Option<&mut BackgroundColor>, Option<&mut UiTransform>, &mut Node)>,
 ) {
@@ -175,7 +176,7 @@ pub fn race_hud(
                 }
             },
             HudText::Prompt => match (rs.phase, rs.prompt) {
-                (RacePhase::Idle, Some(i)) if !rs.list_open => {
+                (RacePhase::Idle, Some(i)) if !rs.list_open && fm2.is_none() => {
                     let r = &events.races[i];
                     let laps = if r.laps > 1 { format!(", {} laps", r.laps) } else { String::new() };
                     let class = r.target_class.and_then(|t| events.career.class_label(t)).map_or(String::new(), |c| format!(" - class {c}"));

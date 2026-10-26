@@ -135,6 +135,7 @@ fn update(
     profile: Option<Res<crate::progression::Profile>>,
     events: Option<Res<crate::race::Events>>,
     race: Option<Res<crate::race::RaceState>>,
+    fm2: Option<Res<super::fm2_hud::Fm2HudOn>>,
     mut root: Query<&mut Visibility, With<StatusRoot>>,
     mut cells: Query<(&Cell, &mut Text, &mut TextColor)>,
     mut st: Local<State>,
@@ -145,6 +146,7 @@ fn update(
         && !menu.open
         && !rig.photo
         && !racing
+        && fm2.is_none()
         && !super::loading::blocking()
         && !crate::cutscene::active()
         && !super::intro::choice_open()

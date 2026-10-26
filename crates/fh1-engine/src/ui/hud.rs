@@ -266,6 +266,7 @@ pub fn drive_hud(
     track: Res<crate::track::Track>,
     generation: Res<super::world_load::WorldGeneration>,
     frontend: Option<Res<super::fh1_launch::Fh1LaunchOn>>,
+    fm2: Option<Res<super::fm2_hud::Fm2HudOn>>,
 ) {
     let Some(mut hud) = hud else { return };
     let hud = &mut *hud;
@@ -275,7 +276,7 @@ pub fn drive_hud(
         hud.target_shown = false;
     }
     let Ok(mut sc) = scenes.get_mut(hud.entity) else { return };
-    let want = settings.hud && !menu.open && !rig.photo && !crate::cutscene::hide_hud() && !frontend.as_deref().is_some_and(|f| f.0);
+    let want = settings.hud && !menu.open && !rig.photo && !crate::cutscene::hide_hud() && !frontend.as_deref().is_some_and(|f| f.0) && fm2.is_none();
     sc.visible = want;
     if !want {
         return;

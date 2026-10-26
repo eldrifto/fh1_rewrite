@@ -820,6 +820,13 @@ const RASTER_EM: f32 = 48.0;
 /// Draws `s` in a vector font into a white image whose alpha is the glyph coverage (3 x 3 supersampled), with the Loop-Blinn
 /// curve rules of fh1-ui's vfont: inner meshes fill where u² - v <= 0, the outer (negated-x) curve triangles where it is > 0.
 fn raster(font: &VFont, s: &str, em: f32) -> Option<(Image, UVec2)> {
+    raster_in(font, s, em, false).map(|(i, sz, _)| (i, sz))
+}
+
+/// [`raster`] that can also frame the line on the font's own ascent / descent and the pen's advance (`framed`), so every string of a
+/// font gets the same height and a fixed baseline: returns the image, its size and the pen origin on the baseline (px, from the
+/// image's top-left).
+pub(crate) fn raster_in(font: &VFont, s: &str, em: f32, framed: bool) -> Option<(Image, UVec2, Vec2)> {
     const SS: usize = 3;
     let mut pen = 0.0f32;
     let mut glyphs = Vec::new();
@@ -840,6 +847,12 @@ fn raster(font: &VFont, s: &str, em: f32) -> Option<(Image, UVec2)> {
     }
     if glyphs.is_empty() || max.x <= min.x {
         return None;
+    }
+    if framed {
+        let m = &font.metrics;
+        let (asc, desc) = (m.win_ascent as f32 / m.em.max(1) as f32, m.win_descent as f32 / m.em.max(1) as f32);
+        min = Vec2::new(min.x.min(0.0), min.y.min(-desc));
+        max = Vec2::new(max.x.max(pen), max.y.max(asc));
     }
     let pad = 3.0;
     let (w, h) = (((max.x - min.x) * em + 2.0 * pad).ceil() as usize, ((max.y - min.y) * em + 2.0 * pad).ceil() as usize);
@@ -898,5 +911,5 @@ fn raster(font: &VFont, s: &str, em: f32) -> Option<(Image, UVec2)> {
         }
     }
     let image = Image::new(Extent3d { width: w as u32, height: h as u32, depth_or_array_layers: 1 }, TextureDimension::D2, data, TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::default());
-    Some((image, UVec2::new(w as u32, h as u32)))
+    Some((image, UVec2::new(w as u32, h as u32), Vec2::new((0.0 - min.x) * em + pad, max.y * em + pad)))
 }
