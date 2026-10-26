@@ -22,6 +22,7 @@ pub mod cards;
 pub mod customize;
 pub mod customize_upgrades;
 pub mod fmv;
+pub mod fh1_launch;
 pub mod garage;
 pub mod graphics;
 pub mod thumbs;
@@ -99,6 +100,8 @@ impl Plugin for UiPlugin {
             .add_plugins(customize::CustomizePlugin { path: self.settings_path.with_file_name("garage.json") })
             .add_plugins(cards::CardsPlugin)
             .add_plugins((fmv::FmvPlugin, intro::IntroPlugin, sfx::UiSfxPlugin))
+            // L1c: the front-end menu from the game's own `120_P_PRE_SPLASH` scene (ui/fh1_launch.rs).
+            .add_plugins(fh1_launch::Fh1LaunchPlugin)
             // L1: launch screen and loading covers (FH1_LAUNCH_SCREEN=0 / FH1_LOADING=0).
             .add_plugins(loading::LoadingPlugin)
             // L1b: Motorsport hot-lap timer (tracks with track.json timing).
@@ -390,6 +393,22 @@ fn load_fh1_ui(
         sc.visible = false;
         let entity = commands.spawn(sc).id();
         commands.insert_resource(Fh1Pause::new(entity, &p, &data));
+    }
+    // L1c: the front-end menu, the same `120_P_PRE_SPLASH` scene the title comes from (ui/fh1_launch.rs).
+    match data.scene("120_P_PRE_SPLASH") {
+        Some(p) => {
+            let mut sc = scene::AnarkScene::new(Player::new(p.scene.clone()), 30);
+            sc.visible = false;
+            let entity = commands.spawn(sc).id();
+            match fh1_launch::Fh1Launch::new(entity, &p, &data) {
+                Some(fh1) => {
+                    info!("ui: launch scene 120_P_PRE_SPLASH loaded, {} list buttons", fh1.list_len());
+                    commands.insert_resource(fh1);
+                }
+                None => warn!("ui: launch scene 120_P_PRE_SPLASH has no SPLASH_MENU_BUTTON list"),
+            }
+        }
+        None => warn!("ui: launch scene 120_P_PRE_SPLASH not found"),
     }
     commands.insert_resource(data);
 }
@@ -747,8 +766,9 @@ fn update_hud(
         Query<&mut Text, With<Telemetry>>,
     )>,
     fh1: Option<Res<hud::Fh1Hud>>,
+    frontend: Option<Res<fh1_launch::Fh1LaunchOn>>,
 ) {
-    let show = settings.hud && !menu.open && !rig.photo && !crate::cutscene::hide_hud();
+    let show = settings.hud && !menu.open && !rig.photo && !crate::cutscene::hide_hud() && !frontend.as_deref().is_some_and(|f| f.0);
     for (mut v, telemetry) in &mut hud {
         // The placeholder dial only stands in when FH1's own HUD isn't installed.
         let on = if telemetry { settings.telemetry } else { fh1.is_none() };

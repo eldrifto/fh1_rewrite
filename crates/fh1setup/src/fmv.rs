@@ -1,7 +1,7 @@
 //! Setup group `fmv`: FH1's movies (data/extracted/plans/fmv.md, architecture.md §3a): the original WMV + .def files
 //! copied byte-for-byte (no transcode; ffmpeg decodes them at runtime), subtitle XML -> JSON, `manifest.json`.
 //!
-//! Output (group dir): `FMV_0N.wmv/.def`, `PressStart.wmv/.def`, `fmv_0N_subtitles.json`
+//! Output (group dir): `FMV_0N.wmv/.def`, `PressStart.wmv/.def`, `Forza_Intro.wmv`, `fmv_0N_subtitles.json`
 //! (`{ "<LANG>": [ {key, index, start, text_id, extra_attrs}, ... ] }`), `manifest.json` (`[{path, bytes, source}]`).
 //! Switching to a transcoded container later: change [`EXT`] (and the copy in [`movies`]).
 
@@ -17,12 +17,14 @@ const EXT: &str = "wmv";
 const VIDEO_DIR: &str = "ui/videos";
 
 /// (output name, disc path under `media/ui/videos` without extension, has a .def sidecar).
-/// Only the movies the engine plays: `splash_intros/` (T10_MS_Combined, Dolby_Corona_Intro, Forza_Intro, Forza_Tone,
-/// MSGS_Logo) is not copied (user, 2026-10-09: no splash screens; the other three have no known trigger).
+/// Only the movies the engine plays: the boot splashes (`T10_MS_Combined`, `Dolby_Corona_Intro`, `MSGS_Logo`,
+/// `Forza_Tone`) are still not copied (user, 2026-10-09: no splash screens). `splash_intros/Forza_Intro` is: it is
+/// the front end's attract trailer, played by the game's own `999_DEV_ATTRACT` scene (ui/intro.rs) and has no `.def`.
 const MOVIES: &[(&str, &str, bool)] = &[
     ("FMV_01", "FMV_01", true),
     ("FMV_02", "FMV_02", true),
     ("FMV_04", "FMV_04", true),
+    ("Forza_Intro", "splash_intros/Forza_Intro", false),
     ("PressStart", "PressStart", true),
 ];
 

@@ -475,9 +475,12 @@ fn draw_scenes(
                                 }
                             }
                         }
-                        place(&mut parts_q, part.entity, to_affine(&d.world, cam));
+                        let aff = to_affine(&d.world, cam);
+                        place(&mut parts_q, part.entity, aff);
                         if dbg {
-                            info!("uidbg M {} sub{} z{z:.2} y{:.1} e{:?}", d.name, m.submesh, d.world[1][3], part.entity);
+                            let [ax, ay] = [aff.translation.x, aff.translation.y];
+                            let (nop, mop) = (d.opacity, m.opacity);
+                            info!("uidbg M {} sub{} z{z:.2} xy({ax:.0},{ay:.0}) node{nop:.3} mat{mop:.3} t{} e{:?}", d.name, m.submesh, m.textures.len(), part.entity);
                         }
                         seen.insert(key);
                         z += 0.05;

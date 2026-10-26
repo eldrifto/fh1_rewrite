@@ -85,6 +85,25 @@ fn press_start_loops_with_first_audio() {
 }
 
 #[test]
+fn forza_intro_attract_decodes() {
+    // The front end's attract trailer (ui/intro.rs): the game's 999_DEV_ATTRACT scene names this file. It has no
+    // `.def`, so the engine asks for its first audio stream (5.1 wmapro).
+    let Some(dir) = videos() else { return };
+    let mv = FfmpegVideo::open(
+        &dir.join("splash_intros/Forza_Intro.wmv"),
+        OpenOpts { audio: AudioSel::FirstAudio, ..Default::default() },
+    )
+    .unwrap();
+    assert!(mv.duration().unwrap_or(0.0) > 100.0, "duration {:?}", mv.duration());
+    let (frames, rms, bad) = run(&mv, 1.5, 48000);
+    eprintln!("forza intro frames={frames} rms={rms:.5} err={:?}", mv.error());
+    assert!(frames >= 12, "too few frames: {frames}");
+    assert_eq!(bad, 0);
+    assert!(rms > 1e-4, "audio silent");
+    assert!(!mv.finished());
+}
+
+#[test]
 fn silent_movie_uses_wall_clock() {
     let Some(dir) = videos() else { return };
     let mv = FfmpegVideo::open(&dir.join("splash_intros/Dolby_Corona_Intro.wmv"), OpenOpts::default()).unwrap();

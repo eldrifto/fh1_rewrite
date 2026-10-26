@@ -47,7 +47,7 @@ use crate::Garage;
 #[derive(Component)]
 pub struct LaunchPart;
 
-/// The "Press Start" line (pulses).
+/// The "Press Start" line and its "ENTER / SPACE / CLICK" hint.
 #[derive(Component)]
 pub struct PressPrompt;
 
@@ -55,7 +55,7 @@ pub struct PressPrompt;
 #[derive(Component)]
 pub struct MenuBox;
 
-/// Marks the title images that pulse like the prompt text (the rasterised "PRESS START"; not the logo).
+/// The rasterised "PRESS START" image drawn from the game's own font (not the logo; [`PressFallback`] hides when it exists).
 #[derive(Component)]
 pub struct PressPulse;
 
@@ -120,6 +120,13 @@ enum Screen {
     Cars(CarBrowser),
     Sessions { cursor: usize, list: Vec<Session> },
     Online(OnlineScreen),
+}
+
+/// The FH1 launch scene's menu content (ui/fh1_launch.rs): the mode labels and the cursor.
+pub struct LaunchView {
+    /// (label, greyed) for the modes; the first two are shown as the game's SINGLE PLAYER / MULTIPLAYER.
+    pub list: Vec<(String, bool)>,
+    pub cursor: usize,
 }
 
 #[derive(Resource)]
@@ -261,6 +268,18 @@ impl MainMenu {
             dirty: true,
             repeat: Default::default(),
         }
+    }
+
+    /// The PRESS START title screen is up (not one of the menus). Read by ui/intro.rs to time the attract trailer.
+    pub fn on_title(&self) -> bool {
+        matches!(self.screen, Screen::Title)
+    }
+
+    /// The FH1 launch scene's menu view (ui/fh1_launch.rs): the mode labels. `None` on the title and on the
+    /// sub-menus, which keep their own drawing.
+    pub fn launch_view(&self) -> Option<LaunchView> {
+        let Screen::Modes { cursor } = &self.screen else { return None };
+        Some(LaunchView { list: self.modes().iter().map(|m| (m.0.to_string(), m.2)).collect(), cursor: *cursor })
     }
 
     /// (label, description, greyed).
@@ -690,6 +709,7 @@ pub fn main_menu(
 #[allow(clippy::type_complexity)]
 pub fn draw_main_menu(
     mut menu: ResMut<MainMenu>,
+    fh1: Res<super::fh1_launch::Fh1LaunchOn>,
     mut boxes: Query<&mut Visibility, (With<MenuBox>, Without<PressPrompt>)>,
     mut prompt: Query<&mut Visibility, (With<PressPrompt>, Without<MenuBox>)>,
     mut texts: ParamSet<(
@@ -704,11 +724,13 @@ pub fn draw_main_menu(
     }
     menu.dirty = false;
     let title_screen = matches!(menu.screen, Screen::Title);
+    // The game's own menu scene draws the mode menu (ui/fh1_launch.rs): keep the custom panel / prompt out of it.
+    let scene = fh1.0;
     for mut v in &mut boxes {
-        v.set_if_neq(if title_screen { Visibility::Hidden } else { Visibility::Inherited });
+        v.set_if_neq(if title_screen || scene { Visibility::Hidden } else { Visibility::Inherited });
     }
     for mut v in &mut prompt {
-        v.set_if_neq(if title_screen { Visibility::Inherited } else { Visibility::Hidden });
+        v.set_if_neq(if title_screen && !scene { Visibility::Inherited } else { Visibility::Hidden });
     }
     let (title, rows, cursor, hint) = menu.rows();
     let first = cursor.saturating_sub(ROWS / 2).min(rows.len().saturating_sub(ROWS));

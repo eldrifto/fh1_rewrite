@@ -43,7 +43,7 @@ use bevy::input::gamepad::Gamepad;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use super::launch::{self, LaunchPart, PressPrompt, PressPulse};
+use super::launch::{self, LaunchPart};
 use super::{UiFont, ACCENT};
 use crate::race::{Events, RacePhase, RaceState};
 use crate::track::Track;
@@ -262,6 +262,15 @@ pub struct Fade(pub f32);
 #[derive(Component)]
 pub struct FadeBg(pub f32);
 
+/// The attract transition's screen fade (ui/intro.rs): the title scene's own `120_P_PRE_SPLASH` `Fader`. 0 = clear,
+/// 1 = black, in the 1280 x 720 space. Drawn as the topmost overlay child, under the full-screen movie layer (1002).
+#[derive(Resource, Default)]
+pub struct ScreenFade(pub f32);
+
+/// The black quad [`ScreenFade`] drives (spawned last, so it covers the press prompt, logo and menu).
+#[derive(Component)]
+pub struct Blackout;
+
 /// Drop shadow for overlay texts (faded with them).
 pub fn shadow() -> TextShadow {
     TextShadow { offset: Vec2::splat(2.0), color: Color::linear_rgba(0.0, 0.0, 0.0, SHADOW_A) }
@@ -399,6 +408,7 @@ impl Plugin for LoadingPlugin {
             recent_ms: Default::default(),
             after_until: 0.0,
         })
+        .init_resource::<ScreenFade>()
         .add_systems(Startup, spawn_overlay)
         .add_systems(Update, make_visible)
         // The title's "PRESS START" in the game's own font (launch.rs), once the ui group's fonts are loaded.
@@ -408,7 +418,10 @@ impl Plugin for LoadingPlugin {
             (
                 launch::main_menu.before(super::world_load::apply_choice),
                 update_loading.after(crate::apply_actions).after(crate::race::race_update).after(crate::objects::teleport),
+                // The game's own front-end menu scene (ui/fh1_launch.rs), before the overlay it replaces.
+                super::fh1_launch::drive,
                 draw_overlay,
+                draw_blackout,
                 launch::draw_main_menu,
             )
                 .chain(),
@@ -589,6 +602,13 @@ fn spawn_overlay(mut commands: Commands, font: Res<UiFont>, garage: Res<Garage>,
         .id();
     commands.spawn((CardPart, ProgressFill, ChildOf(track_bar), Node { width: Val::Percent(0.0), height: Val::Percent(100.0), ..default() }, BackgroundColor(ACCENT), FadeBg(1.0)));
     launch::spawn(&mut commands, root, &font, logo, title_logo);
+    // Screen fader (ui/intro.rs): the attract transition's blackout, above the title and menu (last child).
+    commands.spawn((
+        Blackout,
+        ChildOf(root),
+        Node { position_type: PositionType::Absolute, width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
+        BackgroundColor(Color::NONE),
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -791,6 +811,15 @@ fn set_covered(covered: bool, cover: Option<Cover>) {
     }
 }
 
+/// The attract transition's blackout quad (ui/intro.rs): `ScreenFade` 0 = clear, 1 = black. Topmost overlay child,
+/// under the full-screen movie layer.
+fn draw_blackout(fade: Res<ScreenFade>, mut q: Query<&mut BackgroundColor, With<Blackout>>) {
+    let a = fade.0.clamp(0.0, 1.0);
+    for mut c in &mut q {
+        c.0 = Color::srgba(0.0, 0.0, 0.0, a);
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn draw_overlay(
     mut ld: ResMut<Loading>,
@@ -805,9 +834,10 @@ fn draw_overlay(
     mut texts: Query<(&mut Text, Has<CardTitle>, Has<CardSub>, Has<CardTip>)>,
     mut bgs: Query<(&FadeBg, &mut BackgroundColor, Has<LoadingRoot>)>,
     mut shadows: Query<(&Fade, &mut TextShadow)>,
-    mut imgs: Query<(&Fade, &mut ImageNode, Has<PressPulse>), Without<Backdrop>>,
-    mut colors: Query<(&Fade, &mut TextColor, Has<PressPrompt>)>,
-    mut shown: Local<Option<Option<Cover>>>,
+    mut imgs: Query<(&Fade, &mut ImageNode), Without<Backdrop>>,
+    mut colors: Query<(&Fade, &mut TextColor)>,
+    fh1: Res<super::fh1_launch::Fh1LaunchOn>,
+    mut shown: Local<Option<(Option<Cover>, bool)>>,
 ) {
     let cover = ld.cover;
     let now = time.elapsed_secs();
@@ -830,14 +860,21 @@ fn draw_overlay(
         ld.reveal = (ld.reveal + time.delta_secs() / REVEAL_FADE_S).min(1.0);
     }
     let Some(cover) = cover else {
-        *shown = Some(None);
+        *shown = Some((None, fh1.0));
         return;
     };
-    if *shown != Some(Some(cover)) {
-        *shown = Some(Some(cover));
+    if *shown != Some((Some(cover), fh1.0)) {
+        *shown = Some((Some(cover), fh1.0));
         let launch = cover == Cover::Launch;
         for (mut v, card) in &mut parts {
-            v.set_if_neq(if card != launch { Visibility::Inherited } else { Visibility::Hidden });
+            let vis = if fh1.0 {
+                Visibility::Hidden
+            } else if card != launch {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            v.set_if_neq(vis);
         }
     }
     // Backdrop: a random FH1 loading image per cover, cover-fitted to the window (16:9 source).
@@ -889,17 +926,17 @@ fn draw_overlay(
     for mut t in &mut spinner {
         t.rotation = Rot2::radians(now * 5.0);
     }
-    // Fade: every element's base alpha times the overlay's.
-    let a = ld.alpha;
+    // Fade: every element's base alpha times the overlay's. With the game's own menu scene drawing (ui/fh1_launch.rs)
+    // the overlay goes fully clear, so the scene shows through.
+    let a = if fh1.0 { 0.0 } else { ld.alpha };
     for (f, mut c, is_root) in &mut bgs {
         c.0.set_alpha(f.0 * if is_root { a } else { a * ld.reveal });
     }
     // Contents (not the opaque root) wait for the first reveal.
-    let a = a * ld.reveal;
-    let pulse = 0.55 + 0.45 * (now * 3.0).sin().abs();
-    for (f, mut i, prompt) in &mut imgs {
-        let k = if prompt && !ld.fading_out { pulse } else { 1.0 };
-        i.color = Color::WHITE.with_alpha(f.0 * a * k);
+    let a = if fh1.0 { 0.0 } else { a * ld.reveal };
+    // The "PRESS START" prompt does not pulse (seen on the title): its base alpha only.
+    for (f, mut i) in &mut imgs {
+        i.color = Color::WHITE.with_alpha(f.0 * a);
     }
     let has_img = super::fmv::backdrop().is_some() || ld.backdrop.as_ref().is_some_and(|h| assets.is_loaded_with_dependencies(h.id()));
     for (f, mut i, _) in &mut backdrop {
@@ -908,8 +945,7 @@ fn draw_overlay(
     for (f, mut sh) in &mut shadows {
         sh.color.set_alpha(SHADOW_A * f.0.min(1.0) * a);
     }
-    for (f, mut c, prompt) in &mut colors {
-        let k = if prompt && !ld.fading_out { pulse } else { 1.0 };
-        c.0.set_alpha(f.0 * a * k);
+    for (f, mut c) in &mut colors {
+        c.0.set_alpha(f.0 * a);
     }
 }
