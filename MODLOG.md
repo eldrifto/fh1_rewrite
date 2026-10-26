@@ -524,3 +524,14 @@ main.rs: an explicit `FH1_RM_FM2_SHADOW_COL` wins over the track's ShadowColor (
 **Not tested:** corners; a driven player.
 **Test it:** `FH1_AI_LOG=1 FH1_AI_RACE=0:1:../imported/fm2/cars/MER_300SL_54:1 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: lap about 121 s and `resets 0` in the last `AI log` line; with `FH1_AI_PASS_STATIC=0` about 134 s and a reset.
 **Revert:** `FH1_AI_PASS_STATIC=0 FH1_AI_PASS_MARGIN=0`, or the commit.
+
+## 2026-10-26 (33): front-end menu and Forza_Intro attract trailer committed
+**Changed:** the user's uncommitted UI work, committed as one step: `ui/fh1_launch.rs` (new: front-end menu from the game's `120_P_PRE_SPLASH` scene), `ui.rs`, `ui/hud.rs`, `ui/intro.rs`, `ui/launch.rs`, `ui/loading.rs`, `ui/scene.rs`; `fh1setup/src/fmv.rs` + `main.rs` (imports `splash_intros/Forza_Intro.wmv`, fmv group `fmv-1` -> `fmv-2`, so existing installs re-run that group); test `forza_intro_attract_decodes` in `fh1-video/tests/smoke.rs`; four probe examples in `fh1-ui/examples/` (`attract_scan`, `menu_scan`, `slide_probe`, `splash_probe`).
+**Tested:** `cargo check` of engine (`--no-default-features`), setup, video, ui, launcher, shaders: builds. The new video test passes, but it returns early when the disc's videos are not found, so whether it really decoded `Forza_Intro.wmv`: not tested. The menu itself in the running game: not tested (I did not write this code and cannot see the game).
+**Test it:** `cargo run --release -p fh1setup -- <disc> --only fmv --force`, then start the engine; the front end should show the FH1 menu (`ui: launch scene 120_P_PRE_SPLASH loaded, N list buttons` in the log).
+**Revert:** commit `f837074`.
+
+## 2026-10-26 (34): project clean-up, worktrees consolidated, docs refreshed
+**Changed:** deleted `FM2_HANDOFF.md` (commit `73a6b07`; its newest version is kept in history on `fm2-lightmaps`, commit `429d666`) and the stray `fh1log.txt`. Merged into `ui-elements`: `fm2-lightmaps` (recorded with `-s ours`: a content check showed its 17 commits' code is already here; only two throw-away probes, `fm2_tail` and `fm2_vfetch_scan`, are not, and they stay in history), `launcher-fm2-fm1`, `festival-venues`, `gpu-selector`, `readme-build-fix` (all clean merges). README: FM2 row, new FM1 row, imported-race paragraph. STATUS: branch note.
+**Tested:** after the merges everything builds (same crates as entry 33). `cargo test -p fh1-engine --no-default-features`: 32 pass, 1 fails: `vehicle::tests::line_lock_burnout` ("car drove off: 7.1 m"). `vehicle.rs` is untouched by every commit made today, so it is not caused by these merges, but I did not check whether it failed before; not investigated. Not tested: running the game after the merges.
+**Revert:** each merge is its own commit (`git revert -m 1 <merge>`).

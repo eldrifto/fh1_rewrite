@@ -58,7 +58,8 @@ their content to the same game. Anything you don't own stays locked in the menus
 | Forza Horizon 2 | 216 cars and the Southern Europe open world |
 | Forza Motorsport 4 | 501 cars and 83 circuit layouts (a MOTORSPORT mode with grid, pit and flying starts) |
 | Forza Motorsport 3 | 311 cars (415 with the Content Install Disc) and 52 circuit layouts at 17 venues (69 layouts with Disc 2) with their scenery |
-| Forza Motorsport 2 | 32 circuit layouts with textured scenery (approximate: one diffuse texture per draw, no lightmaps; cars not converted yet) |
+| Forza Motorsport 2 | 32 circuit layouts with textured, lightmapped scenery (road brightness is still being matched to the original on a few tracks) and its cars |
+| Forza Motorsport (Xbox, 2005) | 231 cars from the original Xbox game, read from its ISO or zip (paint, glass and lamps work; suspension, aero and brakes borrow a similar car's data; no engine sounds) |
 
 ## Online
 
@@ -134,9 +135,9 @@ cargo run --release -p fh1setup --features fm3 -- import-fm3 "path/to/FM3 Play D
 ```
 
 Imported circuits (FM2, FM4) have a race against 7 of that game's cars, through the same race code as Colorado's events
-(grid, countdown, laps, results): `FH1_RACE=0 fh1-engine --track fm2/lagunaseca_00` (`FH1_RACE_LAPS=n`, default 3;
-`FH1_AI_ROAD=1` keeps the AI on the tarmac). Tested on FM2 Laguna Seca and FM4 Catalunya with a non-driven player; the
-AI are still slow in a full field. Not in the menus yet.
+(grid, countdown, laps, results): `FH1_RACE=0 fh1-engine --track fm2/lagunaseca_00` (`FH1_RACE_LAPS=n`, default 3). The AI follow the
+game's own racing line and stay on the tarmac (`FH1_AI_ROAD=0` turns that off). Tested on FM2 Laguna Seca and FM4 Catalunya with a
+non-driven player; a race driven by a person is not tested. Not in the menus yet.
 
 `tools\release.ps1` builds the Windows release zip. Vendored crates keep their own licenses: `vendor/lzxd` (patched for
 XMemCompress streams), `vendor/bevy_pbr` (shadow cascade caching, cached bind groups, static atmosphere LUTs),

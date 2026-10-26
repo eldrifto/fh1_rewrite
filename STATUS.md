@@ -29,7 +29,7 @@ Ground rules (AGENTS.md) that shape everything below:
 
 Data flow: disc -> `fh1setup` -> `data/installations/<id>/assets/private/...` (imported games under `imported/<game>/`) -> `fh1-engine`. Coordinates: the engine mirrors z against the game files (a file point z is -z in the engine); every importer-to-engine path has to flip it.
 
-Branches: this work is on `ui-elements` (which also holds the user's own uncommitted UI work). Other branches exist for separate features (`fm2-lightmaps`, `fm3-import`, `launcher-fm2-fm1`, `festival-venues`, ...).
+Branches (cleaned up 2026-10-26): everything lives on `ui-elements`, which now contains `fm2-lightmaps` (history joined; its tree was already here), `launcher-fm2-fm1`, `festival-venues`, `gpu-selector`, `readme-build-fix`, `fm3-import`, `title-screen`, `camera-dolly-flag` and `controller-deadzones`. `ui-elements` is ahead of `main` and has not been pushed. The old FM2 vertex-shader-scale handoff (`FM2_HANDOFF.md`, question since answered by the per-draw uv work) is kept in git history, commit `429d666`.
 
 ## 3. What works (FH1 itself)
 
@@ -83,7 +83,7 @@ Not solved / not tested here:
 2. Why a lone AI car is 7 to 11 % slower than its own plan (it reaches about 75 to 80 % of its target speed on average: grip, gearing or braking points).
 3. Put imported races in the menus (touches the user's UI branch work, so ask first).
 4. Back to FM2 brightness: Test Track's right band, Maple Valley, New York.
-5. Update README.md: FM2 cars are imported; the imported-race note is out of date (`FH1_AI_ROAD` is on by default now; the "AI are slow" note was mostly a test artifact).
+5. (Done 2026-10-26: README updated for FM2 cars, FM1 and the imported-race note.)
 
 ## 9. Where things are
 
@@ -98,7 +98,7 @@ Not solved / not tested here:
 This note is the short version. The long, dated sections below are the evidence and the dead ends (newest at the bottom of the file).
 
 ## Where it stands
-Twelve FM2 tracks are compared with your Xenia screenshots on two road patches each (left / right band near the car, linear green, ours / Xenia; 1.0 = equal). The sum of |ln ratio| over all 24 patches (0 = perfect) went **17.68 -> 9.38** over this work. Current (left | right): Tsukuba 1.03 | 1.33, Test Track 1.22 | 5.23, Sunset 0.38 | 0.79, Silverstone 0.89 | 1.09, Sebring 0.64 | 1.11, Road Atlanta 1.44 | 1.00, Nurburgring 1.26 | 0.29, New York 0.56 | 0.84, Mugello 0.98 | 1.63, Maple Valley 0.51 | 1.72, Laguna Seca 0.94 | 1.09, Suzuka 0.47 | 0.94. Ratios differ by about 0.2 between runs of the same data (sun / exposure), so smaller changes are noise. Everything is committed (except `docs/DESIGN.md`, which the whitelist `.gitignore` excludes).
+Twelve FM2 tracks are compared with your Xenia screenshots on two road patches each (left / right band near the car, linear green, ours / Xenia; 1.0 = equal). The sum of |ln ratio| over all 24 patches (0 = perfect) went **17.68 -> 9.38** over this work. Current (left | right): Tsukuba 1.03 | 1.33, Test Track 1.22 | 5.23, Sunset 0.38 | 0.79, Silverstone 0.89 | 1.09, Sebring 0.64 | 1.11, Road Atlanta 1.44 | 1.00, Nurburgring 1.26 | 0.29, New York 0.56 | 0.84, Mugello 0.98 | 1.63, Maple Valley 0.51 | 1.72, Laguna Seca 0.94 | 1.09, Suzuka 0.47 | 0.94. Ratios differ by about 0.2 between runs of the same data (sun / exposure), so smaller changes are noise. Everything is committed (except `docs/DESIGN.md`, which the whitelist `.gitignore` excludes) as of 2026-10-26.
 
 ## What was fixed (all from the game's own code and data)
 - **Lightmap crop:** a negative tile scale is the shader's clamp flag, not a mirror (`|c170|` in the road shaders; tile centred in its 48-texel page cell).
