@@ -30,6 +30,15 @@ pub struct RacingLine {
     pub length: f32,
     /// Lowest road-centre height on the line (m), for the "fell out of the world" reset.
     pub min_y: f32,
+    /// The game's own optimal line for this road (imported FM2 / FM4 `ai/line.json`): [`RacingLine::limited`] keeps its shape
+    /// (FH1's AIRacing.xml edge margins are for FH1's routes) and only adds the driver's shift.
+    pub game_line: bool,
+}
+
+/// `FH1_AI_GAME_LINE_LIMIT=1`: FH1's edge margins on imported (game) lines too (the old behaviour).
+fn game_line_limit() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FH1_AI_GAME_LINE_LIMIT").is_ok_and(|v| v == "1"))
 }
 
 /// Where a position sits relative to the line.
@@ -104,7 +113,9 @@ impl RacingLine {
             lateral.push(lat);
             offset.push(((opt[i] - c).dot(left_dir) / half).clamp(-1.0, 1.0));
         }
-        Ok(Self::new(closed, centre, lateral, offset))
+        let mut line = Self::new(closed, centre, lateral, offset);
+        line.game_line = true;
+        Ok(line)
     }
 
     /// Re-fit the road around the racing line to measured edges: `left_m` / `right_m` = distance from each racing-line point
@@ -143,7 +154,7 @@ impl RacingLine {
         }
         let length = if closed { acc + points[points.len() - 1].distance(points[0]) } else { acc };
         let min_y = centre.iter().map(|c| c.y).fold(f32::INFINITY, f32::min);
-        Self { closed, centre, lateral, offset, points, s, length, min_y }
+        Self { closed, centre, lateral, offset, points, s, length, min_y, game_line: false }
     }
 
     pub fn len(&self) -> usize {
@@ -280,13 +291,22 @@ impl RacingLine {
             .map(|i| {
                 let hw = self.lateral[i].length().max(0.5);
                 let o = self.offset[i] + shift;
+                if self.game_line {
+                    // STATUS.md update 31: the 2 m inside margin pulled FM2 Laguna's line inward at 23 % of its points
+                    // (0.37 m mean) and slowed the AI's speed profile 8 %; `FH1_AI_GAME_LINE_LIMIT=1` = apply it anyway.
+                    if !game_line_limit() {
+                        return o.clamp(-1.0, 1.0);
+                    }
+                }
                 // + = left; turning left -> left is the inside.
                 let left_inside = centre.curvature(i, 4) >= 0.0;
                 let (lim_left, lim_right) = if left_inside { (inner, outer) } else { (outer, inner) };
                 o.clamp(-(1.0 - lim_right / hw), 1.0 - lim_left / hw)
             })
             .collect();
-        Self::new(self.closed, self.centre.clone(), self.lateral.clone(), offset)
+        let mut out = Self::new(self.closed, self.centre.clone(), self.lateral.clone(), offset);
+        out.game_line = self.game_line;
+        out
     }
 
     /// Signed curvature (1/m, + = turning left) of the racing line at point i, from the circle through i-k, i, i+k

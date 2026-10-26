@@ -874,3 +874,36 @@ Not solved / not tested:
 - The player in these tests was not driven (auto-finish). A race you drive yourself: not tested.
 - The F6 event list / career screen with the imported race: not tested.
 - FM2 / FM4 per-event lap counts and AI difficulty: not read (3 laps and FH1's medium AI ids used).
+
+## Update 2026-10-26 (30): why the AI were slow in full races (mostly a test artifact), and what FH1_AI_ROAD costs
+
+`FH1_AI_ROAD` is now on by default on imported circuits (`=0` = the wall width). New in `FH1_AI_LOG`: a pace line per AI car, time-weighted while racing (moving, not finished): speed / the line's profile speed, the driver's target / profile, speed / target. `FH1_AI_RACE_LINE_GRID=1` puts the dev race back on the line-based grid (for A/B).
+
+Findings (Laguna Seca, logs `data/work/race11_*`, `race12_*`, `race13_*`):
+1. **The main cause is the parked player car.** Nothing drives the player in these tests; it stands on its grid slot, on the racing line 17 to 100 m before the finish. The AI arrive at the end of every lap and crawl or stop behind it: one solo AI car stood at 0 km/h for 10 s or more 17 m before the line; in the full race, slots 1 and 2 were at 4 km/h beside it. Same solo car, same everything, the only difference being where the parked player stands: 121.8 s (line grid, player beside the line) against 135.6 s (real grid slot). The two runs were within 4 m of each other at every 5 s sample up to 125 s. So the slow full-race laps in updates 28 / 29 are mostly this, not the AI's own pace. In a race you drive, the player is not parked there.
+2. **A real AI weakness behind it:** a stopped car on the racing line makes them crawl or stop instead of steering round it. That would also happen behind a crashed car. Not fixed.
+3. **Start merge:** FH1's route 0 merge row does apply to the imported line; off (`FH1_AI_GAME_MERGE=0`) the 7 lap-1 times were 145 to 171 s against 146 to 180 s on (one run each, and both include finding 1). Small at most.
+4. **`FH1_AI_ROAD` costs pace:** clean solo lap (line grid, nothing in the way), same car: 121.8 s without, 129.4 s with (+6 %); target / profile 1.00 in both. Likely cause, **not verified**: the driver keeps `track_edge_clearance` from the road edge (`driver.rs` 663), and the game's line uses the tarmac right to the edge at apexes, so the car is pushed inward there.
+5. The AI's own solo pace: 121.8 s against its own prediction of 113.6 s (7 % slower), reaching 75 % of its target speed on average (that average includes the standing start and corners, so it is not a clean measure of grip).
+
+Not done: fixing 2 or 4; a test harness that moves the parked player out of the way, so full-field AI pace can be measured.
+
+## Update 2026-10-26 (31): why FH1_AI_ROAD cost 6 %, fixed
+
+**First guess wrong:** the driver's passing clamp (`driver.rs` 663, road half width - TrackEdgeClearance - own half width, about 1.4 m) does not bite: on the tarmac-fitted Laguna line it would move 0 of 1807 points (the fit keeps each side at least 1.5 m).
+
+**Real cause:** every AI driver races `RacingLine::limited`, FH1's AIRacing.xml ChiLimit: the car's centre keeps 2 m from the road edge on the inside of a bend (1 m past it allowed on the outside). On wall widths this never binds; on tarmac widths it pulls the game's own apex line inward at 412 of 1807 points on Laguna (0.37 m mean, 0.5 m worst) and 912 of 2330 on Catalunya (0.42 m mean). Those small moves add kinks, and the speed profile reads curvature over short chords, so the AI's own predicted lap went 113.6 -> 122.9 s on Laguna.
+
+**Fix** (`ai/line.rs`): an imported line is marked as the game's own (`RacingLine::game_line`); `limited` keeps its shape and only adds the driver's ChiVariance shift. `FH1_AI_GAME_LINE_LIMIT=1` = the old behaviour. FH1's own routes are unchanged (AI unit tests pass).
+
+Re-measured (one solo AI car, line-based grid, nothing in the way, logs `data/work/race14_*`):
+
+| | lap | AI's predicted lap | time on grass / dirt |
+|---|---|---|---|
+| Laguna, `FH1_AI_ROAD=0` | 121.8 s | 113.6 s | 2.5 s |
+| Laguna, tarmac fit, before the fix (update 30) | 129.4 s | 122.9 s | - |
+| Laguna, tarmac fit, fixed | **120.2 s** | 112.2 s | 0.5 s |
+| Catalunya, tarmac fit, old limit | 172.6 s | 169.3 s | 0 s |
+| Catalunya, tarmac fit, fixed | **160.1 s** | 143.9 s | 3.9 s |
+
+So `FH1_AI_ROAD` (on by default) now costs nothing on Laguna and keeps the car on the tarmac. Still open: the solo car is 7 % (Laguna) to 11 % (Catalunya) slower than its own prediction; the AI still stop behind a parked car (update 30). Both not investigated.

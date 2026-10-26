@@ -105,12 +105,12 @@ impl AiLines {
     }
 }
 
-/// `FH1_AI_ROAD=1`: on imported circuits the AI's road is the tarmac (measured from the collision surfaces at load) instead
-/// of the wall-to-wall width in `ai/line.json` (run-off and gravel traps count as road there, so the AI pass and defend on
-/// them). Off by default while it is tested.
+/// On imported circuits the AI's road is the tarmac (measured from the collision surfaces at load) instead of the
+/// wall-to-wall width in `ai/line.json` (run-off and gravel traps count as road there, so the AI pass and defend on them).
+/// On by default (STATUS.md update 29: AI time off the tarmac down 95 to 99 %); `FH1_AI_ROAD=0` = the wall width.
 fn road_edges_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("FH1_AI_ROAD").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var("FH1_AI_ROAD").map_or(true, |v| v != "0"))
 }
 
 /// Distance from `p` (on the road) to the road's edge along `dir`: walked out in 0.5 m steps (at most `max` m) until the
@@ -155,6 +155,21 @@ fn fit_tarmac(line: &mut RacingLine, track: &Track) {
     line.refit_road(&left, &right);
     let after = median(line.lateral.iter().map(|l| l.length()).collect());
     let narrow = line.lateral.iter().filter(|l| l.length() < 4.0).count();
+    // How far the driver's ChiLimit (`RacingLine::limited`: AIRacing.xml, the car keeps 2 m from the inside edge, may run
+    // 1 m past the outside one) moves the game's racing line on this road: points moved and the mean / worst move.
+    // (Measured as if it applied: imported lines skip it unless FH1_AI_GAME_LINE_LIMIT=1.)
+    let mut as_fh1 = line.clone();
+    as_fh1.game_line = false;
+    let lim = as_fh1.limited(2.0, -1.0, 0.0);
+    let moved: Vec<f32> = (0..line.len()).map(|i| lim.points[i].distance(line.points[i])).filter(|&d| d > 0.05).collect();
+    info!(
+        "AI line {}: FH1's 2 m inside-edge limit would move the racing line at {} of {} points, mean {:.2} m, worst {:.2} m",
+        track.id,
+        moved.len(),
+        line.len(),
+        moved.iter().sum::<f32>() / moved.len().max(1) as f32,
+        moved.iter().copied().fold(0.0, f32::max)
+    );
     info!("AI line {}: FH1_AI_ROAD tarmac fit, median half width {before:.1} m -> {after:.1} m ({narrow} of {} points under 4 m)", track.id, line.len());
 }
 
@@ -537,7 +552,9 @@ fn dev_race(
     let base = if line.closed { 0.0 } else { 8.0 * rows as f32 + 4.0 };
     // An imported circuit has its own start grid (`spawns.json` `grid_NN`, labelled "Grid NN" in the track's spawn list): AI on slots 0.., the player
     // behind them. Colorado (no grid spawns): the line-based grid.
-    let grid: Vec<(Vec3, f32)> = track.spawn_names.iter().zip(&track.spawns).filter(|(name, _)| name.starts_with("grid_") || name.starts_with("Grid ")).map(|(_, s)| *s).collect();
+    // `FH1_AI_RACE_LINE_GRID=1`: the line-based grid on imported circuits too (A/B of the start).
+    let line_grid = std::env::var("FH1_AI_RACE_LINE_GRID").is_ok_and(|v| v == "1");
+    let grid: Vec<(Vec3, f32)> = if line_grid { Vec::new() } else { track.spawn_names.iter().zip(&track.spawns).filter(|(name, _)| name.starts_with("grid_") || name.starts_with("Grid ")).map(|(_, s)| *s).collect() };
     let pose = |k: u32| {
         if let Some(g) = grid.get(k as usize) {
             return *g;
@@ -609,11 +626,25 @@ fn dev_laps(mut st: ResMut<DevRace>, time: Res<Time<Real>>, ai: Query<(&AiRacer,
 /// driver's count of excursions past the line's half width (on imported lines that is the wall distance, so it rarely fires);
 /// "grass" counts the times two or more wheels went onto a surface with the game's OffRoadness > 0 (dirt, grass), and the
 /// seconds spent there.
-fn log_ai(time: Res<Time<Real>>, mut last: Local<f32>, mut grass: Local<std::collections::HashMap<u32, (bool, u32, f32)>>, cars: Query<(&AiRacer, &AiCar, &AiBrain)>, player: Query<&Car>) {
+fn log_ai(time: Res<Time<Real>>, mut last: Local<f32>, mut grass: Local<std::collections::HashMap<u32, (bool, u32, f32)>>, mut pace: Local<std::collections::HashMap<u32, [f32; 4]>>, control: Res<AiRaceControl>, dev: Res<DevRace>, cars: Query<(&AiRacer, &AiCar, &AiBrain)>, player: Query<&Car>) {
     if std::env::var_os("FH1_AI_LOG").is_none() {
         return;
     }
     let dt = time.delta_secs();
+    // Pace, time-weighted while racing (moving > 5 m/s, not finished): speed / the line's profile speed, the driver's target / profile, speed / target.
+    for (r, c, b) in &cars {
+        let v = c.0.speed();
+        let done = control.finished.contains(&r.slot) || dev.finished.contains(&r.slot);
+        if v > 5.0 && !done {
+            let d = &b.driver;
+            let prof = d.v_max_at(d.proj.s).max(1.0);
+            let e = pace.entry(r.slot).or_default();
+            e[0] += dt * v / prof;
+            e[1] += dt * d.target_speed.min(prof * 2.0) / prof;
+            e[2] += dt * (v / d.target_speed.max(1.0)).min(2.0);
+            e[3] += dt;
+        }
+    }
     let wheels = cars.iter().map(|(r, c, b)| (r.slot, &c.0, Some(b))).chain(player.iter().next().map(|p| (0, &p.0, None)));
     for (slot, v, brain) in wheels {
         let g = grass.entry(slot).or_default();
@@ -646,6 +677,20 @@ fn log_ai(time: Res<Time<Real>>, mut last: Local<f32>, mut grass: Local<std::col
     for (r, c, b) in &cars {
         let d = &b.driver;
         let g = grass.get(&r.slot).copied().unwrap_or_default();
+        let pc = pace.get(&r.slot).copied().unwrap_or_default();
+        let moving = pc[3].max(1e-3);
+        info!(
+            "AI log pace slot {}: speed/profile {:.2}, target/profile {:.2}, speed/target {:.2} over {:.0} s moving; now speed {:.0} target {:.0} profile {:.0} km/h, performance {:.2}",
+            r.slot,
+            pc[0] / moving,
+            pc[1] / moving,
+            pc[2] / moving,
+            pc[3],
+            c.0.speed() * 3.6,
+            d.target_speed * 3.6,
+            d.v_max_at(d.proj.s) * 3.6,
+            d.performance
+        );
         info!(
             "AI log t={t:.0}s slot {}: lap {} progress {:.0} m (line {:.0} m), lateral {:.1} m of +-{:.1}, off line {:.1} m, speed {:.0} km/h, resets {} off-road {} grass {} ({:.1} s), at {:.0},{:.0},{:.0}",
             r.slot,

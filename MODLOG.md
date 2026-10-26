@@ -503,3 +503,17 @@ main.rs: an explicit `FH1_RM_FM2_SHADOW_COL` wins over the track's ShadowColor (
 **Not tested:** a race driven by a person; the F6 list on imported maps. AI lap times in a full field are slow (STATUS update 29).
 **Test it:** `FH1_RACE=0 FH1_RACE_LAPS=1 FH1_RACE_LOG=1 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: after 3 s you are put at the back of a 12-slot grid behind 7 FM2 cars, 3-2-1-GO, then drive; the log shows `race log: AI slot N gate 1/3 ...` lines, and after you cross the line a results table (`race log: results P1 ...`). Add `FH1_AI_ROAD=1` for the tarmac-width AI.
 **Revert:** the commit; without `FH1_RACE` the race only starts from the F6 list.
+
+## 2026-10-26 (30): FH1_AI_ROAD on by default; AI pace logging; slow-race cause found
+**Changed:** `ai/plugin.rs`: `FH1_AI_ROAD` default on (`=0` off); `FH1_AI_LOG` pace line per car (speed / profile, target / profile, speed / target, while racing); `FH1_AI_RACE_LINE_GRID=1` (dev race on the line-based grid).
+**Tested:** Laguna Seca solo and 7-car races (STATUS update 30). Slow full-race laps come mostly from the AI stopping behind the parked (non-driven) player car; `FH1_AI_ROAD` costs a solo car 6 % lap time (121.8 -> 129.4 s).
+**Not tested:** anything with a driven player.
+**Test it:** `FH1_AI_LOG=1 FH1_AI_RACE_LINE_GRID=1 FH1_AI_RACE=0:1:../imported/fm2/cars/MER_300SL_54:1 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: `FH1_AI_RACE lap: AI slot 1 lap 1/1 in` about 129 s; with `FH1_AI_ROAD=0` about 122 s.
+**Revert:** `FH1_AI_ROAD=0`, or the commit.
+
+## 2026-10-26 (31): imported racing lines skip FH1's 2 m edge margin
+**Changed:** `ai/line.rs` (`RacingLine::game_line`, set for imported lines; `limited` keeps a game line's shape, only adds the driver shift; `FH1_AI_GAME_LINE_LIMIT=1` = old), `ai/plugin.rs` (load log: how far FH1's margin would move the line; the earlier edge-clamp diagnostic removed).
+**Why:** with the tarmac fit, FH1's 2 m inside-edge margin bent the game's apex line inward and slowed the AI 6 to 8 %.
+**Tested:** solo AI lap Laguna 129.4 -> 120.2 s (121.8 s without the tarmac fit), Catalunya 172.6 -> 160.1 s. AI unit tests pass.
+**Test it:** `FH1_AI_LOG=1 FH1_AI_RACE_LINE_GRID=1 FH1_AI_RACE=0:1:../imported/fm2/cars/MER_300SL_54:1 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: `FH1_AI_RACE lap: AI slot 1 lap 1/1 in` about 120 s; with `FH1_AI_GAME_LINE_LIMIT=1` about 129 s.
+**Revert:** `FH1_AI_GAME_LINE_LIMIT=1`, or the commit.
