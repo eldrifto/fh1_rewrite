@@ -905,6 +905,7 @@ enum Opt {
     AntiAlias,
     MotionBlur,
     RenderScale,
+    Gpu,
 }
 
 #[derive(Clone, Copy)]
@@ -1036,6 +1037,7 @@ fn items(menu: &Menu, settings: &Settings, garage: &Garage, track: &Track, maps:
                     opt("Anti-aliasing", graphics::aa_value(g), Opt::AntiAlias),
                     opt("Motion blur", graphics::blur_value(g), Opt::MotionBlur),
                     opt("Render scale", graphics::scale_value(g), Opt::RenderScale),
+                    opt("GPU", graphics::gpu_value(g), Opt::Gpu),
                 ],
                 0,
             )
@@ -1186,6 +1188,7 @@ fn adjust(settings: &mut Settings, o: Opt, dir: i32) {
         Opt::AntiAlias => settings.graphics.aa = settings.graphics.aa.next(dir < 0),
         Opt::MotionBlur => settings.graphics.motion_blur = settings.graphics.motion_blur.next(dir < 0),
         Opt::RenderScale => graphics::step_scale(&mut settings.graphics, dir),
+        Opt::Gpu => settings.graphics.gpu = settings.graphics.gpu.next(dir < 0),
         Opt::AiDifficulty => settings.ai_difficulty = settings.ai_difficulty.next(dir < 0),
         Opt::Stm => settings.stm = !settings.stm,
         Opt::Rewind => settings.rewind = !settings.rewind,
