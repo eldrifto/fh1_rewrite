@@ -5,7 +5,7 @@ fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut ar = Archive::open(&a[1]).unwrap();
     for n in &a[2..] {
-        let suffix = format!(".{:0>5}.rmb.bin", n.parse::<usize>().unwrap());
+        let suffix = if n == "sky" { ".sky.rmb.bin".to_string() } else { format!(".{:0>5}.rmb.bin", n.parse::<usize>().unwrap()) };
         let e = ar.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(&suffix)).unwrap().clone();
         let m = fm2::parse_model(&ar.read(&e).unwrap()).unwrap();
         for (i, d) in m.draws.iter().enumerate() {

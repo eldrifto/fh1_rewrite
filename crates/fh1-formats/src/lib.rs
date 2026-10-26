@@ -19,6 +19,7 @@ pub mod pvsz;
 pub mod rmb;
 pub mod xcompress;
 pub mod xds;
+pub mod xgf;
 pub mod xpr;
 pub mod zip;
 

@@ -57,6 +57,9 @@ pub fn run() -> Result<()> {
         std::fs::write(root.join("camera/CameraSettings.ini"), ini)?;
         println!("[fm2] camera/CameraSettings.ini copied");
     }
+    if want("ui") {
+        crate::fm2_ui::import(&disc, &root)?;
+    }
     if want("cars") {
         crate::fh2::swap(&root.join("cars"), |stage| crate::fm2_cars::cars(&disc, &private, stage))?;
         // The cars' own engine sounds (FM2 DSP / harmonic tuning + FSB3 banks) instead of an FH1 donor's: written to the shared audio folder as

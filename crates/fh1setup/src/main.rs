@@ -59,6 +59,7 @@ mod model;
 mod remaster;
 mod fm2_scenery;
 mod fm2_sky;
+mod fm2_ui;
 mod fm2_uv;
 mod scenery;
 mod shaders;

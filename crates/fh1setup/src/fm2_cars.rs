@@ -736,7 +736,7 @@ fn material_look(name: &str, paint: Colour, metallic: bool) -> ([f32; 4], f32, f
     match name {
         "body" | "body_2" | "badge" | "race_kit_red" => paint_look,
         "matte_colors" => ([paint[0], paint[1], paint[2], 1.0], 0.0, 0.8),
-        "window" | "window_2" | "glass" | "detail_glass_clear" | "lights_gls_head" => ([0.04, 0.06, 0.08, 0.4], 0.0, 0.05),
+        "window" | "window_2" | "glass" | "detail_glass_clear" | "lights_gls_head" => ([0.04, 0.06, 0.08, 0.85], 0.0, 0.05),
         "black_glass" => ([0.01, 0.01, 0.015, 0.7], 0.0, 0.05),
         "detail_glass_red" | "red_glass" => ([0.6, 0.02, 0.02, 0.6], 0.0, 0.05),
         "detail_glass_amber" => ([0.8, 0.4, 0.02, 0.6], 0.0, 0.05),
