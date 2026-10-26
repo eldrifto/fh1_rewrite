@@ -26,6 +26,7 @@ pub mod fh1_launch;
 pub mod garage;
 pub mod graphics;
 pub mod thumbs;
+pub mod venues;
 pub mod hud;
 pub mod intro;
 // L1: launch screen + loading covers.
@@ -94,6 +95,8 @@ impl Plugin for UiPlugin {
             .add_plugins(graphics::GraphicsPlugin)
             // Garage: My cars / Autoshow on the credits ledger (P10).
             .add_plugins(garage::GaragePlugin)
+            // Festival venues in free roam: drive up, stop, Enter / A (ui/venues.rs; FH1_VENUES=0 = off).
+            .add_plugins(venues::VenuesPlugin)
             // Rendered car photos for cars without the game's own (ui/thumbs.rs).
             .add_plugins(thumbs::ThumbPlugin)
             // Garage > Customize (ui/customize.rs; garage.json beside settings.json).
