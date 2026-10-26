@@ -1,3 +1,98 @@
+# PROJECT SUMMARY (written 2026-10-26)
+
+This is the long-form overview of the whole project: what it is, how it is put together, what works, what does not, and where the work stands. The sections after it ("STATUS: FM2 road brightness" and the dated "Update" entries) are the detailed evidence, newest at the bottom of the file. Where this summary repeats a claim from README.md that I did not re-check in the latest sessions, it says so.
+
+Terms used once and then freely: **engine** = the game program (`fh1-engine`); **importer / setup tool** = `fh1setup`, which converts a game disc into files the engine reads; **imported map / circuit** = a track converted from another Forza game; **AI** = the computer-driven opponents; **racing line** = the path an AI car tries to follow; **lap gate** = an invisible line across the road that counts as a checkpoint; **Xenia** = the Xbox 360 emulator the user runs the original games in, used here only as a reference picture.
+
+## 1. What this project is
+
+A new PC engine, written in Rust with the Bevy game framework, that plays **Forza Horizon 1** (Xbox 360, 2012) from the user's own disc, and can add content from other Xbox 360 Forza games the user owns: Forza Horizon 2, Forza Motorsport 4, 3, 2, and cars from the original Xbox Forza Motorsport (FM1). It is a reimplementation, not an emulator: the setup tool reads the disc's archives, models, textures, database and audio and converts them; the engine is rebuilt system by system from the game's own data and from reverse-engineering research.
+
+Ground rules (AGENTS.md) that shape everything below:
+- No game files, extracted data or decompiled code in the repository. Converted data lives in `data/installations/<id>/assets/private/` (git-ignored). `.gitignore` is a whitelist.
+- Game installs are read only. Single-player and offline work only (online free roam exists, see section 3, but this work never touches anti-cheat or DRM).
+- Prefer the game's own data over guesses; "log, don't look" (the assistant cannot see the game, so it measures from logs and screenshots); say "not tested" when something is not tested; commit only when asked.
+
+## 2. How it is put together
+
+| Crate | Job |
+|---|---|
+| `fh1setup` | The importer. FH1 disc -> asset groups (cars, world, scenery, shaders, audio, events, AI lines, remaster tables...); plus `import-fh2`, `import-fm4`, `import-fm3`, `import-fm2`, `import-fm1` for the other games |
+| `fh1-formats` | File parsers: Forza zips (XMemCompress LZX), Xbox 360 textures, car models, scenery, PVS (which models are visible from where), FM2 / FM1 formats |
+| `fh1-engine` | The game: car physics, cameras, world streaming, races, AI, traffic, HUD, menus |
+| `fh1-remaster` | The PBR renderer (physically based lighting): materials, shadows, sky, car paint, post-processing; also draws the imported FM2 scenery with its lightmaps |
+| `fh1-render`, `fh1-shaders` | Shared render pieces (particles, quality presets, the car shadows) and the Xbox 360 shader -> WGSL translator |
+| `fh1-world` | Track collision meshes and surface types (asphalt, grass, dirt... with the game's grip values) |
+| `fh1-audio`, `fh1-radio`, `fh1-video`, `fh1-ui` | Engine sound from the game's FMOD banks, the radio, intro movies, string tables / fonts / HUD scenes |
+| `fh1-net` | Online protocol, dedicated server, server list |
+| `fh1-launcher` | Installer and launcher (`FH1 Rewrite.exe`) |
+
+Data flow: disc -> `fh1setup` -> `data/installations/<id>/assets/private/...` (imported games under `imported/<game>/`) -> `fh1-engine`. Coordinates: the engine mirrors z against the game files (a file point z is -z in the engine); every importer-to-engine path has to flip it.
+
+Branches: this work is on `ui-elements` (which also holds the user's own uncommitted UI work). Other branches exist for separate features (`fm2-lightmaps`, `fm3-import`, `launcher-fm2-fm1`, `festival-venues`, ...).
+
+## 3. What works (FH1 itself)
+
+From README.md, **not re-checked in these sessions**: the full Colorado map with streaming scenery, props, crowds and traffic; 175 cars with their own handling data, engine sounds and the radio; races with AI drivers, wristband progression and credits; a garage with paint, rims, body kits and upgrades; the remaster renderer with time of day; online free roam on dedicated servers (up to 24 players); graphics presets down to a "Console (720p)" preset for integrated graphics; Windows release builds and an experimental Linux build.
+
+Checked in these sessions, only as a regression test: a Colorado career race (Recaro Rush, 7 AI drivers) starts, runs and finishes (STATUS updates 29 and 32).
+
+## 4. Other games' content
+
+Folder counts in the current install (`imported/<game>/cars` entries; not all are cars, e.g. `index.json`): FH2 222, FM4 506, FM3 420, FM2 311, FM1 232. README's table: FH2 216 cars and its open world; FM4 501 cars and 83 circuit layouts; FM3 311 cars (415 with disc 2) and 52 to 69 layouts; FM2 32 circuit layouts. README still says FM2 cars are "not converted yet"; that is out of date: FM2 cars are imported (`fh1setup/src/fm2_cars.rs`) and the AI raced in them (updates 27 to 32). FM1 cars (231, original Xbox) come from `import-fm1`; their state is in the memory notes and was not re-checked here (paint, glass and lamps work; suspension / aero / brakes come from a donor car; no FM1 engine sounds).
+
+## 5. FM2 tracks: making them look like the real game
+
+Goal: FM2 circuits should look like the user's Xenia screenshots, using the game's own data. Measure: on 12 tracks, the brightness of two road patches near the car (left / right band), ours divided by Xenia; the score is the sum over all 24 patches of |ln(ratio)| (0 = perfect). It went **17.68 -> 9.38**.
+
+Fixed, from the game's own code and data (details in the "STATUS: FM2 road brightness" section below):
+- Lightmap crop (a negative tile scale is the shader's clamp flag, not a mirror) and lightmap coordinates read through each draw's own vertex shader (seams on flat ground 0.46 -> 0.10).
+- A per-family table saying which textures the console decodes as sRGB, keyed by a hash of the road shader; the importer bakes accordingly and marks materials for the engine.
+- The game's shadow rule on lightmap-lit surfaces; the car's own shadow drawn twice like the game (sun shadow plus a projected decal towards the track's ShadowColor); FM2's own follow camera; the real-time shadow cascades.
+- Bugs: importer passes overwrote each other's generated textures; the engine cached each scenery texture in one colour space only.
+
+Not solved: Test Track's right band is still 5.2x too bright and Maple Valley's 1.7x; New York's game shader evaluates 2.4x brighter than Xenia (unknown why); a real-time shadow in Laguna Seca's foreground that our sun does not cast; FM2's final colour step cannot be reproduced. The switch table and the test procedure (`shoot_some.sh` + `cmp12.py`, sum near 9.4) are in that section.
+
+## 6. Racing on imported circuits (FM2 / FM4), built 2026-10-26
+
+Before: the engine could only race on Colorado (AI lines came from FH1's own files). Now:
+
+- **AI line** (`ai/line.rs`): the importer's `imported/<map>/ai/line.json` (the game's own optimal line, the centre line and wall distances) becomes the AI's racing line; the rebuilt points match the file within 0.005 to 0.09 m on average on five tracks (test `imported_line_matches_file`).
+- **A real race through the same race code as Colorado's events** (`race.rs` `Events::load_imported`): grid from the track's own grid slots, lap gates from `track.json` (two sectors and the finish), 7 of that game's own cars with their real names, countdown, laps, positions, results. Start it with `FH1_RACE=0` (`FH1_RACE_LAPS=n`, default 3); it is not in the menus yet. Test `imported_race_definition` (gates in order, grid behind the line).
+- **Dev race** `FH1_AI_RACE=<route>:<cars>:<car>:<laps>`: AI only, with lap counting through the finish gate.
+- **AI stay on the tarmac** (`FH1_AI_ROAD`, on by default): an imported line's road width is measured from the collision surfaces (where the game's OffRoadness says dirt / grass starts) instead of wall to wall (Laguna median half width 16.2 -> 5.8 m). AI time off the tarmac fell 95 to 99 %.
+- **Fixes found on the way**: AI on FM4's Bernese Alps were reset every physics tick below y = -50 m (a Colorado constant; the limit now follows the line's lowest point); FH1's "keep 2 m from the inside edge" rule bent the game's own apex line once the road was the real tarmac and cost 6 to 8 % lap time (imported lines now skip it); AI crawled into a stopped car and waited to be reset instead of passing it (now they aim at the gap beside it).
+- **Measured**: one AI car alone on Laguna Seca 120.2 s, past a parked car 121.3 s (was 134.4 s); 7 AI, 1 lap, parked player: 116 to 169 s (was 151 to 176 s); FM4 Catalunya solo 160.1 s; all 5 AI finish on Catalunya and the Bernese Alps; frame time with 7 AI 6.9 ms on average at a 144 Hz cap.
+- **Logging for checking races without looking**: `FH1_RACE_LOG=1` (every gate crossing, results table), `FH1_AI_LOG=1` (every 5 s per AI car: lap, position on the line, offset, speed, resets, grass excursions, and pace = speed against planned and target speed), `FH1_AI_TRAFFIC_LOG=1` (each pass-or-follow decision and each speed cap from a car ahead).
+
+Not solved / not tested here:
+- A race **driven by a person**: never tested (every test used a parked, auto-finished player). The F6 event list and the return to free roam after the results: not tested.
+- A car alone is still 7 % (Laguna) to 11 % (Catalunya) slower than its own predicted lap; two cars in the 7-car Laguna race still had incidents with resets.
+- Per-event lap counts and AI difficulty from the FM2 / FM4 databases are not read (3 laps and FH1's medium AI are used). Passing a stopped car in a corner: not tested.
+
+## 7. Mistakes recorded (so they are not repeated)
+
+- Update 27 claimed the dev race used the track's grid slots; it did not (the spawn list holds display labels "Grid 00", the filter looked for "grid_"). Corrected in update 29; every earlier dev-race lap time was from a line-based grid.
+- Update 30's first comparison of `FH1_AI_ROAD` on / off was invalid: both runs stalled behind the parked player for different lengths of time. Re-measured on a clean lap.
+- Update 31: the first suspect (the 0.4 m passing clamp) was measured and ruled out (it would have moved 0 points) before the real cause (the 2 m inside-edge rule) was found.
+- Earlier FM2 work: several wrong inferences (speed FOV, DropShadowColor vs ShadowColor, a "3x slab", a static shadow map) were corrected in place in the STATUS section below.
+
+## 8. What I would do next (pick one)
+
+1. A race you drive yourself on Laguna Seca (`FH1_RACE=0 FH1_RACE_LAPS=1 FH1_RACE_LOG=1 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`), telling me what looks wrong; then the F6 list and the return to free roam.
+2. Why a lone AI car is 7 to 11 % slower than its own plan (it reaches about 75 to 80 % of its target speed on average: grip, gearing or braking points).
+3. Put imported races in the menus (touches the user's UI branch work, so ask first).
+4. Back to FM2 brightness: Test Track's right band, Maple Valley, New York.
+5. Update README.md: FM2 cars are imported; the imported-race note is out of date (`FH1_AI_ROAD` is on by default now; the "AI are slow" note was mostly a test artifact).
+
+## 9. Where things are
+
+- Plans: `docs/DESIGN.md` (git-ignored, not committed); change log: `MODLOG.md`; this file for status and evidence.
+- Test logs and scratch scripts: `data/work/` (git-ignored), e.g. `race*_*.log`, `cmp12.py`, `shoot_some.sh`, `line_surf.py`, `surf_across.py`.
+- Engine build used for all tests: `cargo build --release -p fh1-engine --no-default-features` (the default `rtx` feature needs the DLSS SDK). Use the **debug** importer `target/debug/fh1setup.exe` for FM2 imports (an old release build overwrote Laguna once).
+
+---
+
 # STATUS: FM2 road brightness, plain-language summary (updated 2026-10-26)
 
 This note is the short version. The long, dated sections below are the evidence and the dead ends (newest at the bottom of the file).
