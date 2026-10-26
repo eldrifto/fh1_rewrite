@@ -517,3 +517,10 @@ main.rs: an explicit `FH1_RM_FM2_SHADOW_COL` wins over the track's ShadowColor (
 **Tested:** solo AI lap Laguna 129.4 -> 120.2 s (121.8 s without the tarmac fit), Catalunya 172.6 -> 160.1 s. AI unit tests pass.
 **Test it:** `FH1_AI_LOG=1 FH1_AI_RACE_LINE_GRID=1 FH1_AI_RACE=0:1:../imported/fm2/cars/MER_300SL_54:1 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: `FH1_AI_RACE lap: AI slot 1 lap 1/1 in` about 120 s; with `FH1_AI_GAME_LINE_LIMIT=1` about 129 s.
 **Revert:** `FH1_AI_GAME_LINE_LIMIT=1`, or the commit.
+
+## 2026-10-26 (32): AI pass stopped cars instead of crawling into them
+**Changed:** `ai/driver.rs`: `FH1_AI_PASS_STATIC` (default on: aim at the pass slot's own position when passing a car under 5 m/s), `FH1_AI_PASS_MARGIN` (default 0.5 m extra room in the pass slot), `FH1_AI_TRAFFIC_LOG=1` (pass / follow decisions and speed caps).
+**Tested:** solo AI past the parked player on Laguna 134.4 -> 121.3 s, 0 resets; 7-car Laguna lap 1 151-176 -> 116-169 s; Colorado Recaro Rush resets 14 -> 9 (STATUS update 32).
+**Not tested:** corners; a driven player.
+**Test it:** `FH1_AI_LOG=1 FH1_AI_RACE=0:1:../imported/fm2/cars/MER_300SL_54:1 ./target/release/fh1-engine.exe --track fm2/lagunaseca_00`: lap about 121 s and `resets 0` in the last `AI log` line; with `FH1_AI_PASS_STATIC=0` about 134 s and a reset.
+**Revert:** `FH1_AI_PASS_STATIC=0 FH1_AI_PASS_MARGIN=0`, or the commit.

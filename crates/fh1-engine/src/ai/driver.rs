@@ -123,6 +123,24 @@ fn merge_rate() -> f32 {
 }
 
 /// FH1_AI_GAME_MERGE=0: the P9 lane hold / merge rate instead of the TrackStartingMerges schedule (docs/AI.md "P17").
+/// `FH1_AI_PASS_STATIC=0`: pass stopped cars like moving ones (line-shaped path; the old behaviour).
+fn pass_static_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("FH1_AI_PASS_STATIC").map_or(true, |v| v != "0"))
+}
+
+/// Extra lateral room (m) of a pass slot beyond `need` (bodies + clearance). `FH1_AI_PASS_MARGIN=<m>` (0 = the old slot).
+fn pass_margin() -> f32 {
+    static V: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("FH1_AI_PASS_MARGIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5))
+}
+
+/// `FH1_AI_TRAFFIC_LOG=1` (dev): log why a driver follows a car ahead instead of passing it (each side's checks).
+fn traffic_log() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("FH1_AI_TRAFFIC_LOG").is_ok_and(|v| v == "1"))
+}
+
 fn game_merge() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *V.get_or_init(|| std::env::var("FH1_AI_GAME_MERGE").map_or(true, |v| v != "0"))
@@ -263,6 +281,9 @@ pub struct Driver {
     mode_timer: f32,
     stuck_timer: f32,
     stuck_attempts: u32,
+    /// `FH1_AI_TRAFFIC_LOG`: clock of the last traffic log line.
+    traffic_logged: f32,
+    traffic_capped: f32,
     off_timer: f32,
     flip_timer: f32,
     slow_timer: f32,
@@ -353,6 +374,8 @@ impl Driver {
             mode_timer: 0.0,
             stuck_timer: 0.0,
             stuck_attempts: 0,
+            traffic_logged: -100.0,
+            traffic_capped: -100.0,
             off_timer: 0.0,
             flip_timer: 0.0,
             slow_timer: 0.0,
@@ -659,6 +682,8 @@ impl Driver {
         let side_slack = if avoid { 3.0 } else { 1.0 };
         let mut follow_speed = f32::MAX;
         let mut want_lateral: Option<f32> = None;
+        // Passing a stopped / very slow car: steer to the slot's absolute position (see the steering below).
+        let mut pass_static = false;
         let path_lat = self.lateral_now.unwrap_or(line_lat);
         let edge = (hw - tm.track_edge_clearance - my_half_width).max(0.0);
         // Launch lane (P9): kept until `lane_until` or until a corner needs braking soon, then merged at merge_rate().
@@ -728,8 +753,11 @@ impl Driver {
                 let in_path = (o_lat - path_lat).abs() < need;
                 let in_goal = aware && (o_lat - base).abs() < need;
                 if (in_path || in_goal) && (tti < tm.start_pass_at_impact_time || gap_len < tm.trailing_distance) {
-                    // Pass on the side with room, the one nearer the current path first; else follow.
-                    let (left, right) = (o_lat + need, o_lat - need);
+                    // Pass on the side with room, the one nearer the current path first; else follow. The slot sits
+                    // `pass_margin` beyond the bare minimum: at exactly `need` the car never got clear of the "in my path"
+                    // speed cap below and crawled into a parked car (STATUS.md update 32).
+                    let pm = pass_margin();
+                    let (left, right) = (o_lat + need + pm, o_lat - need - pm);
                     let ok = |l: f32| !aware || (l >= lat_min && l <= lat_max && slot_free(l, gap_len + 25.0, i));
                     let pick = match (left <= edge && ok(left), right >= -edge && ok(right)) {
                         (true, true) => Some(if (left - path_lat).abs() < (right - path_lat).abs() { left } else { right }),
@@ -737,6 +765,35 @@ impl Driver {
                         (false, true) => Some(right),
                         _ => None,
                     };
+                    if traffic_log() && self.clock - self.traffic_logged > 0.25 {
+                        self.traffic_logged = self.clock;
+                        bevy::log::info!(
+                            "AI traffic: s {:.0} speed {:.0} km/h: car ahead {:.1} m (gap {:.1}), at lateral {:.2} (speed {:.1} m/s); me {:.2} path {:.2} base {:.2} need {:.2} edge {:.2} caps {:.2}..{:.2}; left {:.2} {}{}, right {:.2} {}{} -> {}",
+                            p.s,
+                            speed * 3.6,
+                            along,
+                            gap_len,
+                            o_lat,
+                            o_speed,
+                            p.lateral,
+                            path_lat,
+                            base,
+                            need,
+                            edge,
+                            lat_min,
+                            lat_max,
+                            left,
+                            if left <= edge { "in-road" } else { "OFF-ROAD" },
+                            if !aware || (left >= lat_min && left <= lat_max) { "" } else { " CAPPED" },
+                            right,
+                            if right >= -edge { "in-road" } else { "OFF-ROAD" },
+                            if !aware || (right >= lat_min && right <= lat_max) { "" } else { " CAPPED" },
+                            pick.map_or("follow".to_string(), |l| format!("pass at {l:.2}")),
+                        );
+                    }
+                    if pick.is_some() && o_speed < 5.0 && pass_static_on() {
+                        pass_static = true;
+                    }
                     match pick {
                         Some(l) => want_lateral = Some(want_lateral.map_or(l, |w: f32| if (w - path_lat).abs() > (l - path_lat).abs() { w } else { l })),
                         None => follow_speed = follow_speed.min(o_speed + (gap_len - tm.trailing_distance) * 0.6),
@@ -749,7 +806,37 @@ impl Driver {
                     let room = (gap_len - 1.5 - if avoid { 0.3 } else { 0.15 } * speed.max(0.0)).max(0.0);
                     let o_fwd = o_speed.max(0.0);
                     follow_speed = follow_speed.min((o_fwd * o_fwd + 2.0 * follow_decel() * room).sqrt());
+                    if traffic_log() && self.clock - self.traffic_capped > 0.25 {
+                        self.traffic_capped = self.clock;
+                        bevy::log::info!(
+                            "AI traffic cap: s {:.0} speed {:.0} km/h, car {:.1} m ahead: {}{} (car at {:.2}, me {:.2}, path {:.2}, need {:.2}) -> at most {:.0} km/h",
+                            p.s,
+                            speed * 3.6,
+                            along,
+                            if in_path { "in path" } else { "" },
+                            if in_front { " under my nose" } else { "" },
+                            o_lat,
+                            p.lateral,
+                            path_lat,
+                            need,
+                            follow_speed * 3.6
+                        );
+                    }
                 }
+            } else if along > 0.0 && traffic_log() && self.clock - self.traffic_logged > 0.25 {
+                self.traffic_logged = self.clock;
+                bevy::log::info!(
+                    "AI traffic: s {:.0} speed {:.1} km/h: OVERLAPPING car {:.1} m ahead (gap {:.1}) at lateral {:.2}; me at {:.2}, path {:.2}, caps {:.2}..{:.2}",
+                    p.s,
+                    speed * 3.6,
+                    along,
+                    gap_len,
+                    o_lat,
+                    p.lateral,
+                    path_lat,
+                    lat_min,
+                    lat_max
+                );
             } else if !aware && (o_lat - path_lat).abs() < need {
                 // Alongside: step away from it, inside the road.
                 let l = if o_lat > path_lat { (o_lat - need).max(-edge) } else { (o_lat + need).min(edge) };
@@ -782,6 +869,10 @@ impl Driver {
             None => self.line.point_at(ts),
             // P9: the grid lane is a fixed distance from the road centre (the line may swing across the road at the start).
             Some(l) if holding_lane && want_lateral.is_none() => self.line.point_with_lateral(ts, l),
+            // Around a stopped car: the slot's own position. Keeping the racing line's shape (below) drifts the aim back
+            // towards the obstacle where the line swings across the road, the car stays inside its slot and the "under my
+            // nose" speed cap brakes it to a stop behind the obstacle (STATUS.md update 32).
+            Some(l) if pass_static => self.line.point_with_lateral(ts, l),
             Some(l) => {
                 // Keep the offset from the racing line, so the path stays line-shaped while passing.
                 let (_, lv, lo) = self.line.road_at(ts);

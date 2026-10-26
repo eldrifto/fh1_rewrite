@@ -907,3 +907,24 @@ Re-measured (one solo AI car, line-based grid, nothing in the way, logs `data/wo
 | Catalunya, tarmac fit, fixed | **160.1 s** | 143.9 s | 3.9 s |
 
 So `FH1_AI_ROAD` (on by default) now costs nothing on Laguna and keeps the car on the tarmac. Still open: the solo car is 7 % (Laguna) to 11 % (Catalunya) slower than its own prediction; the AI still stop behind a parked car (update 30). Both not investigated.
+
+## Update 2026-10-26 (32): AI no longer crawl into a stopped car
+
+**Repro:** one AI car on Laguna Seca, the player parked on the next grid slot (the dev race); the AI arrived at 127 km/h, slowed to 3 km/h, touched the parked car, sat still for about 10 s until the stuck rule reset it. Lap 134.4 s against 120.2 s with nothing in the way.
+
+**What the log showed** (`FH1_AI_TRAFFIC_LOG=1`, new: every 0.25 s each pass / follow decision and each speed cap from a car ahead): the driver chose to pass on the right from 80 m out, correctly, but
+1. the pass slot sat exactly at the minimum distance (`need`, bodies + clearance) from the parked car, and
+2. the car's actual position stayed about 1 m inside its planned path: while passing, the driver aims at the racing line shifted by the pass offset ("keep the path line-shaped"), and here the game's line swings across the straight towards the parked car, so the aim point drifted back towards it.
+So the "car under my nose" stopping-distance cap (`driver.rs`, uses the car's actual position) stayed on the whole way and braked it to a crawl.
+
+**Fix** (`ai/driver.rs`, both on by default):
+- `FH1_AI_PASS_STATIC` (`=0` off): passing a stopped / very slow car (under 5 m/s), the driver aims at the slot's own position across the road instead of the line-shaped path. Passing moving cars is unchanged.
+- `FH1_AI_PASS_MARGIN` (metres, default 0.5; `=0` the old slot): the pass slot sits that far beyond the minimum.
+The margin alone did not help (134.4 s); the aim change did.
+
+Tested (logs `data/work/race15_*`, `race16_*`):
+- Solo car, parked player: 134.4 s, 1 reset -> 121.3 s, 0 resets (120.2 s with nothing in the way); passes at about 58 km/h.
+- Laguna, 7 AI, 1 lap, parked player: lap 1 151 to 176 s -> 116 to 169 s (5 of 7 under 132 s; slots 3 and 7 had other incidents, 1 and 2 resets).
+- Colorado regression check (Recaro Rush, 160 s, one run each): resets 14 (old) -> 9; lap 1 75 to 109 s (old) -> 76 to 87 s. No sign of a regression; single runs, so not proof of an improvement.
+
+Not tested: passing a stopped car in a corner; a race with a driven player.
