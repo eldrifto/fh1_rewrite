@@ -50,6 +50,12 @@ enum Bind {
     Static,
     CurLap,
     NumLaps,
+    /// The PLACE panel's two numbers and the player list's rows (position, name, gap), row 0..3.
+    PlaceCur,
+    PlaceNum,
+    ListPos(u8),
+    ListName(u8),
+    ListDist(u8),
     RaceTitle(u8),
     RaceTime(u8),
     Speed,
@@ -180,6 +186,19 @@ fn load(mut commands: Commands, garage: Res<Garage>, track: Res<Track>, mut imag
                 ("text", "Laps") if part_one && in_path("I_HUD_Lap") => Some(Bind::Static),
                 ("text", "NumLaps") if part_one && in_path("I_HUD_Lap") => Some(Bind::NumLaps),
                 ("text", "CurLap") if part_one && in_path("I_HUD_Lap") => Some(Bind::CurLap),
+                ("model", _) if part_one && in_path("I_HUD_PLACE") => Some(Bind::Static),
+                ("text", "Place") if part_one && in_path("I_HUD_PLACE") => Some(Bind::Static),
+                ("text", "CurPosition") if part_one && in_path("I_HUD_PLACE") => Some(Bind::PlaceCur),
+                ("text", "NumPositions") if part_one && in_path("I_HUD_PLACE") => Some(Bind::PlaceNum),
+                ("text", "Position" | "PlayerName" | "Dist") if part_one && in_path("I_HUD_Playerlist") => {
+                    // The rows nest (row 1's path also holds row 0): the first row component in the path is the item's own.
+                    let row = path.iter().find_map(|p| p.strip_prefix("I_HUD_Playerlist_row")).and_then(|n| n.parse::<u8>().ok()).filter(|r| *r < 4);
+                    row.map(|r| match name {
+                        "Position" => Bind::ListPos(r),
+                        "PlayerName" => Bind::ListName(r),
+                        _ => Bind::ListDist(r),
+                    })
+                }
                 ("model", _) if !part_one && in_path("I_HUD_RACE_PANE") && (in_path("I_HUD_race_row0") || in_path("I_HUD_race_row1")) => Some(Bind::Static),
                 ("text", "Row_Title") if !part_one && in_path("I_HUD_race_row0") => Some(Bind::RaceTitle(0)),
                 ("text", "Row_Title") if !part_one && in_path("I_HUD_race_row1") => Some(Bind::RaceTitle(1)),
@@ -200,6 +219,9 @@ fn load(mut commands: Commands, garage: Res<Garage>, track: Res<Track>, mut imag
             };
             let Some(bind) = bind else { continue };
             let (x, y, z) = (it["x"].as_f64().unwrap_or(0.0) as f32, it["y"].as_f64().unwrap_or(0.0) as f32, it["z"].as_f64().unwrap_or(0.0) as f32);
+            // The player's own list row sits at design y -251 in the Xenia shots (name, number and gap on one line, 33 px above the PLACE panel);
+            // the scene file has it at -183 (name -171): the game's script moves it (not read). INFERRED from the shots.
+            let y = if matches!(bind, Bind::ListPos(0) | Bind::ListName(0) | Bind::ListDist(0)) { -251.0 } else { y };
             let (sx, sy) = (it["sx"].as_f64().unwrap_or(1.0) as f32, it["sy"].as_f64().unwrap_or(1.0) as f32);
             let alpha = it["opacity"].as_str().and_then(|o| o.parse::<f32>().ok()).unwrap_or(100.0) / 100.0;
             // Nearer (lower z) draws on top; pictures stay below every text and gauge part (the boost plate sits nearer than its numbers
@@ -522,6 +544,7 @@ fn drive(
     let racing = matches!(rs.phase, RacePhase::Racing);
     let (race_t, lap_t) = if racing { (rs.clock_s, rs.clock_s - rs.lap_start_s) } else { (0.0, 0.0) };
     let total = rs.race.and_then(|r| events.races.get(r)).map(|r| r.laps);
+    let player_name = crate::net::player_name();
     let speed = car.map_or(0.0, |c| if settings.metric { c.0.speed() * 3.6 } else { c.0.speed() * 2.236_94 });
     let gear = car.map_or(1, |c| c.0.gear);
     for (mut item, name, mut node, mut img, mut vis) in &mut items {
@@ -547,8 +570,30 @@ fn drive(
         }
         let s = match item.bind {
             Bind::Static => name.as_str().to_owned(),
-            Bind::CurLap => format!("{}", (rs.laps.len() + 1).min(total.map_or(usize::MAX, |t| t as usize).max(1))),
-            Bind::NumLaps => total.map_or("-".to_owned(), |t| t.to_string()),
+            // The Xenia shots (a 1-lap race, 1.9 s after the start, car still behind the line) read 0 | 1: the counter starts at 0 and counts the lap
+            // the player has started; with no race the total is shown as 1 (INFERRED: nothing in the files says what a free run shows).
+            Bind::CurLap => if racing { format!("{}", (rs.laps.len() + 1).min(total.map_or(usize::MAX, |t| t as usize).max(1))) } else { "0".to_owned() },
+            Bind::NumLaps => total.map_or("1".to_owned(), |t| t.to_string()),
+            Bind::PlaceCur => format!("{}", rs.racers.iter().find(|r| r.is_player).map_or(1, |r| r.position.max(1))),
+            Bind::PlaceNum => format!("{}", rs.racers.len().max(1)),
+            Bind::ListPos(r) | Bind::ListName(r) | Bind::ListDist(r) => {
+                // Rows in position order; with no race the player is the only row.
+                let mut order: Vec<&crate::race::Racer> = rs.racers.iter().collect();
+                order.sort_by_key(|x| x.position);
+                match (order.get(r as usize), r) {
+                    (Some(x), _) => match item.bind {
+                        Bind::ListPos(_) => format!("{}", x.position.max(r as u32 + 1)),
+                        Bind::ListName(_) => if x.is_player { player_name.clone() } else { x.driver.clone() },
+                        _ => "---".to_owned(),
+                    },
+                    (None, 0) => match item.bind {
+                        Bind::ListPos(_) => "1".to_owned(),
+                        Bind::ListName(_) => player_name.clone(),
+                        _ => "---".to_owned(),
+                    },
+                    _ => String::new(),
+                }
+            }
             Bind::RaceTitle(0) => hud.labels.get("race").cloned().unwrap_or_default(),
             Bind::RaceTitle(_) => hud.labels.get("lap").cloned().unwrap_or_default(),
             Bind::RaceTime(0) => mmss(race_t),

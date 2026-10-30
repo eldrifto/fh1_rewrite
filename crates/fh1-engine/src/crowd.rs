@@ -73,6 +73,7 @@ impl Plugin for CrowdPlugin {
         embedded_asset!(app, "crowd_walk.wgsl");
         embedded_asset!(app, "crowd_skin.wgsl");
         embedded_asset!(app, "crowd_skin_prepass.wgsl");
+        embedded_asset!(app, "crowd_skin_frag.wgsl");
         app.add_plugins((
             MaterialPlugin::<CrowdMaterial>::default(),
             MaterialPlugin::<walk_gpu::WalkerMaterial>::default(),
@@ -157,6 +158,8 @@ struct Spectator {
     position: Vec3,
     heading: u8,
     class: u8,
+    /// The `.crowd` record's light byte (FM2; 0 on older imports).
+    light: u8,
     /// Atlas model index (also the 3D model).
     model: u32,
 }
@@ -171,6 +174,8 @@ struct CrowdWorld {
     /// Atlas order: (model name, texture name).
     models: Vec<(String, String)>,
     per_model: u32,
+    /// First atlas cell of each model (FM2's index.json lists it; else model x `per_model`).
+    cells_of: Vec<u32>,
     material: Handle<CrowdMaterial>,
     loaded: Vec<Option<Entity>>,
     /// PERF P2: card objects merged per `CELL` m grid cell (one mesh + entity per cell instead of per object; the
@@ -184,6 +189,8 @@ struct CrowdWorld {
     model_yaw: f32,
     /// Model count per skinbin LOD (TrackSettings lod0..lod3).
     lod_counts: [usize; 4],
+    /// FM2 maps (`FH1_CROWD_LOD_DIST=0` = off): lod0..lod3 read as distances in metres of the four skinbin LODs (3D figures out to lod3, up to `FH1_CROWD_FIG_CAP`) instead of figure counts.
+    lod_dist: Option<[f32; 4]>,
     /// Cards cut / models drawn within this distance this frame (`near`, less when the model cap is hit).
     cut: f32,
     /// (model name + suffix, LOD) -> mesh (None if missing).
@@ -191,6 +198,14 @@ struct CrowdWorld {
     /// Per class: the 50-slot clip table the game picks from when a clip ends.
     tables: HashMap<u8, Option<ClipTable>>,
     textures: HashMap<String, MaterialHandle>,
+    /// An FM2 map's crowd: the 3D figures are drawn unlit (the map's sun does not reach a StandardMaterial there: they came out black).
+    pub(crate) fm2: bool,
+    /// FM2: the colour multiplied into the unlit 3D figures. The map's `<Crowds>` lerp(dark, light, mean of the .crowd light byte) when the import wrote it (MODLOG 124), else the old fitted grey 0.75; `FH1_CROWD_TINT=0` = 0.75.
+    pub(crate) fig_tint: [f32; 3],
+    /// FM2 (MODLOG 125): the map's `<Crowds>` (dark, light, mean light byte / 255) for the per-figure ratio; None = no per-figure tint.
+    tint_cfg: Option<([f32; 3], [f32; 3], f32)>,
+    /// The ratio for the next GPU figure spawned from a placed spectator (0 = none); read and cleared by `spawn_gpu_figure`.
+    pub(crate) spawn_tint: f32,
     /// Spawned 3D spectators by global index.
     near_loaded: HashMap<usize, Figure>,
     /// Decoded clips by animation name (None if missing / undecodable).
@@ -302,9 +317,12 @@ impl CrowdWorld {
         std::fs::read(self.dir.join(rel)).ok()
     }
 
-    fn load(assets: &Path, post: bool, images: &mut Assets<Image>, materials: &mut Assets<CrowdMaterial>) -> Option<Self> {
-        let root = assets.join("crowd");
-        let dir = root.join("colorado");
+    /// `fm2`: an FM2 map's crowd (`<map>/crowd` for the placement, `imported/fm2/crowd` for the shared models, animations and atlas); None = Colorado's.
+    fn load(assets: &Path, post: bool, images: &mut Assets<Image>, materials: &mut Assets<CrowdMaterial>, fm2: Option<&Path>) -> Option<Self> {
+        let (root, dir) = match fm2 {
+            Some(map) => (assets.join("imported/fm2/crowd"), map.join("crowd")),
+            None => (assets.join("crowd"), assets.join("crowd").join("colorado")),
+        };
         let index: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("index.json")).ok()?).ok()?;
         let blob = std::fs::read(dir.join("crowds.bin")).ok()?;
         if blob.get(..8)? != b"FH1CRWD1" {
@@ -343,15 +361,20 @@ impl CrowdWorld {
         let (cw, ch) = (cell[0].as_f64()? as f32, cell[1].as_f64()? as f32);
         let (cols, rows) = (atlas["width"].as_f64()? as f32 / cw, atlas["height"].as_f64()? as f32 / ch);
         let image = srgb(fh1_render::scenery::read_dds(&dir.join(atlas["file"].as_str()?))?);
-        let (sprite_distance, lod_counts) = track_crowd_settings(assets);
-        let near = env("FH1_CROWD_NEAR", sprite_distance);
+        let (sprite_distance, lod_counts) = track_crowd_settings(&match fm2 {
+            Some(map) => map.join("tracks/TrackSettings.xml"),
+            None => assets.join("tracks/colorado/TrackSettings.xml"),
+        });
+        // FM2: the sprite cards use FH1's view layout (3 standing + 6 seated cells), the FM2 atlas has 4 + 4, so the 3D figures cover a long way and the cards only
+        // start far out (`FH1_CROWD_NEAR` overrides).
+        let near = env("FH1_CROWD_NEAR", if fm2.is_some() { 250.0 } else { sprite_distance });
         let heading_sign = env("FH1_CROWD_HEADING_SIGN", 1.0);
         let material = materials.add(CrowdMaterial {
             texture: images.add(image),
             params: CrowdParams {
                 p: Vec4::new(env("FH1_CROWD_BRIGHTNESS", 1.0), 0.5, if post { 1.0 } else { 0.0 }, heading_sign),
                 atlas: Vec4::new(cols, rows, RANGE - 60.0, RANGE),
-                lod: Vec4::new(near, 0.0, 0.0, 0.0),
+                lod: Vec4::new(near, if fm2.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0),
                 light: Vec4::ONE,
             },
         });
@@ -398,6 +421,7 @@ impl CrowdWorld {
             classes,
             models,
             per_model: atlas["per_model"].as_u64().unwrap_or(9) as u32,
+            cells_of: index["models"].as_array().map(|m| m.iter().enumerate().map(|(i, x)| x["cell"].as_u64().map_or(i as u32 * atlas["per_model"].as_u64().unwrap_or(9) as u32, |c| c as u32)).collect()).unwrap_or_default(),
             material,
             loaded: vec![None; n],
             cells: Vec::new(),
@@ -418,10 +442,15 @@ impl CrowdWorld {
             // 2026-10-06). FH1_CROWD_FACING_OLD=1 = the old 0; FH1_CROWD_MODEL_YAW still overrides.
             model_yaw: env("FH1_CROWD_MODEL_YAW", if std::env::var("FH1_CROWD_FACING_OLD").is_ok_and(|v| v == "1") { 0.0 } else { 180.0 }).to_radians(),
             lod_counts,
+            lod_dist: (fm2.is_some() && !std::env::var("FH1_CROWD_LOD_DIST").is_ok_and(|v| v == "0")).then(|| lod_counts.map(|v| v as f32)),
             cut: near,
             meshes: HashMap::new(),
             tables: HashMap::new(),
             textures: HashMap::new(),
+            fm2: fm2.is_some(),
+            fig_tint: crowd_tint_cfg(&index).map_or([0.75; 3], |c| tint_at(&c, c.2)),
+            tint_cfg: crowd_tint_cfg(&index),
+            spawn_tint: 0.0,
             near_loaded: HashMap::new(),
             clips: HashMap::new(),
             bindposes: HashMap::new(),
@@ -449,7 +478,7 @@ impl CrowdWorld {
         // Model: a fixed pick from the class's modelset (the game's random choice is not reproduced).
         let h = (i as u32).wrapping_mul(2_654_435_761) >> 16;
         let model = c.filter(|c| !c.models.is_empty()).map_or(0, |c| c.models[h as usize % c.models.len()]);
-        Spectator { position: Vec3::new(f(0), f(4), f(8)), heading: r[12], class, model }
+        Spectator { position: Vec3::new(f(0), f(4), f(8)), heading: r[12], class, light: r[15], model }
     }
 
     /// One card mesh for objects `objs` (one object, or a P2 cell of them), positions relative to `bounds.min`.
@@ -461,7 +490,7 @@ impl CrowdWorld {
             let s = self.spectator(i);
             let p = s.position - bounds.min;
             let sitting = self.classes.get(s.class as usize).is_some_and(|c| c.sitting);
-            let cell = (s.model * self.per_model) as f32;
+            let cell = self.cell_of(s.model) as f32;
             // w = 1: a 3D model replaces the card within `near`.
             let modelled = self.near > 0.0 && self.has_model(&s);
             let d = [s.heading as f32 / 256.0 * std::f32::consts::TAU, cell, if sitting { 1.0 } else { 0.0 }, if modelled { 1.0 } else { 0.0 }];
@@ -576,7 +605,7 @@ impl CrowdWorld {
             return Some(m.clone());
         }
         let img = srgb(fh1_render::scenery::read_dds(&self.dir.join("textures").join(format!("{name}.dds")))?);
-        let base = StandardMaterial { base_color_texture: Some(images.add(img)), perceptual_roughness: 0.9, alpha_mode: AlphaMode::Mask(0.5), double_sided: true, cull_mode: None, ..default() };
+        let base = StandardMaterial { base_color_texture: Some(images.add(img)), perceptual_roughness: 0.9, alpha_mode: AlphaMode::Mask(0.5), double_sided: true, cull_mode: None, unlit: self.fm2, base_color: if self.fm2 { Color::srgb(self.fig_tint[0], self.fig_tint[1], self.fig_tint[2]) } else { Color::WHITE }, ..default() };
         let m = if self.post { MaterialHandle::Raw(raw.add(FxRawStandard { base, extension: FxRawOutput {} })) } else { MaterialHandle::Standard(std_mats.add(base)) };
         self.textures.insert(name.to_owned(), m.clone());
         Some(m)
@@ -690,6 +719,7 @@ fn stream(
     mut tried: Local<Option<u32>>,
     (garage, generation): (Res<crate::Garage>, Res<crate::ui::world_load::WorldGeneration>),
     scenery: Option<Res<crate::scenery::Scenery>>,
+    track: Option<Res<crate::track::Track>>,
     post: Option<Res<fh1_render::postfx::FxPostConfig>>,
     (cameras, suns, ambient, remaster): (
         Query<(&GlobalTransform, Option<&bevy::camera::Exposure>), With<fh1_render::post::FxPostCamera>>,
@@ -712,8 +742,9 @@ fn stream(
     mut ab: Local<Option<Option<CrowdAb>>>,
 ) {
     let ab = ab.get_or_insert_with(|| std::env::var("FH1_CROWD_AB").is_ok_and(|v| v == "1").then(CrowdAb::default));
-    // Colorado only (the scenery resource exists when the track has a converted world; FH2's Anthem has no crowd data).
-    if !scenery.as_ref().is_some_and(|s| s.colorado) {
+    // Colorado, and the FM2 maps (their placement is `imported/fm2/<map>/crowd`, importer fm2_crowd.rs); FH2's Anthem has no crowd data.
+    let fm2_map = track.as_ref().filter(|t| t.id.starts_with("fm2/")).and_then(|t| crate::track::native_track_dir(&garage.assets, &t.id));
+    if !scenery.as_ref().is_some_and(|s| s.colorado) && fm2_map.is_none() {
         return;
     }
     if *tried != Some(generation.0) {
@@ -725,7 +756,7 @@ fn stream(
         }
         // The FH1 post chain (sqrt-encoded output) runs only in the faithful renderer; FxPostConfig also exists in the
         // remaster, whose figures then came out sqrt-brightened (pale at night).
-        *world = CrowdWorld::load(&garage.assets, post.is_some() && !fh1_remaster::enabled(), &mut images, &mut materials);
+        *world = CrowdWorld::load(&garage.assets, post.is_some() && !fh1_remaster::enabled(), &mut images, &mut materials, fm2_map.as_deref());
         if world.is_none() {
             info!("crowd: not installed (run fh1setup --only crowd)");
         }
@@ -854,25 +885,31 @@ fn stream(
         return;
     }
     let mut near: Vec<(f32, usize)> = Vec::new();
-    for o in w.objects.iter().filter(|o| distance(o, here) <= w.near) {
+    let reach = w.lod_dist.map_or(w.near, |l| l[3].min(w.near));
+    for o in w.objects.iter().filter(|o| distance(o, here) <= reach) {
         for i in o.first..o.first + o.count {
             let s = w.spectator(i);
             let d = s.position.distance(here);
-            if d <= w.near && w.has_model(&s) {
+            if d <= reach && w.has_model(&s) {
                 near.push((d, i));
             }
         }
     }
     near.sort_by(|a, b| a.0.total_cmp(&b.0));
     // P17-A: the quality preset thins the 3D figures (the nearest keep their LODs; the cards start at the new cut).
-    let cap = (w.lod_counts.iter().sum::<usize>() as f32 * fh1_render::quality::crowd_density()).round() as usize;
-    let cut = if near.len() > cap { near[cap].0 } else { w.near };
+    let base_cap = if w.lod_dist.is_some() { std::env::var("FH1_CROWD_FIG_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(600usize) } else { w.lod_counts.iter().sum::<usize>() };
+    let cap = (base_cap as f32 * fh1_render::quality::crowd_density()).round() as usize;
+    let cut = if near.len() > cap { near[cap].0 } else { reach };
     near.truncate(cap);
     if (cut - w.cut).abs() > 0.25 {
         w.cut = cut;
         if let Some(mut m) = materials.get_mut(&w.material) {
             m.params.lod.x = cut;
         }
+    }
+    if std::env::var_os("FH1_CROWD_LOG").is_some() && (time.elapsed_secs() as u32) % 5 == 0 && (time.elapsed_secs().fract() < 0.05) {
+        let staff = w.near_loaded.keys().filter(|&&i| w.spectator(i).class >= 3).count();
+        info!("crowd: camera {:?}: {} spectators with a model within {} m, {} figures loaded ({} photographers / marshals / pit workers), card cut {:.0} m", here, near.len(), w.near, w.near_loaded.len(), staff, w.cut);
     }
     let rank: HashMap<usize, usize> = near.iter().enumerate().map(|(r, &(_, i))| (i, r)).collect();
     let gone: Vec<usize> = w.near_loaded.keys().copied().filter(|i| !rank.contains_key(i)).collect();
@@ -884,8 +921,12 @@ fn stream(
     // New 3D figures per frame (P5b): arriving at the festival spawned the whole cap (each ~36 entities with its joints)
     // in one frame. Nearest first, so the closest appear first. FH1_CROWD_SPAWNS=0 = unlimited (old).
     let mut spawn_left = crowd_spawns_per_frame();
-    for (r, &(_, i)) in near.iter().enumerate() {
-        let Some(lod) = w.lod_for_rank(r) else { continue };
+    for (r, &(d, i)) in near.iter().enumerate() {
+        let lod = match w.lod_dist {
+            Some(l) => l.iter().position(|&m| d <= m),
+            None => w.lod_for_rank(r),
+        };
+        let Some(lod) = lod else { continue };
         if let Some(f) = w.near_loaded.get(&i) {
             // Moved to another LOD band: swap the body's mesh.
             if f.lod != lod {
@@ -913,8 +954,20 @@ fn stream(
             let yaw = (-facing.x).atan2(-facing.z) + w.model_yaw;
             let t = Transform::from_translation(s.position).with_rotation(Quat::from_rotation_y(yaw));
             let mut a3 = Assets3d { meshes: &mut meshes, images: &mut images, raw: &mut raw, std_mats: &mut std_mats, bindposes: &mut bindposes, buffers: &mut buffers, fig_mats: &mut fig_mats };
-            let Some(f) = w.spawn_figure(&mut commands, &mut a3, i as u32, s.class, s.model, lod, t) else { continue };
+            w.spawn_tint = w.tint_ratio(s.light);
+            let spawned = w.spawn_figure(&mut commands, &mut a3, i as u32, s.class, s.model, lod, t);
+            w.spawn_tint = 0.0;
+            let Some(f) = spawned else {
+                static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    warn!("crowd: a figure could not be spawned (class {}, model {}, LOD {lod})", s.class, s.model);
+                }
+                continue;
+            };
             set_figure_shadow(&mut commands, f.body, lod);
+            if w.near_loaded.len() < 3 {
+                info!("crowd: figure {} ({}) at {:?}, {:.0} m from the camera at {:?}, LOD {lod}", i, f.name, s.position, s.position.distance(here), here);
+            }
             w.near_loaded.insert(i, f);
         }
     }
@@ -1134,7 +1187,7 @@ fn stream_walkers_merged(commands: &mut Commands, w: &mut CrowdWorld, here: Vec3
             let heading = if moving { tan[0].atan2(-tan[2]) / sign } else { 0.0 };
             for _ in 0..4 {
                 pos.push(at.to_array());
-                data.push([heading, (wk.model * per_model) as f32, 0.0, 1.0]);
+                data.push([heading, w.cell_of(wk.model) as f32, 0.0, 1.0]);
             }
             let dist = Vec2::new(at.x - here.x, at.z - here.z).length();
             let t = Transform::from_translation(at).with_rotation(if moving { Quat::from_rotation_y((-tan[0]).atan2(-tan[2])) } else { Quat::IDENTITY } * turn);
@@ -1193,14 +1246,19 @@ fn stream_walkers_merged(commands: &mut Commands, w: &mut CrowdWorld, here: Vec3
 }
 
 impl CrowdWorld {
+    /// First atlas cell of an atlas model.
+    fn cell_of(&self, model: u32) -> u32 {
+        self.cells_of.get(model as usize).copied().unwrap_or(model * self.per_model)
+    }
+
     /// A standing card at the local origin for atlas model `model`, heading 0, replaced by the 3D figure
     /// within `near` (data.w = 1).
     fn walker_card(&mut self, model: u32, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
-        let per_model = self.per_model;
+        let first_cell = self.cell_of(model);
         self.walker_cards
             .entry(model)
             .or_insert_with(|| {
-                let d = [0.0, (model * per_model) as f32, 0.0, 1.0];
+                let d = [0.0, first_cell as f32, 0.0, 1.0];
                 let w = CARD_W * 0.5;
                 let (mut pos, mut uv, mut corner, mut data) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
                 for (cr, u) in [([-w, FOOT], [0.0, 1.0]), ([w, FOOT], [1.0, 1.0]), ([w, FOOT + CARD_H], [1.0, 0.0]), ([-w, FOOT + CARD_H], [0.0, 0.0])] {
@@ -1223,8 +1281,8 @@ impl CrowdWorld {
 
 /// SpriteDistance and the lod0..lod3 model counts from the installed `tracks/colorado/TrackSettings.xml`
 /// `<Crowds>` element (Colorado: 60 m, 5 / 20 / 50 / 125), else the built-in Colorado values.
-fn track_crowd_settings(assets: &Path) -> (f32, [usize; 4]) {
-    let xml = std::fs::read_to_string(assets.join("tracks/colorado/TrackSettings.xml")).unwrap_or_default();
+fn track_crowd_settings(settings: &Path) -> (f32, [usize; 4]) {
+    let xml = std::fs::read_to_string(settings).unwrap_or_default();
     let Some(el) = xml.find("<Crowds ").map(|p| &xml[p..p + xml[p..].find('>').unwrap_or(0)]) else {
         return (SPRITE_DISTANCE, LOD_COUNTS);
     };
@@ -1234,4 +1292,32 @@ fn track_crowd_settings(assets: &Path) -> (f32, [usize; 4]) {
     };
     let lods = [0, 1, 2, 3].map(|k| attr(&format!("lod{k}")).map_or(LOD_COUNTS[k], |v| v.max(0.0) as usize));
     (attr("SpriteDistance").unwrap_or(SPRITE_DISTANCE), lods)
+}
+
+/// `index.json` `tint` (written by `import-fm2`): the map's `<Crowds>` (dark, light, mean light byte / 255). `FH1_CROWD_TINT=0` = none (the old flat 0.75).
+fn crowd_tint_cfg(index: &serde_json::Value) -> Option<([f32; 3], [f32; 3], f32)> {
+    if std::env::var("FH1_CROWD_TINT").is_ok_and(|v| v == "0") {
+        return None;
+    }
+    let t = index.get("tint")?;
+    let mean = t["mean"].as_f64()? as f32;
+    let c = |k: &str| -> Option<[f32; 3]> { Some([0, 1, 2].map(|i| t[k][i].as_f64().unwrap_or(f64::NAN) as f32)).filter(|v| v.iter().all(|x| x.is_finite())) };
+    let cfg = (c("dark")?, c("light")?, mean);
+    info!("crowd: figure tint {:.3?} (Crowds dark/light at mean light byte {mean:.3})", tint_at(&cfg, mean));
+    Some(cfg)
+}
+
+/// lerp(dark, light, t) per channel.
+fn tint_at(c: &([f32; 3], [f32; 3], f32), t: f32) -> [f32; 3] {
+    [0, 1, 2].map(|i| c.0[i] + (c.1[i] - c.0[i]) * t)
+}
+
+impl CrowdWorld {
+    /// The shader's multiplier for one spectator's light byte: the tint at that byte over the tint at the map's mean (the material already carries the mean). 0 = no per-figure tint.
+    fn tint_ratio(&self, byte: u8) -> f32 {
+        let Some(c) = self.tint_cfg.as_ref() else { return 0.0 };
+        let lum = |v: [f32; 3]| 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+        let (at, mean) = (lum(tint_at(c, byte as f32 / 255.0)), lum(tint_at(c, c.2)));
+        if mean > 1e-4 { at / mean } else { 0.0 }
+    }
 }

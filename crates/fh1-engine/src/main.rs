@@ -141,6 +141,15 @@ fn main() -> AppExit {
     // First of all, single-threaded: settings.json `flags` values become FH1_* environment variables (unless the real
     // environment already sets them) and the documented section is rewritten (flags.rs). Everything below may read them.
     flags::apply_startup();
+    // FM2 car look (inferred from the Xenia shots, MODLOG 45 / 46 / 52): set before any plugin reads its environment (the car probe is read at
+    // plugin build). An FM2 circuit is on the command line as `--track fm2/<id>`; the launcher's own choice sets the same later (below).
+    if std::env::args().any(|a| a.starts_with("fm2/")) {
+        for (k, v) in [("FH1_RM_TAIL_FLOOR", "0.002"), ("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "0.7"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3"), ("FH1_FM2_SAT", "1.5")] {
+            if std::env::var_os(k).is_none() {
+                std::env::set_var(k, v);
+            }
+        }
+    }
     // Before anything logs: stdout/stderr through a buffered pipe so no game thread waits on the log file (logpipe.rs).
     logpipe::install();
     let mut data_dir = PathBuf::from("data");
@@ -284,20 +293,111 @@ fn main() -> AppExit {
         std::env::set_var("FH1_RM_FM2_SHADOW_GAME", "1");
         // An explicit FH1_RM_FM2_SHADOW_COL (tests) wins over the track's value.
         if std::env::var_os("FH1_RM_FM2_SHADOW_COL").is_none() {
+            // INFERRED: the car shadow decal multiplies the ground by ShadowColor on top of the scenery shadow that already carries it, so the
+            // darkest part of the car shadow is ShadowColor squared (Test Track: 0.31^2 = 0.096 puts the right road band at 32 against Xenia 33;
+            // 0.31 left it at 60). `FH1_FM2_SHADOW_SQ=0` = the plain ShadowColor.
             std::env::set_var("FH1_RM_FM2_SHADOW_COL", format!("{c:.4}"));
+            if std::env::var_os("FH1_RM_FM2_PROJ_COL").is_none() {
+                let p = if std::env::var("FH1_FM2_SHADOW_SQ").is_ok_and(|v| v == "1") { c * c } else { c };
+                std::env::set_var("FH1_RM_FM2_PROJ_COL", format!("{p:.4}"));
+            }
         }
         bevy::log::info!("FH1_FM2_SHADOW_GAME: ShadowColor {c}");
+        // INFERRED per circuit: Test Track's car shadow on the road reads ShadowColor in display (gamma) space against the lit road, 0.31 of it, which
+        // is a linear ratio of 0.31^2.2; the engine's linear pipeline gave 0.26 / 0.7. `FH1_RM_FM2_SHADOW_GAMMA=2.2` fixes that (near-car band
+        // 0.0196 / 0.0141 against Xenia 0.0151 / 0.0148, road-band right ratio 3.86 -> 1.21) but made the other eleven circuits worse (twelve-track
+        // sum 8.51 -> 10.76), so only Test Track gets it (MODLOG 79).
+        // INFERRED per circuit (not game data: the game's `skyGain` and tone curves do not explain it, MODLOG 90): the mean display brightness of a sky patch,
+        // Xenia / ours, measured on the twelve shots; the dome texture is multiplied by that ratio^2.2 (linear). `FH1_FM2_SKY_GAIN` overrides, 1 = off.
+        if std::env::var_os("FH1_FM2_SKY_GAIN").is_none() {
+            let ratio = [("tsukuba", 1.55), ("sunsetinfield", 1.06), ("silverstone", 0.91), ("sebring", 0.96), ("nurburgring", 1.26), ("mugello", 1.40), ("maplevalley", 0.85), ("lagunaseca", 0.82), ("suzuka", 1.20)];
+            if let Some((_, r)) = ratio.iter().find(|(n, _)| track.id.starts_with(&format!("fm2/{n}"))) {
+                std::env::set_var("FH1_FM2_SKY_GAIN", format!("{:.3}", f32::powf(*r, 2.2).min(2.0)));
+            }
+        }
+        if track.id.starts_with("fm2/testtrackinfield") && std::env::var_os("FH1_RM_FM2_SHADOW_GAMMA").is_none() {
+            std::env::set_var("FH1_RM_FM2_SHADOW_GAMMA", "2.2");
+        }
     }
     // FH1_FM2_POST=1: FM2's own final combine (desaturate, tint, tone curve from the track's TrackSettings.xml) replaces the grade for FM2 tracks
     // (post.rs `Fm2Post`; STATUS.md). Off by default.
-    if track.id.starts_with("fm2/") && std::env::var_os("FH1_FM2_POST").is_some() {
+    if track.id.starts_with("fm2/") && std::env::var("FH1_FM2_POST").map_or(true, |v| v != "0") {
         let xml = track::native_track_dir(&assets, &track.id).and_then(|d| std::fs::read_to_string(d.join("tracks/TrackSettings.xml")).ok());
         match xml.as_deref().and_then(fh1_remaster::post::Fm2Post::from_xml) {
-            Some(p) => {
+            Some(mut p) => {
+                // INFERRED (not read from the game): the curve blend t per circuit, the best of {computed, 0, 0.5, 1} against the twelve Xenia shots
+                // (road bands, `data/work/cmp12.py`; sum |ln ratio| 10.94 -> 8.35). The game's own t needs its scene-average units, which we lack.
+                // `FH1_FM2_POST_T` still overrides.
+                if std::env::var_os("FH1_FM2_POST_T").is_none() {
+                    let t = match track.id.trim_start_matches("fm2/").split('_').next().unwrap_or("") {
+                        "tsukuba" | "testtrackinfield" | "lagunaseca" => 1.0,
+                        "silverstone" | "sebring" | "roadatlanta" | "newyork" => 0.0,
+                        "mugello" => 0.5,
+                        _ => -1.0,
+                    };
+                    p.t = t;
+                }
                 bevy::log::info!("FH1_FM2_POST: {p:?}");
                 app.insert_resource(p);
             }
             None => bevy::log::warn!("FH1_FM2_POST: no usable TrackSettings.xml for {}", track.id),
+        }
+    }
+    // FM2's tail lamps read bright red in daylight in the Xenia shots (inferred floor for the lamp level; the lamp code only lights them with the brakes / headlights).
+    // 0.002 (was 0.01): the lamps' red read (234,5,5) against Xenia (134,32,28); at 0.002 it is (127,9,10) on Tsukuba (MODLOG 84).
+    if track.id.starts_with("fm2/") && std::env::var_os("FH1_RM_TAIL_FLOOR").is_none() {
+        std::env::set_var("FH1_RM_TAIL_FLOOR", "0.002");
+    }
+    // INFERRED (0.06, MODLOG 95): the floor at 0.06 keeps the colour of lightmap-dark surfaces (New York's banner stays red, unlike 0) and sits nearer Xenia's
+    // darks than 0.12 (banner (73,20,30) against Xenia (47,8,10), (101,28,39) at 0.12); road bands 6.44 / 6.46.
+    if track.id.starts_with("fm2/") && std::env::var_os("FH1_RM_LM_LIGHT_FLOOR").is_none() {
+        std::env::set_var("FH1_RM_LM_LIGHT_FLOOR", "0.06");
+    }
+    // (The lightmap light floor stays at 0.12: 0 improved the luminance percentiles (MODLOG 84) but turned every lightmap-dark surface blue (New York's
+    // red NISSAN banner went from (101,27,39) to (7,9,37), Xenia (47,8,10)): the floor is what keeps their own colour.)
+    // Inferred from the Xenia shots (Tsukuba): with the final combine on, the car's paint reads paler than Xenia's navy at the default fill and
+    // the lamps glow too wide; fill 0.4 and lamp level 5000 nits are closer.
+    if track.id.starts_with("fm2/") {
+        for (k, v) in [("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "0.7"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3")] {
+            if std::env::var_os(k).is_none() {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+    // The FM2 circuit's own car cube map (importer: `imported/fm2/<map>/car_cube_full.bin`, 6 x 256 x 256 RGBA8, the game's coded colour: the shader
+    // squares the fetch) is what the car paint reflects, as a real cube texture. `FH1_FM2_CAR_REFL=0` turns it off. Without that file (an older
+    // import) the 16 x 16 `car_cube.bin` is expanded to the same format.
+    if track.id.starts_with("fm2/") {
+        let dir = track::native_track_dir(&assets, &track.id);
+        // `FH1_FM2_CUBE_SMALL=1` forces the reduced 16 x 16 cube (the old resolution, for A/B).
+        let full = dir.as_ref().filter(|_| std::env::var_os("FH1_FM2_CUBE_SMALL").is_none()).and_then(|d| std::fs::read(d.join("car_cube_full.bin")).ok()).or_else(|| {
+            let b = std::fs::read(dir.as_ref()?.join("car_cube.bin")).ok().filter(|b| b.len() == 6 * 16 * 16 * 3)?;
+            let mut out = Vec::with_capacity(8 + 6 * 16 * 16 * 4);
+            out.extend(16u32.to_le_bytes());
+            out.extend(16u32.to_le_bytes());
+            for c in b.chunks_exact(3) {
+                out.extend([c[0], c[1], c[2], 255]);
+            }
+            Some(out)
+        });
+        if let Some(bin) = full {
+            fh1_remaster::car_paint::set_cube(bin);
+        }
+    }
+    // The track's `<SHLighting>` colours for the FM2 car light (fh1-remaster car_prt.rs, `FH1_FM2_CAR_PRT=1`).
+    if track.id.starts_with("fm2/") {
+        let sh = track::native_track_dir(&assets, &track.id).and_then(|d| std::fs::read_to_string(d.join("tracks/TrackSettings.xml")).ok()).and_then(|x| {
+            let i = x.find("<SHLighting ")?;
+            let t = &x[i..i + x[i..].find('>')?];
+            let f = |k: &str| -> Option<f32> {
+                let j = t.find(&format!("{k}=\""))? + k.len() + 2;
+                t[j..].split('"').next()?.parse().ok()
+            };
+            let rgb = |p: &str| Some([f(&format!("{p}Red"))?, f(&format!("{p}Green"))?, f(&format!("{p}Blue"))?]);
+            Some(fh1_remaster::car_prt::TrackSh { top: rgb("SHTop")?, bottom: rgb("SHBottom")?, dir: rgb("SHDir")?, env_top: f("SHEnvMapTop")?, env_bottom: f("SHEnvMapBottom")? })
+        });
+        if let Some(sh) = sh {
+            fh1_remaster::car_prt::set_track_sh(sh);
         }
     }
     // FM2's own painted sky replaces Colorado's procedural one.
@@ -323,6 +423,12 @@ fn main() -> AppExit {
                     for sec in ["FollowLowCam", "FollowHighCam"] {
                         camera_data.settings.values.insert(format!("{sec}\\FOV"), f);
                     }
+                }
+                if std::env::var_os("FH1_FM2_CAM_DH").is_none() {
+                    std::env::set_var("FH1_FM2_CAM_DH", "0.08");
+                }
+                if std::env::var_os("FH1_FM2_CAM_DT").is_none() {
+                    std::env::set_var("FH1_FM2_CAM_DT", "0.06");
                 }
                 bevy::log::info!("FH1_FM2_CAMERA: FM2 follow-camera settings loaded (Low FOV {:?})", camera_data.settings.get("FollowLowCam\\FOV"));
             }
@@ -850,7 +956,7 @@ fn autotest(mut commands: Commands, time: Res<Time<Real>>, mut done: Local<u8>, 
 /// `FH1_SHOT_PROBE=1` (with FH1_SHOT): at the screenshot time, logs the world points (collision ground hits) under a grid of
 /// points in the comparison bands of `data/work/cmp_bands.py` (left: x 8..30 %, y 78..94 %; right: x 66..78 %, y 78..88 %), so the
 /// importer can evaluate the draws' shaders at exactly those spots (`FM2_PROBE_AT`).
-fn shot_probe(time: Res<Time<Real>>, track: Res<Track>, cams: Query<(&Camera, &GlobalTransform), With<Camera3d>>, mut done: Local<bool>) {
+fn shot_probe(time: Res<Time<Real>>, track: Res<Track>, sky: Option<Res<fm2_sky::Fm2Sky>>, cams: Query<(&Camera, &GlobalTransform), With<Camera3d>>, mut done: Local<bool>) {
     if *done || std::env::var_os("FH1_SHOT_PROBE").is_none() {
         return;
     }
@@ -862,6 +968,23 @@ fn shot_probe(time: Res<Time<Real>>, track: Res<Track>, cams: Query<(&Camera, &G
     // The main 3D camera: the active one with the lowest order.
     let Some((cam, gt)) = cams.iter().filter(|(c, _)| c.is_active).min_by_key(|(c, _)| c.order) else { return };
     let Some(size) = cam.logical_viewport_size() else { return };
+    // The sun disc and the glow card's centre on the 1280 x 720 picture (the sky dome sits on the camera), with the camera's forward vector.
+    if let Some(sky) = sky.as_ref() {
+        let pos = gt.translation();
+        let at = |off: Option<Vec3>| off.and_then(|o| cam.world_to_viewport(gt, pos + o).ok()).map(|p| (p * Vec2::new(1280.0, 720.0) / size).round());
+        info!("shot probe sun: disc px {:?} glow px {:?} camera forward {:?}", at(sky.sun_offset()), at(sky.glow_offset()), gt.forward().to_array().map(|v| (v * 1000.0).round() / 1000.0));
+    }
+    // `FH1_SHOT_PROBE_PX=x,y;x,y` (screen pixels of the 1280 x 720 picture): the ground point under each.
+    if let Ok(list) = std::env::var("FH1_SHOT_PROBE_PX") {
+        for px in list.split(';') {
+            let v: Vec<f32> = px.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+            if v.len() == 2 {
+                let s = Vec2::new(v[0], v[1]) * size / Vec2::new(1280.0, 720.0);
+                let hit = cam.viewport_to_world(gt, s).ok().and_then(|ray| track.ground.ray(ray.origin, *ray.direction, 800.0));
+                info!("shot probe px {},{}: {:?}", v[0], v[1], hit.map(|h| [h.point.x, h.point.y, h.point.z]));
+            }
+        }
+    }
     for (name, (x0, x1, y0, y1)) in [("left", (0.08f32, 0.30f32, 0.78f32, 0.94f32)), ("right", (0.66, 0.78, 0.78, 0.88))] {
         let mut pts = Vec::new();
         for i in 0..3 {

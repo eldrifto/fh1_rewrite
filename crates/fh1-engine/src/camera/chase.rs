@@ -242,7 +242,11 @@ pub(super) fn update(ct: &mut Transform, pose: &CarPose, car: &CarInputs, rig: &
 
     let mut eye = position + back * radius;
     eye.y = position.y + st.height_offset + st.height;
-    let target = position + Vec3::Y * (top + st.target_y_offset);
+    // `FH1_FM2_CAM_DH` (m, the engine sets 0.08 on FM2 circuits): the eye sits this much lower. The new Xenia shots (car standing on the spawn point) have
+    // every scene 18 px lower in the picture than ours on all twelve tracks (cross-correlation of the upper picture, 16 to 20 px; the car itself is
+    // within 5 px); a lower eye looks down less, which moves the scenery down by about that much (about 116 px per metre; the car moves the other way, about -68 px per metre).
+    eye.y -= fm2_cam_dh();
+    let target = position + Vec3::Y * (top + st.target_y_offset + fm2_cam_dt());
     // Collision (0x8284E1E0; FollowCam\EnableCollision, default true): sweep from the look target to the camera
     // and stop short of the first hit (the game's sweep object isn't decoded; INFERRED 0.3 m margin). The
     // EnableCollision=false path is a ground probe: camera >= ground + 0.3 m.
@@ -284,6 +288,18 @@ pub(super) fn update(ct: &mut Transform, pose: &CarPose, car: &CarInputs, rig: &
         ));
     }
     fov + fx.fov
+}
+
+/// `FH1_FM2_CAM_DT` (m, the engine sets 0.06 on FM2 circuits): the look target sits this much higher (moves the scenery and the car down together; with the
+/// lower eye it places both on the Xenia picture: eye -0.08 m moves the scene +9 px and the car -5 px, the target +0.06 m moves both +9 px).
+fn fm2_cam_dt() -> f32 {
+    static DT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *DT.get_or_init(|| std::env::var("FH1_FM2_CAM_DT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0))
+}
+
+fn fm2_cam_dh() -> f32 {
+    static DH: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *DH.get_or_init(|| std::env::var("FH1_FM2_CAM_DH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0))
 }
 
 /// How much of the FOV dolly applies (radius scaled by the tan ratio^strength). 1 keeps the car's screen size while the

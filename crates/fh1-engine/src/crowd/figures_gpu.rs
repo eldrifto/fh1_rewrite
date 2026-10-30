@@ -50,6 +50,9 @@ impl MaterialExtension for CrowdSkin {
     fn vertex_shader() -> ShaderRef {
         "embedded://fh1_engine/crowd_skin.wgsl".into()
     }
+    fn fragment_shader() -> ShaderRef {
+        "embedded://fh1_engine/crowd_skin_frag.wgsl".into()
+    }
     fn prepass_vertex_shader() -> ShaderRef {
         "embedded://fh1_engine/crowd_skin_prepass.wgsl".into()
     }
@@ -100,6 +103,8 @@ struct Slot {
     /// The entity has existed (spawn commands apply after the frame's update): free the slot once it's gone.
     seen: bool,
     bones: u32,
+    /// Per-figure tint ratio for the shader (0 = none).
+    tint: f32,
     cur: (BakedClip, f32),
     next: Option<(ClipArc, BakedClip, f32)>,
 }
@@ -203,7 +208,7 @@ impl GpuFigures {
                     [
                         [c.first as f32, c.frames as f32, c.frame_time, start],
                         [n[0], n[1], n[2], ns],
-                        [s.bones as f32, c.duration, nd, 0.0],
+                        [s.bones as f32, c.duration, nd, s.tint],
                     ]
                 }
                 None => [[0.0; 4]; 3],
@@ -274,8 +279,15 @@ impl GpuFigures {
     }
 }
 
+/// The matrix buffer is allocated at this many bytes up front and rewritten in place (`FH1_CROWD_MATS_MB`, default 16): when it grew with every newly baked
+/// clip the GPU buffer was re-created and materials created before the growth kept the old, too-short one (figures read zeros and vanished).
 fn bytes(v: &[[f32; 4]]) -> Vec<u8> {
-    v.iter().flatten().flat_map(|x| x.to_le_bytes()).collect()
+    let cap = std::env::var("FH1_CROWD_MATS_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(16) << 20;
+    let mut out: Vec<u8> = v.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
+    if out.len() < cap {
+        out.resize(cap, 0);
+    }
+    out
 }
 
 impl CrowdWorld {
@@ -311,7 +323,7 @@ impl CrowdWorld {
         }
         let (mats, figs) = self.gpu_fig.buffers(a.buffers);
         let img = srgb(fh1_render::scenery::read_dds(&self.dir.join("textures").join(format!("{tex}.dds")))?);
-        let base = StandardMaterial { base_color_texture: Some(a.images.add(img)), perceptual_roughness: 0.9, alpha_mode: AlphaMode::Mask(0.5), double_sided: true, cull_mode: None, ..default() };
+        let base = StandardMaterial { base_color_texture: Some(a.images.add(img)), perceptual_roughness: 0.9, alpha_mode: AlphaMode::Mask(0.5), double_sided: true, cull_mode: None, unlit: self.fm2, base_color: if self.fm2 { Color::srgb(self.fig_tint[0], self.fig_tint[1], self.fig_tint[2]) } else { Color::WHITE }, ..default() };
         let m = a.fig_mats.add(ExtendedMaterial { base, extension: CrowdSkin { mats, figs } });
         self.gpu_fig.materials.insert(tex.to_owned(), m.clone());
         Some(m)
@@ -336,7 +348,7 @@ impl CrowdWorld {
         let phase = (h >> 8) as f32 / (1u32 << 24) as f32 * baked.duration.max(0.01);
         let now = self.gpu_now;
         let root = commands.spawn((Mesh3d(mesh), MeshMaterial3d(mat), t, MeshTag(k as u32), GpuFigure, crate::ui::world_load::WorldEntity)).id();
-        self.gpu_fig.slots[k] = Some(Slot { entity: root, table, rng: h, seen: false, bones: clip.0.bones.len() as u32, cur: (baked, wrap(now - phase)), next: None });
+        self.gpu_fig.slots[k] = Some(Slot { entity: root, table, rng: h, seen: false, bones: clip.0.bones.len() as u32, tint: std::mem::take(&mut self.spawn_tint), cur: (baked, wrap(now - phase)), next: None });
         self.gpu_fig.figs_dirty = true;
         // A new figure must be in the buffer before it draws: write now.
         self.gpu_fig.last_write = now - WRITE_EVERY;

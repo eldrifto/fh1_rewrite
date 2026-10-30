@@ -184,7 +184,11 @@ pub fn fm2_lighting(t: &mut fh1_render::lighting::FxTimeOfDay, assets: &Path, id
         Some([g("r")?, g("g")?, g("b")?])
     };
     if std::env::var("FH1_FM2_COLOURS").map_or(true, |v| v != "0") {
-        if let Some(c) = rgb(&xml, "<LightColor") {
+        if let Some(mut c) = rgb(&xml, "<LightColor") {
+            // `FH1_FM2_SUN_WHITE=1` (experiment): the scenery shaders' light colour register c102 is (1, 1, 1) on every track (STATUS), not `LightColor`.
+            if std::env::var_os("FH1_FM2_SUN_WHITE").is_some() {
+                c = [1.0; 3];
+            }
             t.tod.channels.insert("SunColor".into(), fh1_render::tod::Curve { keys: vec![(0.0, c)] });
             t.tod.channels.insert("SunColorMult".into(), fh1_render::tod::Curve { keys: vec![(0.0, [1.0; 3])] });
         }
@@ -211,7 +215,39 @@ pub fn fm2_lighting(t: &mut fh1_render::lighting::FxTimeOfDay, assets: &Path, id
         }
     }
     // Towards the sun = against the light's travel; the lighting code mirrors z, so mirror it here too.
-    let toward = [-x, -y, z];
+    // `FH1_FM2_SUN_FIXED=1` (experiment): the game's default light vector (1, -1, 0) when the track's light list holds no directional light (none does: STATUS, end 11).
+    let mut toward = if std::env::var_os("FH1_FM2_SUN_FIXED").is_some() { [-1.0, 1.0, 0.0] } else { [-x, -y, z] };
+    // `FH1_FM2_SUN_SKY=1` (experiment): the direction of the sky model's own sun disc (its untextured sphere draw, centre in the dome frame whose
+    // origin is the camera), z mirrored like the rest of FM2.
+    if std::env::var_os("FH1_FM2_SUN_SKY").is_some() || std::env::var_os("FH1_FM2_PROJ_SKY").is_some() || std::env::var_os("FH1_FM2_PRT_SKY").is_some() {
+        let disc = native_track_dir(assets, id)
+            .and_then(|d| std::fs::read(d.join("scenery/sky.json")).ok())
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| {
+                let draws = v["draws"].as_array()?.clone();
+                let d = draws.iter().skip(1).find(|d| d["textures"].as_array().is_some_and(|t| t.is_empty()) && d["positions"].as_array().is_some_and(|p| p.len() >= 12))?;
+                let pts: Vec<[f64; 3]> = d["positions"].as_array()?.iter().filter_map(|p| Some([p[0].as_f64()?, p[1].as_f64()?, p[2].as_f64()?])).collect();
+                let n = pts.len() as f64;
+                let c = pts.iter().fold([0.0; 3], |a, p| [a[0] + p[0], a[1] + p[1], a[2] + p[2]]);
+                Some([(c[0] / n) as f32, (c[1] / n) as f32, -(c[2] / n) as f32])
+            });
+        if let Some(c) = disc {
+            // `FH1_FM2_PRT_SKY=1` (experiment): the car's light (car_prt.rs) comes from the sky model's sun disc, not the track XML's vector.
+            if std::env::var_os("FH1_FM2_PRT_SKY").is_some() {
+                std::env::set_var("FH1_RM_FM2_PRT_DIR", format!("{:.4},{:.4},{:.4}", c[0], c[1], c[2]));
+            }
+            if std::env::var_os("FH1_FM2_PROJ_SKY").is_some() && std::env::var_os("FH1_RM_FM2_PROJ_DIR").is_none() {
+                std::env::set_var("FH1_RM_FM2_PROJ_DIR", format!("{:.4},{:.4},{:.4}", c[0], c[1], c[2]));
+            }
+            // The road sheen keeps the track's own sun vector (the sky disc moves only the light that casts the shadows and lights the car).
+            if std::env::var_os("FH1_RM_FM2_SHEEN_DIR").is_none() {
+                std::env::set_var("FH1_RM_FM2_SHEEN_DIR", format!("{:.4},{:.4},{:.4}", toward[0], toward[1], toward[2]));
+            }
+            if std::env::var_os("FH1_FM2_SUN_SKY").is_some() {
+                toward = c;
+            }
+        }
+    }
     let n = (toward[0] * toward[0] + toward[1] * toward[1] + toward[2] * toward[2]).sqrt().max(1e-3);
     let pos = [toward[0] / n * 100.0, toward[1] / n * 100.0, toward[2] / n * 100.0];
     for (name, v) in [("SunPos", pos), ("SunObjectPos", pos), ("HazeObjectPos", pos), ("SunTargetPos", [0.0; 3]), ("SunObjectTargetPos", [0.0; 3]), ("HazeObjectTargetPos", [0.0; 3])] {

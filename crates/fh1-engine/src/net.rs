@@ -169,7 +169,7 @@ fn connect(mut session: ResMut<Session>, track: Option<Res<Track>>) {
 
 /// The name on the wire: the launcher's `FH1_NAME`, else the OS user name, else "Driver"; each through the shared name
 /// rule ([`fh1_net::sanitize_name`]: letters, digits, spaces, `- _ . '`, 2..16 characters).
-fn player_name() -> String {
+pub(crate) fn player_name() -> String {
     ["FH1_NAME", "USERNAME", "USER"].iter().find_map(|k| std::env::var(k).ok().and_then(|v| fh1_net::sanitize_name(&v))).unwrap_or_else(|| "Driver".into())
 }
 

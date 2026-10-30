@@ -13,7 +13,8 @@ struct CrowdParams {
     p: vec4<f32>,
     // x = cells per row, y = rows, z = fade start (m), w = fade end (m).
     atlas: vec4<f32>,
-    // x = cards with data.w = 1 vanish within this distance (a 3D model is drawn there instead).
+    // x = cards with data.w = 1 vanish within this distance (a 3D model is drawn there instead), y = 1: FM2's atlas layout (4 views a sheet: side, back, side, front;
+    // seated ones in the next four cells, no mirroring).
     lod: vec4<f32>,
     // rgb = the light on the cards (crowd.rs `card_light`).
     light: vec4<f32>,
@@ -65,7 +66,18 @@ fn vertex(v: In) -> Out {
     let side = facing.x * to_cam.z - facing.z * to_cam.x;
     var cell = 0.0;
     var mirror = side < 0.0;
-    if (v.data.z > 0.5) {
+    if (g.lod.y > 0.5) {
+        // FM2 sheet: cells 0..3 standing (side facing left, back, side facing right, front), 4..7 the same seated.
+        let off = select(0.0, 4.0, v.data.z > 0.5);
+        if (ang < 45.0) {
+            cell = off + 3.0;
+        } else if (ang >= 135.0) {
+            cell = off + 1.0;
+        } else {
+            cell = off + select(0.0, 2.0, side < 0.0);
+        }
+        mirror = false;
+    } else if (v.data.z > 0.5) {
         if (ang < 11.25) {
             cell = 4.0;
         } else if (ang < 101.25) {
