@@ -166,21 +166,21 @@ fn fm2_two_sided() -> u16 {
     if std::env::var_os("FM2_TWO_SIDED").is_some() { FLAG_TWO_SIDED } else { 0 }
 }
 
-/// An FM2 map's lightmap colours: (dark, light) = TrackSettings `DarkColor` / `LightColor`.
-type Fm2Light = ([f32; 3], [f32; 3]);
+/// An FM2 map's light colours: (dark, light, ambient) = TrackSettings `DarkColor` / `LightColor` / `LightAmbient`.
+type Fm2Light = ([f32; 3], [f32; 3], [f32; 3]);
 
-/// `tracks/fx_globals.json` V2LightmapColor1 / 2 of an imported FM2 map; (0.03, 1.3) when missing.
+/// `tracks/fx_globals.json` V2LightmapColor1 / 2 and LightAmbient of an imported FM2 map; (0.03, 1.3, 0.3) when missing.
 fn fm2_light(map: &Path) -> Fm2Light {
     let j: Value = std::fs::read(map.join("tracks/fx_globals.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let get = |k: &str, d: f32| -> [f32; 3] {
         let v = &j["globals"][k];
         [0, 1, 2].map(|i| v[i].as_f64().map(|x| x as f32).unwrap_or(d))
     };
-    (get("V2LightmapColor1", 0.03), get("V2LightmapColor2", 1.3))
+    (get("V2LightmapColor1", 0.03), get("V2LightmapColor2", 1.3), get("LightAmbient", 0.3))
 }
 
 /// The family rules (docs/REMASTER.md "Material rules").
-fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family>, fm4: bool, fm2: Option<Fm2Light>, colour_srgb: bool) -> Record {
+fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family>, fm4: bool, fm2: Option<Fm2Light>, colour_srgb: bool, led: bool) -> Record {
     let c = |k: usize| ps.get(k).copied().unwrap_or([0.0; 4]);
     let one = |v: f32| if v == 0.0 { 1.0 } else { v };
     let mut r = Record {
@@ -296,7 +296,7 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
         r.params[2] = [c(5)[0], c(5)[1], c(5)[2], 0.5];
         r.params[3][0] = c(3)[3];
         // FM2: the lightmap is a second uv pair (set 2, the mask keeps set 1) and is the lighting, as on the diffuse family.
-        if let Some((dark, light)) = fm2 {
+        if let Some((dark, light, _)) = fm2 {
             r.uv_set[LM] = 2;
             r.flags |= FLAG_LM_LIGHT | fm2_two_sided();
             r.params[1] = [dark[0], dark[1], dark[2], 0.0];
@@ -359,7 +359,7 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
         // FM2 (first cut): the tf7 tile is the daytime baked track lightmap that IS the lighting, so the material is drawn
         // unlit and `albedo * (lightmap * gain + bias)` (FLAG_LM_LIGHT), not FM4's occlusion multiply. Set on every FM2
         // diffuse material; the shader only switches when an LM texture is bound.
-        if let Some((dark, light)) = fm2 {
+        if let Some((dark, light, _)) = fm2 {
             r.flags |= FLAG_LM_LIGHT | fm2_two_sided();
             // The map's own lerp(DarkColor, LightColor, lightmap): p1.xyz = dark, p3.yzw = light - dark (both unused by a
             // single-layer diffuse material).
@@ -371,6 +371,22 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
                 r.params[0][1] = sp[0];
             }
         }
+    }
+    // FM2 cut-outs (leaf cards, grass tufts, fences) are drawn two-sided: culled to one side, a leaf card is invisible from behind and canopies thin to bare
+    // poles (Nurburgring). `FM2_CUTOUT_ONE_SIDED=1` = the old one-sided rule.
+    if fm2.is_some() && r.class == Class::Cutout && std::env::var_os("FM2_CUTOUT_ONE_SIDED").is_none() {
+        r.flags |= FLAG_TWO_SIDED;
+    }
+    // FM2 LED / lamp boards (the importer's `led` flag: the pixel shader family whose texture alpha mixes lit and unlit colour, New York's
+    // marquee, the dome lamps, the Forza strips): drawn unlit instead of under the map's lightmap light, which left the lettering dull and the band
+    // brown. The game's shader uses no lightmap: `light = sat(N.L) * (1,1,1) + LightAmbient` (MODLOG 119), so a board facing the sun gets
+    // 1 + the map's `LightAmbient` (mean of r, g, b; New York 1.273, which the old fitted 1.3 approximated). The per-draw N.L is not modelled (the
+    // facing case is used). `FH1_FM2_LED_GAIN=<n>` overrides (1.3 = the old fitted value).
+    if let (Some((_, _, ambient)), true) = (fm2, led) {
+        r.class = Class::Unlit;
+        r.flags &= !FLAG_LM_LIGHT;
+        let facing = 1.0 + (ambient[0] + ambient[1] + ambient[2]) / 3.0;
+        r.params[0][0] *= std::env::var("FH1_FM2_LED_GAIN").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(facing);
     }
     r
 }
@@ -491,7 +507,7 @@ fn build_track(scenery: &Path, track_shaders: &Path, out: &Path, fm4: bool, fm2:
             .map(|v| [0, 1, 2, 3].map(|k| v.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32))
             .collect();
         let textures = m["textures"].as_array().cloned().unwrap_or_default();
-        let r = record(&shader, &ps, &textures, fam.as_ref(), fm4, fm2, m["colour_srgb"].as_bool().unwrap_or(false));
+        let r = record(&shader, &ps, &textures, fam.as_ref(), fm4, fm2, m["colour_srgb"].as_bool().unwrap_or(false), m["led"].as_bool().unwrap_or(false));
         *counts.entry(format!("{:?}", r.class)).or_default() += 1;
         write(&r, &mut bin);
         dumps.push(dump(i, &shader, &r));

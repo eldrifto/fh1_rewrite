@@ -58,7 +58,7 @@ fn code_len(words: &[u32]) -> Option<usize> {
     Some(end * 3)
 }
 
-fn disassemble(words: Vec<u32>, vertex: bool) -> String {
+pub fn disassemble(words: Vec<u32>, vertex: bool) -> String {
     let blob = ShaderBlob {
         stage: if vertex { Stage::Vertex } else { Stage::Pixel },
         file_offset: 0,

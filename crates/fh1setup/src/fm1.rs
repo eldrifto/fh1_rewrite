@@ -348,7 +348,7 @@ fn load_wheels(mega: &[Entry]) -> Vec<WheelMesh> {
         if runs.is_empty() {
             continue;
         }
-        let vertices: Vec<Vertex> = p.vertices.iter().map(|v| Vertex { position: [v.position[0], v.position[1], -v.position[2]], uv: v.uv }).collect();
+        let vertices: Vec<Vertex> = p.vertices.iter().map(|v| Vertex { position: [v.position[0], v.position[1], -v.position[2]], uv: v.uv, tail: [0; 44] }).collect();
         let (mut mn, mut mx) = ([f32::MAX; 3], [f32::MIN; 3]);
         for v in &vertices {
             for k in 0..3 {
@@ -467,7 +467,7 @@ fn stock_parts(car: &fm1::Car, xml: &Value) -> Vec<Part> {
         if runs.is_empty() {
             continue;
         }
-        let vertices = p.vertices.iter().map(|v| Vertex { position: [v.position[0], v.position[1], -v.position[2]], uv: v.uv }).collect();
+        let vertices = p.vertices.iter().map(|v| Vertex { position: [v.position[0], v.position[1], -v.position[2]], uv: v.uv, tail: [0; 44] }).collect();
         out.push(Part { name: p.name.clone(), centre: Some([0.0; 3]), vertices, materials, runs });
     }
     out

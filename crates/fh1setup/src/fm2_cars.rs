@@ -289,7 +289,9 @@ fn build_car(db: &Connection, disc: &Path, donors: &[WheelDonor], car: &Row, med
                         let mut cut = fh1_formats::xds::to_rgba8(&img).unwrap_or_default();
                         for px in cut.chunks_exact_mut(4) {
                             if px[3] < 128 {
-                                px[3] = 0;
+                                // The colour under the cut-out is the atlas's dark filler: mip levels and filtering mix it into the thin letters
+                                // (the GT-R badge drew dark brown); silver there keeps the letters light.
+                                px.copy_from_slice(&[190, 190, 190, 0]);
                             }
                         }
                         crate::model::write_png(&dir.join("emblem.png"), img.width, img.height, &cut)?;
@@ -773,6 +775,8 @@ pub(crate) struct Gltf {
     /// Materials drawn alpha-masked (cut-out textures).
     pub(crate) cutout: std::collections::HashSet<String>,
     pub(crate) triangles: usize,
+    /// Per body part: the 16 precomputed-radiance-transfer numbers of each vertex (the car file's vertex tail, MODLOG 76), written as `prt.bin`.
+    pub(crate) prt: Vec<(String, Vec<[i16; 16]>)>,
 }
 
 impl Gltf {
@@ -884,14 +888,61 @@ impl Gltf {
                 bmax[k] = bmax[k].max(q[k]);
             }
         }
+        // Emblem letters are thin relief: their triangle-averaged normals come out inconsistent (dark letters). They face straight out of the car's
+        // front or rear, so they take that normal (`FM2_EMBLEM_NORMAL=0` = the computed one).
+        if std::env::var("FM2_EMBLEM_NORMAL").map_or(true, |v| v != "0") {
+            for r in runs.iter().filter(|r| p.materials.get(r.material).map(String::as_str) == Some("emblem")) {
+                for &i in &r.indices {
+                    let z = pos[i as usize][2];
+                    if z.abs() > 1.5 {
+                        nrm[i as usize] = [0.0, 0.0, z.signum()];
+                    }
+                }
+            }
+        }
         let bytes = |v: &[[f32; 3]]| -> Vec<u8> { v.iter().flatten().flat_map(|x| x.to_le_bytes()).collect() };
-        let uv: Vec<u8> = p.vertices.iter().flat_map(|v| v.uv).flat_map(|x| x.to_le_bytes()).collect();
+        let uvs: Vec<[f32; 2]> = p.vertices.iter().map(|v| v.uv).collect();
+        // Trim quads of the `badge` material (the trunk strip, the plates behind the badges) give all their vertices one uv, a plain white transparent
+        // texel of the atlas, which a badge draws as a lit white shape; the game shows the body paint there. Such a uv group that is wider than 20 cm
+        // or sits off the centre line (the Nissan ring, in the middle, uses the same texel as its silver) is not drawn at all: it was a flat plate in front of the "SKYLINE" lettering and the body paint (a painted plate showed as a lighter square).
+        let mut paint_tri: Vec<Vec<bool>> = Vec::new();
+        for r in &runs {
+            let mut flags = vec![false; r.indices.len() / 3];
+            if p.materials.get(r.material).map(String::as_str) == Some("badge") {
+                let mut groups: Vec<([f32; 2], f32, f32, Vec<usize>)> = Vec::new();
+                for (ti, t) in r.indices.chunks_exact(3).enumerate() {
+                    let v: Vec<usize> = t.iter().map(|&i| i as usize).collect();
+                    if uvs[v[0]] != uvs[v[1]] || uvs[v[1]] != uvs[v[2]] {
+                        continue;
+                    }
+                    let at = match groups.iter().position(|g| g.0 == uvs[v[0]]) {
+                        Some(k) => k,
+                        None => {
+                            groups.push((uvs[v[0]], f32::MAX, f32::MIN, Vec::new()));
+                            groups.len() - 1
+                        }
+                    };
+                    for &i in &v {
+                        groups[at].1 = groups[at].1.min(pos[i][0]);
+                        groups[at].2 = groups[at].2.max(pos[i][0]);
+                    }
+                    groups[at].3.push(ti);
+                }
+                for g in groups.iter().filter(|g| g.2 - g.1 > 0.2 || ((g.1 + g.2) * 0.5).abs() > 0.1) {
+                    for &ti in &g.3 {
+                        flags[ti] = true;
+                    }
+                }
+            }
+            paint_tri.push(flags);
+        }
+        let uv: Vec<u8> = uvs.iter().flatten().flat_map(|x| x.to_le_bytes()).collect();
         let (vp, vn, vt) = (self.view(&bytes(&pos), Some(34962), None), self.view(&bytes(&nrm), Some(34962), None), self.view(&uv, Some(34962), None));
         let pa = self.accessor(vp, 5126, pos.len(), "VEC3", Some((mn, mx)));
         let na = self.accessor(vn, 5126, pos.len(), "VEC3", None);
         let ta = self.accessor(vt, 5126, pos.len(), "VEC2", None);
         let mut prims = Vec::new();
-        for r in runs {
+        for (ri, r) in runs.into_iter().enumerate() {
             let mut name = p.materials.get(r.material).cloned().unwrap_or_default();
             // Headlight units: the engine's remaster car styling lights materials by name (`head_light` = an emissive lamp, `lights_gls_head`
             // = a cover over one), so the headlight parts' reflector and glass take those names (the tail lamps already are `detail_glass_red`).
@@ -901,17 +952,26 @@ impl Gltf {
             } else if lower.starts_with("glass") && lower.ends_with("hl") && (name == "glass" || name == "detail_glass_clear") {
                 name = "lights_gls_head".into();
             }
-            let idx: Vec<u8> = r
-                .indices
-                .chunks_exact(3)
-                .flat_map(|t| if flip { [t[0], t[2], t[1]] } else { [t[0], t[1], t[2]] })
-                .flat_map(|i| i.to_le_bytes())
-                .collect();
-            let vi = self.view(&idx, Some(34963), None);
-            let ia = self.accessor(vi, 5125, r.indices.len(), "SCALAR", None);
-            self.triangles += r.indices.len() / 3;
-            let m = self.material(&name, paint);
-            prims.push(json!({"attributes": {"POSITION": pa, "NORMAL": na, "TEXCOORD_0": ta}, "indices": ia, "material": m}));
+            for (moved, indices) in [(false, r.indices.chunks_exact(3).enumerate().filter(|(ti, _)| !paint_tri[ri][*ti]).flat_map(|(_, t)| t.iter().copied()).collect::<Vec<u32>>()), (true, r.indices.chunks_exact(3).enumerate().filter(|(ti, _)| paint_tri[ri][*ti]).flat_map(|(_, t)| t.iter().copied()).collect::<Vec<u32>>())] {
+                if indices.is_empty() || moved {
+                    continue;
+                }
+                let idx: Vec<u8> = indices
+                    .chunks_exact(3)
+                    .flat_map(|t| if flip { [t[0], t[2], t[1]] } else { [t[0], t[1], t[2]] })
+                    .flat_map(|i| i.to_le_bytes())
+                    .collect();
+                let vi = self.view(&idx, Some(34963), None);
+                let ia = self.accessor(vi, 5125, indices.len(), "SCALAR", None);
+                self.triangles += indices.len() / 3;
+                let m = self.material(if moved { "body" } else { &name }, paint);
+                prims.push(json!({"attributes": {"POSITION": pa, "NORMAL": na, "TEXCOORD_0": ta}, "indices": ia, "material": m}));
+            }
+        }
+        // The transfer numbers: tail bytes 12..44 of the 60-byte vertex = 16 big-endian i16 (zeros on FM1 cars, which have none: skipped).
+        let prt: Vec<[i16; 16]> = p.vertices.iter().map(|v| std::array::from_fn(|k| i16::from_be_bytes([v.tail[12 + 2 * k], v.tail[13 + 2 * k]]))).collect();
+        if !self.prt.iter().any(|(n, _)| *n == p.name) && prt.iter().any(|t| t.iter().any(|&x| x != 0)) {
+            self.prt.push((p.name.clone(), prt));
         }
         self.meshes.push(json!({"name": p.name, "primitives": prims}));
         Some(self.meshes.len() - 1)
@@ -940,6 +1000,22 @@ impl Gltf {
         g["buffers"][0]["byteLength"] = json!(self.bin.len());
         std::fs::write(dir.join("model.gltf"), serde_json::to_vec(&g)?)?;
         std::fs::write(dir.join("model.bin"), &self.bin)?;
+        // `prt.bin` (little endian): b"PRT1", u32 part count, then per part u16 name length, the name, u32 vertex count, vertex count x 16 x i16.
+        if !self.prt.is_empty() {
+            let mut b = b"PRT1".to_vec();
+            b.extend((self.prt.len() as u32).to_le_bytes());
+            for (name, v) in &self.prt {
+                b.extend((name.len() as u16).to_le_bytes());
+                b.extend(name.as_bytes());
+                b.extend((v.len() as u32).to_le_bytes());
+                for t in v {
+                    for x in t {
+                        b.extend(x.to_le_bytes());
+                    }
+                }
+            }
+            std::fs::write(dir.join("prt.bin"), b)?;
+        }
         Ok(())
     }
 }

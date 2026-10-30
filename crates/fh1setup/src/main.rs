@@ -53,6 +53,7 @@ mod fm1;
 #[cfg(feature = "fm6")]
 mod fm6;
 mod fm2_cars;
+mod fm2_crowd;
 #[cfg(feature = "fm4")]
 mod fm4_merge;
 mod grass;

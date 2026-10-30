@@ -159,10 +159,14 @@ pub fn parse_stx(d: &[u8]) -> Result<Vec<CaffTexture>, Error> {
 /// texels or less, padded like a level), all of it per layer.
 fn chain_size(format: Format, width: u32, height: u32, mips: u32, layers: u32) -> Result<usize, Error> {
     // CTX1 / DXT3A-as-1111 (60, 61) have no decoder but take 8-byte 4x4 blocks: LeMans' stx holds one.
-    let block = format.block().or(match format {
-        Format::Other(60 | 61) => Some((4, 8)),
-        _ => None,
-    });
+    // (8_8 textures keep the old "size from the leftover bytes" rule: their padded tail size is not pinned down, see `parse_stx`.)
+    let block = match format {
+        Format::Rg8 => None,
+        _ => format.block().or(match format {
+            Format::Other(60 | 61) => Some((4, 8)),
+            _ => None,
+        }),
+    };
     let (bw, bpb) = block.ok_or_else(|| Error::Unsupported(format!("texture format {format:?}")))?;
     let (sw0, sh0) = (width.next_power_of_two(), height.next_power_of_two());
     let mut total = 0usize;

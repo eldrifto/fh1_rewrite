@@ -58,6 +58,10 @@ pub struct PsRun {
     /// The specular exponent of the draw's material: the one pixel-shader constant the shader reads that the draw's stream records do not set, taken from the
     /// model's material parameter block (`.data`, vectors with a 0x14 stride; STATUS.md "material block"). None when it cannot be found.
     pub spec_exp: Option<(u32, f32)>,
+    /// The shader's disassembly (debugging: `FM2_DUMP_PS=<texture id>`).
+    pub text: String,
+    /// The draw's pixel-shader constants (debugging).
+    pub consts: BTreeMap<u32, [f32; 4]>,
 }
 
 /// The material block's value of the single constant register the pixel shader reads but the draw does not set (see [`PsRun::spec_exp`]).
@@ -81,6 +85,24 @@ fn spec_exponent(text: &str, consts: &std::collections::BTreeMap<u32, [f32; 4]>,
             }
         }
     }
+    if std::env::var_os("FM2_DATA_DUMP").is_some() {
+        if let Some(&k0) = consts.keys().next() {
+            let vec_at = |o: usize| -> Option<[f32; 4]> {
+                let w = |j: usize| data.get(o + 4 * j..o + 4 * j + 4).map(|b| f32::from_be_bytes(b.try_into().unwrap()));
+                Some([w(0)?, w(1)?, w(2)?, w(3)?])
+            };
+            for o in (0..data.len().saturating_sub(16)).step_by(4) {
+                if consts.iter().all(|(k, v)| *k >= k0 && vec_at(o + (*k - k0) as usize * 0x14).is_some_and(|x| x == *v)) {
+                    let row: Vec<String> = (0..16).filter_map(|n| vec_at(o + n * 0x14)).map(|v| format!("{:.3?}", v)).collect();
+                    println!("[fm2] data block at {o:#x} (c{k0}..): {}", row.join(" "));
+                    let raw: Vec<String> = data.get(o.saturating_sub(16)..(o + 0x200).min(data.len())).unwrap_or(&[]).chunks(4).map(|c| c.iter().map(|b| format!("{b:02x}")).collect::<String>()).collect();
+                    println!("[fm2] raw: {}", raw.join(" "));
+                    println!("[fm2] data len {} consts {:?}", data.len(), consts.keys().collect::<Vec<_>>());
+                    break;
+                }
+            }
+        }
+    }
     let missing: Vec<u32> = used.iter().copied().filter(|r| !consts.contains_key(r)).collect();
     let [reg] = missing[..] else { return None };
     let k0 = *consts.keys().next()?;
@@ -95,6 +117,52 @@ fn spec_exponent(text: &str, consts: &std::collections::BTreeMap<u32, [f32; 4]>,
         }
     }
     None
+}
+
+/// Debug: every shader of the model's tail, pixel and vertex, with its text (`FM2_DUMP_SKY_PS`).
+pub fn dump_shaders(raw_model: &[u8], model: &fm2::Model) {
+    let (Some(g), Some(dt)) = (section(raw_model, b".gpu"), section(raw_model, b".data")) else {
+        println!("[fm2 sky] no .gpu / .data section");
+        return;
+    };
+    let Some(gpu) = raw_model.get(0x190..0x190 + g) else { return };
+    let Some(data) = raw_model.get(0x190 + g..0x190 + g + dt) else { return };
+    // Brute force: any block after the vertex buffers that disassembles as a short pixel shader with a texture fetch.
+    let mut shown = 0;
+    let mut t = (model.tail_start + 3) & !3;
+    while t + 16 <= gpu.len() && shown < 6 {
+        let words: Vec<u32> = (t..gpu.len().min(t + 0xB8)).step_by(4).filter_map(|k| gpu.get(k..k + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()))).collect();
+        if words.len() >= 40 {
+            let text = fh1_shaders::fm2::disassemble(words, false);
+            if text.contains("tfetch2D") && text.contains("oC0") {
+                println!("[fm2 sky] pixel-looking block at gpu+{t:#x}:
+{text}");
+                shown += 1;
+                t += 0xB8;
+                continue;
+            }
+        }
+        t += 4;
+    }
+    for (i, d) in model.draws.iter().enumerate() {
+        match d.ps_container.and_then(|o| data.get(o..)) {
+            Some(bytes) => match fh1_shaders::container::ShaderBlob::parse(bytes, d.ps_container.unwrap_or(0)) {
+                Ok(b) => {
+                    println!("[fm2 sky] draw {i}: pixel container at {:#x}, target {}, constants {:?}", d.ps_container.unwrap_or(0), b.target, b.constants.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
+                    println!("[fm2 sky]   float defs {:?}
+{}", b.float_defs, fh1_shaders::fm2::disassemble(b.microcode.clone(), false));
+                }
+                Err(e) => println!("[fm2 sky] draw {i}: container at {:#x}: {e:?}", d.ps_container.unwrap_or(0)),
+            },
+            None => println!("[fm2 sky] draw {i}: no ps container ({:?})", d.ps_container),
+        }
+    }
+    let shaders = sh::tail_shaders(gpu, model.tail_start);
+    println!("[fm2 sky] {} shaders in the tail (tail_start {:#x})", shaders.len(), model.tail_start);
+    for (i, t) in shaders.iter().enumerate() {
+        println!("[fm2 sky] shader {i}: {} dwords, literals {:?}
+{}", t.dwords, t.literals, t.text);
+    }
 }
 
 pub fn resolve(raw_model: &[u8], model: &fm2::Model, kind: &dyn Fn(u32) -> ItemKind) -> Vec<DrawUv> {
@@ -333,6 +401,8 @@ pub fn resolve(raw_model: &[u8], model: &fm2::Model, kind: &dyn Fn(u32) -> ItemK
                     item_sampler: (0..d.items.len()).filter_map(|j| Some((j, sampler_of(j)?.index))).collect(),
                     sampler_reg: samp.iter().filter_map(|s| Some((s.index, s.direct?))).collect(),
                     spec_exp: spec_exponent(&t.text, &d.constants, data),
+                    text: t.text.clone(),
+                    consts: d.constants.clone(),
                 }
             });
             DrawUv { slots: out, alpha_const, atlas, ps }

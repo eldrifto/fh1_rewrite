@@ -45,10 +45,57 @@ pub fn run() -> Result<()> {
     let root = private.join("imported/fm2");
     std::fs::create_dir_all(&root)?;
     let want = |p: &str| only.as_ref().is_none_or(|o| o.iter().any(|x| x == p));
-    if want("maps") {
+    if want("maps") || want("cubes") || want("crowd") {
         let layouts = layouts(&disc)?;
-        build_maps(&disc, &root, "fm2", "FM2", layouts)?;
-        println!("[fm2] run `fh1setup <FH1 disc> --only remaster --force` to (re)build the FM2 remaster material tables");
+        let cube_of: Vec<(String, String)> = layouts.iter().map(|l| (format!("{}_{:02}", l.track.to_ascii_lowercase(), l.ribbon), l.track.clone())).collect();
+        if want("maps") {
+            build_maps(&disc, &root, "fm2", "FM2", layouts)?;
+        }
+        // The track's own car cube map (`staticCarCubemap.xpr`, 256 x 256 x 6, DXT5) reduced to 16 x 16 per face (RGB, 8 bit, the game's coded
+        // colour): the engine's car paint reflects it (`imported/fm2/<map>/car_cube.bin`, faces in D3D order +X -X +Y -Y +Z -Z).
+        for (id, track) in &cube_of {
+            let dir = root.join(id);
+            if !dir.is_dir() {
+                continue;
+            }
+            let xpr_path = disc.join("media/tracks").join(track).join("staticcarcubemap.xpr");
+            match car_cube(&xpr_path) {
+                Ok(b) => {
+                    std::fs::write(dir.join("car_cube.bin"), b)?;
+                }
+                Err(e) => println!("[fm2] {id}: car cube map: {e:#}"),
+            }
+            // The full-resolution faces too (`car_cube_full.bin`: u32 LE width, u32 LE height, then 6 faces of width x height RGBA8, level 0 only,
+            // the game's coded colour, D3D face order); the engine's car paint samples it as a real cube texture.
+            match car_cube_full(&xpr_path) {
+                Ok(b) => std::fs::write(dir.join("car_cube_full.bin"), b)?,
+                Err(e) => println!("[fm2] {id}: full car cube map: {e:#}"),
+            }
+        }
+        // Spectators (`import-fm2 --only crowd`): the shared models / animations / atlas once, the placement per map from its ribbon's `.crowd` file.
+        // (Also after `maps`: re-importing a map deletes its folder, `crowd/` with it.)
+        if want("crowd") || want("maps") {
+            let shared = crate::fm2_crowd::shared(&disc, &root.join("crowd"))?;
+            let mut total = 0;
+            for (id, track) in &cube_of {
+                let dir = root.join(id);
+                let ribbon: u32 = id.rsplit('_').next().and_then(|r| r.parse().ok()).unwrap_or(0);
+                if !dir.is_dir() {
+                    continue;
+                }
+                match crate::fm2_crowd::crowd_file(&disc.join("media/tracks"), track, ribbon) {
+                    Some(f) => match crate::fm2_crowd::map(&shared, &f, &dir.join("crowd")) {
+                        Ok(n) => total += n,
+                        Err(e) => println!("[fm2 crowd] {id}: {e:#}"),
+                    },
+                    None => println!("[fm2 crowd] {id}: no .crowd file"),
+                }
+            }
+            println!("[fm2 crowd] {total} spectators placed on {} maps", cube_of.len());
+        }
+        if want("maps") {
+            println!("[fm2] run `fh1setup <FH1 disc> --only remaster --force` to (re)build the FM2 remaster material tables");
+        }
     }
     if want("camera") {
         // The game's own follow-camera tuning (read by the engine behind FH1_FM2_CAMERA).
@@ -170,4 +217,58 @@ fn venue_name(media: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// Width, height (u32 LE each) and the 6 level-0 faces of an `.xpr` cube map as RGBA8.
+fn car_cube_full(path: &std::path::Path) -> Result<Vec<u8>> {
+    use fh1_formats::{xds, xpr};
+    let d = std::fs::read(path).with_context(|| path.display().to_string())?;
+    let res = xpr::parse(&d)?;
+    let r = res.iter().find(|r| &r.kind == b"TXCM").context("no cube texture")?;
+    let faces = &xpr::decode(&d, r)?[0];
+    anyhow::ensure!(faces.len() == 6, "{} faces", faces.len());
+    let (w, h) = (r.header.width as u32, r.header.height as u32);
+    let mut out = Vec::with_capacity(8 + 6 * (w * h * 4) as usize);
+    out.extend(w.to_le_bytes());
+    out.extend(h.to_le_bytes());
+    for f in faces {
+        let rgba = xds::to_rgba8(f)?;
+        anyhow::ensure!(rgba.len() == (w * h * 4) as usize, "face size {} for {w} x {h}", rgba.len());
+        out.extend(rgba);
+    }
+    Ok(out)
+}
+
+/// 6 faces x 16 x 16 x RGB bytes: the level-0 faces of an `.xpr` cube map, box-reduced.
+fn car_cube(path: &std::path::Path) -> Result<Vec<u8>> {
+    use fh1_formats::{xds, xpr};
+    let d = std::fs::read(path).with_context(|| path.display().to_string())?;
+    let res = xpr::parse(&d)?;
+    let r = res.iter().find(|r| &r.kind == b"TXCM").context("no cube texture")?;
+    let faces = &xpr::decode(&d, r)?[0];
+    anyhow::ensure!(faces.len() == 6, "{} faces", faces.len());
+    let (w, h) = (r.header.width as usize, r.header.height as usize);
+    anyhow::ensure!(w % 16 == 0 && h % 16 == 0, "{w} x {h}");
+    let (bx, by) = (w / 16, h / 16);
+    let mut out = Vec::with_capacity(6 * 16 * 16 * 3);
+    for f in faces {
+        let rgba = xds::to_rgba8(f)?;
+        for y in 0..16 {
+            for x in 0..16 {
+                let mut sum = [0u32; 3];
+                for yy in 0..by {
+                    for xx in 0..bx {
+                        let o = ((y * by + yy) * w + x * bx + xx) * 4;
+                        for c in 0..3 {
+                            sum[c] += rgba[o + c] as u32;
+                        }
+                    }
+                }
+                for c in sum {
+                    out.push((c / (bx * by) as u32) as u8);
+                }
+            }
+        }
+    }
+    Ok(out)
 }

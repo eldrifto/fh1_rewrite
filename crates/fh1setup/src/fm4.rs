@@ -556,6 +556,8 @@ fn fx_globals(xml: &str) -> Value {
     put("V2LightmapColor1", rgb1("DarkColor"));
     put("V2LightmapColor2", rgb1("LightColor"));
     put("shad_color", rgb1("ShadowColor"));
+    // FM2 LED / lamp boards: their pixel shader adds this as c100 (`light = sat(N.L) * c102 + c100`, c102 white); MODLOG 119.
+    put("LightAmbient", rgb1("LightAmbient"));
     put("RoadSpecularParams1", attrs("RoadSpecular", &["RoadSpecular", "RoadSpecular2", "RoadSkid", "RoadSkid2"]).map(|v| [v[0], v[1], v[2], v[3]]));
     put(
         "RoadSpecularParams2",

@@ -22,6 +22,8 @@ pub enum Format {
     Dxt5A,
     /// Single-channel 4-bit explicit alpha (Xenos DXT3A, 0x3A).
     Dxt3A,
+    /// Two 8-bit channels (Xenos `k_8_8`, 10): the FM2 sky's sun glow card.
+    Rg8,
     Other(u32),
 }
 
@@ -33,6 +35,7 @@ impl Format {
             19 | 52 => Format::Dxt3,
             20 | 53 => Format::Dxt5,
             49 => Format::Dxn,
+            10 => Format::Rg8,
             58 => Format::Dxt3A,
             59 => Format::Dxt5A,
             o => Format::Other(o),
@@ -43,6 +46,7 @@ impl Format {
     pub fn block(self) -> Option<(u32, u32)> {
         Some(match self {
             Format::Argb8 => (1, 4),
+            Format::Rg8 => (1, 2),
             Format::Dxt1 | Format::Dxt5A | Format::Dxt3A => (4, 8),
             Format::Dxt3 | Format::Dxt5 | Format::Dxn => (4, 16),
             Format::Other(_) => return None,
@@ -207,6 +211,10 @@ pub fn to_rgba8(img: &Image) -> Result<Vec<u8>, Error> {
     if img.format == Format::Argb8 {
         return Ok(img.data.clone());
     }
+    if img.format == Format::Rg8 {
+        // Red and green as stored, blue 0, opaque.
+        return Ok(img.data.chunks_exact(2).flat_map(|p| [p[0], p[1], 0, 255]).collect());
+    }
     if img.format == Format::Dxt3A {
         // 16 nibbles per block, texel i = byte i/2, low nibble first (as BC2's alpha half).
         let mut out = vec![0u8; w * h * 4];
@@ -241,4 +249,26 @@ pub fn to_rgba8(img: &Image) -> Result<Vec<u8>, Error> {
             [r, g, b, a]
         })
         .collect())
+}
+
+#[cfg(test)]
+mod rg8_tests {
+    use super::*;
+
+    #[test]
+    fn two_channel_8_8_format() {
+        // Xenos `k_8_8` (10): 2 bytes a texel; the sky's sun glow card (G is the flare).
+        assert_eq!(Format::from_raw(10), Format::Rg8);
+        assert_eq!(Format::Rg8.block(), Some((1, 2)));
+        let img = Image { width: 2, height: 1, format: Format::Rg8, data: vec![10, 200, 30, 40] };
+        assert_eq!(to_rgba8(&img).unwrap(), vec![10, 200, 0, 255, 30, 40, 0, 255]);
+    }
+
+    #[test]
+    fn untile_linear_8_8() {
+        // A linear (untiled) 2 x 2 texture, 8-in-16 endian swap off: the bytes come back in place.
+        let data = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let img = untile(&data, Format::Rg8, 2, 2, 2, false, 0).unwrap();
+        assert_eq!(img.data, data);
+    }
 }

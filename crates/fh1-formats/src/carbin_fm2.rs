@@ -21,6 +21,8 @@ pub struct Vertex {
     pub position: [f32; 3],
     /// `(u16 - 0x8000) / UV_SCALE`.
     pub uv: [f32; 2],
+    /// Bytes 16..60 of the 60-byte vertex, undecoded (see the module doc).
+    pub tail: [u8; 44],
 }
 
 pub const UV_SCALE: f32 = 1310.72;
@@ -175,7 +177,7 @@ pub fn parse(d: &[u8]) -> Result<Fm2Carbin, Error> {
                 mx[k] = mx[k].max(pos[k]);
             }
             let uv = |o: usize| (u16::from_be_bytes([b[o], b[o + 1]]) as i32 - 0x8000) as f32 / UV_SCALE;
-            vertices.push(Vertex { position: pos, uv: [uv(8), uv(10)] });
+            vertices.push(Vertex { position: pos, uv: [uv(8), uv(10)], tail: b[16..60].try_into().unwrap() });
         }
         ext.push(if finite { (mn, mx) } else { ([f32::NAN; 3], [f32::NAN; 3]) });
 

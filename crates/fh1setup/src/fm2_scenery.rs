@@ -65,6 +65,130 @@ struct Pending {
     atlas: BTreeMap<usize, u32>,
 }
 
+/// A blend draw's own pixel shader run over its lightmap uv square (every triangle rasterised in that space, the shader's texture coordinates interpolated from the
+/// draw's resolved per-sampler uvs): (width, height, RGBA) of the neutral-lit colour, sRGB-coded as the baked roads are. None when the shader cannot run.
+fn bake_blend(p: &Pending, texdir: &Path, cache: &mut HashMap<std::path::PathBuf, Option<(usize, usize, Vec<u8>)>>) -> Option<(usize, usize, Vec<u8>, Vec<[f32; 2]>)> {
+    let n = p.positions.len();
+    if n == 0 || p.lm_uv.len() != n || p.indices.len() < 3 {
+        return None;
+    }
+    // The texture covers the draw's own lightmap-uv bounding box (a thin strip would otherwise sit between texel centres); the returned uvs address it.
+    let (mut ulo, mut uhi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for u in &p.lm_uv {
+        for k in 0..2 {
+            ulo[k] = ulo[k].min(u[k]);
+            uhi[k] = uhi[k].max(u[k]);
+        }
+    }
+    let span = [(uhi[0] - ulo[0]).max(1e-6), (uhi[1] - ulo[1]).max(1e-6)];
+    let norm: Vec<[f32; 2]> = p.lm_uv.iter().map(|u| [(u[0] - ulo[0]) / span[0], (u[1] - ulo[1]) / span[1]]).collect();
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for v in &p.positions {
+        for k in 0..3 {
+            lo[k] = lo[k].min(v[k]);
+            hi[k] = hi[k].max(v[k]);
+        }
+    }
+    let per_m: f32 = std::env::var("FM2_BAKE_PX_PER_M").ok().and_then(|v| v.parse().ok()).unwrap_or(6.0);
+    let side = (((hi[0] - lo[0]).max(hi[2] - lo[2]) * per_m).ceil().max(1.0) as u32).next_power_of_two().clamp(16, 256) as usize;
+    let (w, h) = (side, side);
+    let mut owner: Vec<Option<(usize, [f32; 3])>> = vec![None; w * h];
+    for (ti, t) in p.indices.chunks_exact(3).enumerate() {
+        let q = [t[0], t[1], t[2]].map(|i| norm[i as usize]);
+        let (a, b, c) = ([q[0][0] * w as f32, q[0][1] * h as f32], [q[1][0] * w as f32, q[1][1] * h as f32], [q[2][0] * w as f32, q[2][1] * h as f32]);
+        let d = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
+        if d.abs() < 1e-9 {
+            continue;
+        }
+        let x0 = a[0].min(b[0]).min(c[0]).floor().max(0.0) as usize;
+        let x1 = a[0].max(b[0]).max(c[0]).ceil().min(w as f32 - 1.0).max(0.0) as usize;
+        let y0 = a[1].min(b[1]).min(c[1]).floor().max(0.0) as usize;
+        let y1 = a[1].max(b[1]).max(c[1]).ceil().min(h as f32 - 1.0).max(0.0) as usize;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+                let l0 = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1])) / d;
+                let l1 = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / d;
+                let l2 = 1.0 - l0 - l1;
+                let eps = -0.02;
+                if l0 >= eps && l1 >= eps && l2 >= eps && owner[y * w + x].is_none() {
+                    owner[y * w + x] = Some((ti, [l0, l1, l2]));
+                }
+            }
+        }
+    }
+    let pts: Vec<(usize, [f32; 3], usize)> = owner.iter().enumerate().filter_map(|(i, o)| o.map(|(t, l)| (t, l, i))).collect();
+    if pts.is_empty() {
+        return None;
+    }
+    let uv_of = |k: usize, item: usize| {
+        let (ti, l, _) = &pts[k];
+        let uvs = p.resolved.get(&item)?;
+        let idx = [p.indices[ti * 3] as usize, p.indices[ti * 3 + 1] as usize, p.indices[ti * 3 + 2] as usize];
+        let (a, b, c) = (*uvs.get(idx[0])?, *uvs.get(idx[1])?, *uvs.get(idx[2])?);
+        Some([a[0] * l[0] + b[0] * l[1] + c[0] * l[2], a[1] * l[0] + b[1] * l[1] + c[1] * l[2]])
+    };
+    let out = shader_eval_at(p, texdir, cache, &[], &[], pts.len(), &uv_of, None)?;
+    let enc = |v: f32| (255.0 * v.clamp(0.0, 1.0).powf(1.0 / 2.2)).round() as u8;
+    let mut rgba = vec![0u8; w * h * 4];
+    let mut have = vec![false; w * h];
+    for (k, c) in out {
+        let i = pts[k].2;
+        // The shader's output alpha is the draw's opacity (road paint, kerbs: black where the asphalt shows through).
+        rgba[i * 4..i * 4 + 4].copy_from_slice(&[enc(c[0]), enc(c[1]), enc(c[2]), (c[3].clamp(0.0, 1.0) * 255.0).round() as u8]);
+        have[i] = true;
+    }
+    // Texels no triangle (or no surviving pixel) covers take their neighbours' colour, so bilinear filtering and mips do not bleed black into the edges.
+    for _ in 0..4 {
+        let prev = (rgba.clone(), have.clone());
+        for y in 0..h {
+            for x in 0..w {
+                if prev.1[y * w + x] {
+                    continue;
+                }
+                let (mut sum, mut cnt) = ([0u32; 3], 0u32);
+                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h && prev.1[ny as usize * w + nx as usize] {
+                        for k in 0..3 {
+                            sum[k] += prev.0[(ny as usize * w + nx as usize) * 4 + k] as u32;
+                        }
+                        cnt += 1;
+                    }
+                }
+                if cnt > 0 {
+                    for k in 0..3 {
+                        rgba[(y * w + x) * 4 + k] = (sum[k] / cnt) as u8;
+                    }
+                    rgba[(y * w + x) * 4 + 3] = 0;
+                    have[y * w + x] = true;
+                }
+            }
+        }
+    }
+    Some((w, h, rgba, norm))
+}
+
+/// The draw items whose texture the pixel shader fetches only the alpha of.
+fn alpha_only_items(p: &Pending) -> std::collections::BTreeSet<usize> {
+    let Some(ps) = p.ps_run.as_ref() else { return Default::default() };
+    let mut samplers = std::collections::BTreeSet::new();
+    for line in ps.text.lines().map(str::trim) {
+        // `3  tfetch2D r3.w___, r1.xyx, tf0`
+        let Some(rest) = line.split("tfetch2D").nth(1) else { continue };
+        let (Some(dot), Some(comma)) = (rest.find('.'), rest.find(',')) else { continue };
+        let Some(tf) = rest.rsplit("tf").next().and_then(|n| n.trim().parse::<u32>().ok()) else { continue };
+        if dot < comma && rest[dot + 1..comma].trim_matches('_') == "w" {
+            samplers.insert(tf);
+        }
+    }
+    ps.item_sampler.iter().filter(|(_, s)| samplers.contains(s)).map(|(j, _)| *j).collect()
+}
+
+/// Pixel-shader microcode hashes (`ps_sig`) of the LED / lamp board family (`FM2_PS_SIG=<hash>` lists a family's draws): `rgb * (k + (1 - k) * c104.w) * light` with
+/// k from the texture alpha (the two hashes differ only in which constant register holds which of the two values).
+const LED_SIGS: &[u64] = &[0x3d69_a1a8_dce9_ca9e, 0x8ae1_a079_96db_6f64];
+
 /// Pixel-shader microcode hashes (`ps_sig`) of the road shader family `FM2_BC4_SRGB` applies to (Nurburgring models 118, 122, 85, 2837).
 const NB_ROAD_SIGS: &[u64] = &[0x4aa0_eec0_57a0_743d];
 
@@ -112,6 +236,13 @@ fn family_gamma(p: &Pending) -> Option<u32> {
 
 fn ps_sig(p: &Pending) -> u64 {
     p.ps_run.as_ref().map_or(0, |ps| ps.words.iter().flat_map(|w| w.to_be_bytes()).fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3)))
+}
+
+/// A resolved coordinate that collapses one axis while running far along the other (Sunset model 77: u span 4612, v span 0): the interpreter's value is wrong, the texture would smear into a flat stripe.
+fn degenerate_uv(u: &[[f32; 2]]) -> bool {
+    let (lo, hi) = u.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |a, t| ([a.0[0].min(t[0]), a.0[1].min(t[1])], [a.1[0].max(t[0]), a.1[1].max(t[1])]));
+    let (du, dv) = (hi[0] - lo[0], hi[1] - lo[1]);
+    !u.is_empty() && ((du < 1e-3 && dv > 50.0) || (dv < 1e-3 && du > 50.0)) && std::env::var_os("FM2_NO_DEGENERATE_UV").is_none()
 }
 
 pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, pvs_bytes: &[u8]) -> Result<()> {
@@ -283,6 +414,33 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         let mut next = 0u32;
         let mut cropped = 0usize;
         for p in pending.iter_mut() {
+            if std::env::var("FM2_ATLAS_MODEL").ok().and_then(|v| v.parse::<u32>().ok()) == Some(p.model as u32) {
+                println!("[fm2] atlas model {} sig {:016x} atlas {:?} slots {:?} cands {:?} consts {:?}", p.model, ps_sig(p), p.atlas, p.cand_slots, p.candidates, p.consts);
+            }
+            // Experiment: `FM2_FORCE_ATLAS=<texture id hex>:su,sv,ou,ov` crops that texture to a rectangle in every draw that binds it with no atlas constant of its own.
+            if let Some((fid, rect)) = std::env::var("FM2_FORCE_ATLAS").ok().and_then(|v| {
+                let (i, r) = v.split_once(':')?;
+                let r: Vec<f32> = r.split(',').filter_map(|x| x.parse().ok()).collect();
+                if r.len() == 4 { Some((u32::from_str_radix(i, 16).ok()?, [r[0], r[1], r[2], r[3]])) } else { None }
+            }) {
+                if let Some(k) = p.candidates.iter().position(|c| c.0 == fid) {
+                    if p.atlas.is_empty() && textures.contains_key(&fid) {
+                        let key = (fid, rect.map(f32::to_bits));
+                        let new = *cuts.entry(key).or_insert_with(|| {
+                            let c2 = crop_atlas(&dir.join("textures").join(format!("{fid:08x}.dds")), rect)?;
+                            let nid = 0xFFFF_5000 + next;
+                            next += 1;
+                            std::fs::write(dir.join("textures").join(format!("{nid:08x}.dds")), &c2.dds).ok()?;
+                            textures.insert(nid, (c2.alpha, c2.word));
+                            Some(nid)
+                        });
+                        if let Some(nid) = new {
+                            p.candidates[k].0 = nid;
+                            cropped += 1;
+                        }
+                    }
+                }
+            }
             for (&slot, &creg) in p.atlas.clone().iter() {
                 let (Some(k), Some(c)) = (p.cand_slots.iter().position(|&s| s == slot), p.consts.get(&creg).copied()) else { continue };
                 let id = p.candidates[k].0;
@@ -408,9 +566,65 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     }
     // Foliage sheets are DXT1 with black as the colour key (the game's pixel shader discards the black texels): without
     // alpha they draw as black boxes. Rewrite those textures with the black texels transparent.
+    // Blend draws baked from their own pixel shader (default on, `FM2_NO_BAKE_BLEND=1` = off; `FM2_BAKE_SIGS=<hash,...>` sets the shader families, default the four checked:
+    // the Silverstone curb outline's two and Road Atlanta's road-paint two): the shader is run on the CPU over the draw's lightmap uv square with the real textures bound, and the result replaces the draw's
+    // colour / mask candidates, so the engine draws one plain colour texture on the lightmap uv (docs/DESIGN.md, 2026-10-29).
+    if std::env::var_os("FM2_NO_BAKE_BLEND").is_none() {
+        let sigs: Vec<u64> = std::env::var("FM2_BAKE_SIGS")
+            .ok()
+            .map(|v| v.split(',').filter_map(|x| u64::from_str_radix(x.trim(), 16).ok()).collect())
+            .unwrap_or_else(|| vec![0xfadd_5e05_3174_5ff7, 0x9e00_faa9_a03a_f266, 0x8958_d876_4fba_0e07, 0x97a8_3cd6_7d54_938a, 0x68fa_6760_a07b_7cea]);
+        let mut cache: HashMap<std::path::PathBuf, Option<(usize, usize, Vec<u8>)>> = HashMap::new();
+        let (mut done, mut failed) = (0usize, 0usize);
+        let mut next = 0xFFFF_9800u32;
+        let mut baked_cutouts: Vec<u32> = Vec::new();
+        for p in pending.iter_mut() {
+            if !sigs.contains(&ps_sig(p)) {
+                continue;
+            }
+            let Some((w, h, rgba, norm_uv)) = bake_blend(p, &dir.join("textures"), &mut cache) else {
+                failed += 1;
+                if std::env::var_os("FM2_DEBUG").is_some() {
+                    println!("[fm2] bake failed: model {} sig {:016x} positions {} lm_uv {} indices {} lightmap {:?} cands {:?} fog {:?}", p.model, ps_sig(p), p.positions.len(), p.lm_uv.len(), p.indices.len(), p.lightmap.map(|l| l.0), p.candidates, p.ps_run.as_ref().and_then(|r| fh1_shaders::ps_cpu::fog_register(&r.words)));
+                }
+                continue;
+            };
+            let rgba_has_clear = rgba.chunks_exact(4).any(|p| p[3] < 128);
+            let Ok(c) = crate::textures::rgba_to_dds(rgba, w as u32, h as u32) else { continue };
+            let id = next;
+            next += 1;
+            if std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds).is_err() {
+                continue;
+            }
+            let clear = rgba_has_clear;
+            textures.insert(id, (clear, 0x3F00));
+            if clear {
+                baked_cutouts.push(id);
+            }
+            let keep: Vec<bool> = p.candidates.iter().map(|c| matches!(c.1, 8 | 9 | 12)).collect();
+            let mut k = 0;
+            p.candidates.retain(|_| {
+                k += 1;
+                keep[k - 1]
+            });
+            let mut k = 0;
+            p.cand_slots.retain(|_| {
+                k += 1;
+                keep.get(k - 1).copied().unwrap_or(false)
+            });
+            p.candidates.push((id, 4, 0));
+            p.cand_slots.push(99);
+            p.resolved.insert(99, norm_uv);
+            p.ps_run = None;
+            done += 1;
+        }
+        println!("[fm2] baked {done} blend draws from their pixel shaders ({failed} could not run, {} with transparent texels drawn as cut-outs)", baked_cutouts.len());
+        BAKED_CUTOUTS.with(|b| b.borrow_mut().extend(baked_cutouts));
+    }
     let mut keyed = 0usize;
     let mut opaque_alpha = 0usize;
     let mut keyed_ids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    BAKED_CUTOUTS.with(|b| keyed_ids.extend(b.borrow().iter().copied()));
     if std::env::var_os("FM2_NO_KEY").is_none() {
         let used: std::collections::BTreeSet<u32> = pending.iter().flat_map(|p| p.candidates.iter().filter(|t| t.1 & 8 == 0 && t.1 & 1 == 0).map(|t| t.0)).collect();
         for id in used {
@@ -631,6 +845,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             fmt.decompress(b.get(148..148 + fmt.compressed_size(w, h))?, w, h, &mut rgba);
             Some((w, h, rgba))
         };
+        let w0 = |v: &Vec<u8>| v.len() / 4;
         let mut made: HashMap<(u32, u32, u32), u32> = HashMap::new();
         let mut made_new: Vec<u32> = Vec::new();
         let mut swapped = 0usize;
@@ -667,7 +882,27 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                     _ => continue,
                 };
                 let Some((w, h, mut rgba)) = read_dds(col, fmt) else { continue };
-                for px in rgba.chunks_exact_mut(4) {
+                // The two grey grain textures tile with their own coordinate (span ~49 x 36 on Nurburgring model 118), the weight texture spans the
+                // draw once: the grain is kept, blended with the weight's mean (`FM2_NB_GRAIN=0` = the old flat colour from the means).
+                let grain_bake = std::env::var_os("FM2_NB_GRAIN").is_none_or(|v| v != "0");
+                let (w, h) = if grain_bake { (a.0, a.1) } else { (w, h) };
+                if grain_bake {
+                    let wm = {
+                        let n = (w0(&rgba)) as f32;
+                        rgba.chunks_exact(4).map(|px| {
+                            let rgb = [px[0], px[1], px[2]].map(|v| if decode_w { srgb_dec(v) } else { v as f32 / 255.0 });
+                            0.114 * rgb[0] + 0.299 * rgb[1] + 0.587 * rgb[2]
+                        }).sum::<f32>() / n
+                    };
+                    rgba = vec![0u8; w * h * 4];
+                    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+                        let (da, db) = (srgb_dec(a.2[i * 4]), srgb_dec(b.2[i * 4]));
+                        let lin = (0.78 * gain * (db + (da - db) * wm)).clamp(0.0, 1.0); // 0.78: keeps the mean brightness of the old flat bake (INFERRED, road band 1.43 -> ~1.26)
+                        let enc = (255.0 * lin.powf(1.0 / 2.2)).round() as u8;
+                        px.copy_from_slice(&[enc, enc, enc, 255]);
+                    }
+                }
+                for px in rgba.chunks_exact_mut(4).filter(|_| !grain_bake) {
                     let rgb = [px[0], px[1], px[2]].map(|v| if decode_w { srgb_dec(v) } else { v as f32 / 255.0 });
                     let lum = 0.114 * rgb[0] + 0.299 * rgb[1] + 0.587 * rgb[2];
                     let lin = (gain * (m5 + (m4 - m5) * lum)).clamp(0.0, 1.0);
@@ -684,9 +919,17 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 made_new.push(id);
                 id
             };
-            for t in p.candidates.iter_mut() {
+            // The baked grain tiles with the grey textures' coordinate: take their slot for the colour.
+            let grey_slot = p.candidates.iter().position(|t| t.0 == masks[0]).and_then(|k| p.cand_slots.get(k).copied());
+            let grain_bake = std::env::var_os("FM2_NB_GRAIN").is_none_or(|v| v != "0");
+            for (k, t) in p.candidates.iter_mut().enumerate() {
                 if t.0 == col {
                     t.0 = id;
+                    if let (true, Some(gs)) = (grain_bake, grey_slot) {
+                        if let Some(c) = p.cand_slots.get_mut(k) {
+                            *c = gs;
+                        }
+                    }
                 }
             }
             swapped += 1;
@@ -1003,6 +1246,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     {
         let mut made: HashMap<(u32, u32), u32> = HashMap::new();
         let mut made_new: Vec<u32> = Vec::new();
+        let mut rejected: BTreeMap<String, usize> = BTreeMap::new();
         for p in &pending {
             let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0) && !normal_ids.contains(&t.0) && !placeholder_ids.contains(&t.0);
             let ordered: Vec<(u32, bool)> = p.candidates.iter().filter(usable).map(|t| (t.0, mask(t.0))).collect();
@@ -1019,6 +1263,11 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 first_mask = Some(masks_o[0]);
             }
             let ok = cols.len() == 1 && first_mask.is_some() && size(cols[0]).0 * size(cols[0]).1 <= 128 * 128;
+            if !ok && std::env::var_os("FM2_DEBUG").is_some() && !cols.is_empty() && !masks_o.is_empty() {
+                let pat: String = ordered.iter().map(|c| if c.1 { 'M' } else { 'C' }).collect();
+                let sz: Vec<String> = ordered.iter().map(|c| format!("{}x{}", size(c.0).0, size(c.0).1)).collect();
+                *rejected.entry(format!("{pat} {}", sz.join(" "))).or_insert(0usize) += 1;
+            }
             if !ok || std::env::var_os("FM2_NO_SPRITE").is_some() {
                 sprite_ids.push(None);
                 continue;
@@ -1074,6 +1323,14 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 id
             });
             sprite_ids.push(Some(id));
+        }
+        if std::env::var_os("FM2_DEBUG").is_some() {
+            let mut r: Vec<_> = rejected.iter().collect();
+            r.sort_by_key(|x| std::cmp::Reverse(*x.1));
+            for (k, n) in r.iter().take(25) {
+                println!("[fm2] sprite rejected x{n}: {k}");
+            }
+            println!("[fm2] sprites made: {}", made_new.len());
         }
         for id in made_new {
             textures.insert(id, (true, 0x3F00));
@@ -1148,7 +1405,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         }
     }
     // Colour + wear mask (road strips with a separate mask uv): the mask's dark layer is the colour texture darkened (rubber).
-    let wear_dark: f32 = std::env::var("FM2_WEAR_DARK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.4);
+    let wear_dark: f32 = std::env::var("FM2_WEAR_DARK").ok().and_then(|v| v.parse().ok()).unwrap_or(0.2);
     let mut dark_of: HashMap<u32, u32> = HashMap::new();
     let mut dark_ids: Vec<Option<(u32, u32)>> = Vec::with_capacity(pending.len());
     // The base colour a wear blend darkens (the tiled one of a two-colour road draw; None = the draw's first colour).
@@ -1186,7 +1443,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         }
         // A cut-out base (the start-line chequer: grey squares opaque, the others transparent) is a decal: the wear blend has no alpha, so it
         // would draw the whole card. `FM2_NO_DECAL_CUTOUT=1` keeps the blend.
-        let base = base.filter(|b| !(keyed_ids.contains(b) && std::env::var_os("FM2_NO_DECAL_CUTOUT").is_none() && !p.alpha_const));
+        let base = base.filter(|b| !(keyed_ids.contains(b) && std::env::var_os("FM2_NO_DECAL_CUTOUT").is_none() && (!p.alpha_const || std::env::var_os("FM2_DECAL_ALWAYS").is_some())));
         let (Some(a), Some(wm)) = (base, wear_mask) else {
             dark_ids.push(None);
             dark_base.push(None);
@@ -1246,7 +1503,15 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     for id in dark_new {
         textures.insert(id, (false, 0x3F00));
     }
+    let mut cutout_baked: HashMap<u32, u32> = HashMap::new();
+    let mut mask_alpha: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut cutout_baked_len: u32 = 0;
+    let mut cutout_new: Vec<u32> = Vec::new();
     for (pi, p) in pending.into_iter().enumerate() {
+        // FM2_HIDE_MODELS=12,174 (diagnostic): leave these models' draws out, to find which draw paints a spot.
+        if std::env::var("FM2_HIDE_MODELS").is_ok_and(|v| v.split(',').any(|m| m.trim().parse::<usize>().ok() == Some(p.model as usize))) {
+            continue;
+        }
         if std::env::var_os("FM2_DEBUG").is_some() {
             let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
             for v in &p.positions {
@@ -1258,6 +1523,34 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             if hi[0] - lo[0] > 120.0 || hi[2] - lo[2] > 120.0 {
                 let desc: Vec<String> = p.candidates.iter().map(|t| format!("{:#x}/{}{}{}", t.0, t.1, if textures.contains_key(&t.0) { "+" } else { "-" }, if mask(t.0) { "m" } else { "" })).collect();
                 println!("[fm2] big draw x {:.0}..{:.0} z {:.0}..{:.0} y {:.0}..{:.0} tris {} tex {desc:?}", lo[0], hi[0], lo[2], hi[2], lo[1], hi[1], p.indices.len() / 3);
+            }
+        }
+        // FM2_PS_LIST=1: one line per draw with its pixel-shader signature and which TrackSettings constants (c184 dark, c185 light, c100 ambient) the shader reads
+        // (MODLOG 121; count the lines per signature with sort | uniq -c).
+        if std::env::var_os("FM2_PS_LIST").is_some() {
+            let t = p.ps_run.as_ref().map_or("", |r| r.text.as_str());
+            println!("[fm2] pslist {:016x} c184={} c185={} c100={} model {} tex {:?}", ps_sig(&p), t.contains("c184"), t.contains("c185"), t.contains("c100"), p.model, p.candidates.first().map(|c| c.0));
+        }
+        if let Some(sig) = std::env::var("FM2_PS_SIG").ok().and_then(|v| u64::from_str_radix(v.trim(), 16).ok()) {
+            if ps_sig(&p) == sig {
+                println!("[fm2] sig {sig:016x}: model {} candidates {:?} alpha_const {}", p.model, p.candidates.iter().map(|c| format!("{:#x}", c.0)).collect::<Vec<_>>(), p.alpha_const);
+            }
+        }
+        if let Some(id) = std::env::var("FM2_DUMP_PS").ok().and_then(|v| u32::from_str_radix(v.trim(), 16).ok()) {
+            if p.candidates.iter().any(|c| c.0 == id) {
+                let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                for v in &p.positions {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(v[k]);
+                        hi[k] = hi[k].max(v[k]);
+                    }
+                }
+                println!("[fm2] draw bbox {lo:.0?} .. {hi:.0?}, {} triangles", p.indices.len() / 3);
+                println!("[fm2] draw with texture {id:#x}: model {} ps_sig {:016x} alpha_const {} candidates {:?}
+{}", p.model, ps_sig(&p), p.alpha_const, p.candidates, p.ps_run.as_ref().map_or("(no ps)", |r| r.text.as_str()));
+                if let Some(r) = p.ps_run.as_ref() {
+                    println!("[fm2]   constants {:?}", r.consts.iter().filter(|(k, _)| [100, 101, 102, 104, 114, 255].contains(k)).collect::<Vec<_>>());
+                }
             }
         }
         if let Some((ax, az, r)) = std::env::var("FM2_AT").ok().and_then(|v| {
@@ -1308,9 +1601,23 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         let usable = |t: &&(u32, u32, usize)| t.1 & 8 == 0 && (t.1 == 1 || t.1 & 1 == 0) && textures.contains_key(&t.0) && !small_lm.contains(&t.0) && !normal_ids.contains(&t.0) && !placeholder_ids.contains(&t.0);
         // A texture the draw's pixel shader samples as a cube map is an environment map: neither a colour nor a mask.
         let cube = |id: u32| p.candidates.iter().enumerate().any(|(k, c)| c.0 == id && p.cand_slots.get(k).and_then(|s| p.resolved.get(s)).is_some_and(|u| u.is_empty()));
-        let colours: Vec<(u32, u32)> = p.candidates.iter().filter(usable).filter(|t| !mask(t.0) && !cube(t.0)).map(|t| (t.0, t.1)).collect();
+        // A texture the pixel shader fetches only the alpha of (`tfetch2D r3.w___`) is the opacity, not a colour: Nurburgring's spruce cards read the alpha from one
+        // sheet and the colour from the next, and the first (pale blue-grey) used to be drawn as the colour. `FM2_ALPHA_ONLY_COLOUR=1` = the old rule.
+        let alpha_only = alpha_only_items(&p);
+        let mut colours: Vec<(u32, u32)> = p
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| usable(t))
+            .filter(|(_, t)| !mask(t.0) && !cube(t.0))
+            .filter(|(k, _)| p.cand_slots.get(*k).is_none_or(|j| !alpha_only.contains(j)) || std::env::var_os("FM2_ALPHA_ONLY_COLOUR").is_some())
+            .map(|(_, t)| (t.0, t.1))
+            .collect();
+        if colours.is_empty() {
+            colours = p.candidates.iter().filter(usable).filter(|t| !mask(t.0) && !cube(t.0)).map(|t| (t.0, t.1)).collect();
+        }
         let masks: Vec<(u32, u32)> = p.candidates.iter().filter(usable).filter(|t| mask(t.0)).map(|t| (t.0, t.1)).collect();
-        let tex = |(id, flags): (u32, u32)| json!({"id": id, "flags": flags, "file": format!("textures/{id:08x}.dds"), "word": textures[&id].1});
+        let tex = |(id, flags): (u32, u32)| json!({"id": id, "flags": flags, "file": format!("textures/{id:08x}.dds"), "word": if id >= 0xFFFF_9000 && id < 0xFFFF_A000 { 0x3F00 } else { textures[&id].1 }});
         // Two colour textures and one single-channel mask: FH1's two-way terrain blend (h_blnd2_ao: A, B, splat mask in slots 0, 1,
         // 2 and ambient occlusion in 5; texcoord 0 tiles the colours, texcoord 1 is the mask's).
         if std::env::var_os("FM2_ROADS").is_some() && colours.is_empty() && masks.len() >= 2 {
@@ -1415,7 +1722,91 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 }
             }
         }
-        let blend = masks.len() == 1 && colours.len() >= 2 && std::env::var_os("FM2_NO_BLEND").is_none();
+        // A blend whose first colour is a cut-out (the start-grid frame marks: a frame with a transparent middle, Tsukuba model 45) is that card as a
+        // cut-out decal: the blend has no alpha and drew the frame as a filled box. `FM2_NO_BLEND_CUTOUT=1` keeps the blend.
+        // A single tiny colour texture plus one big BC4 mask on a plain diffuse draw (Tsukuba's lattice pylon, model 101: a 64 x 16 grey colour and
+        // a 512 x 128 lattice mask): the mask is the card's opacity. Bake colour (its mean) + mask-as-alpha into one cut-out texture.
+        // `FM2_NO_MASK_ALPHA=1` keeps the solid card.
+        let mask_colour = colours.first().map(|c| c.0).or_else(|| p.candidates.iter().find(|t| t.1 == 1 && placeholder_ids.contains(&t.0)).map(|t| t.0));
+        if masks.len() == 1 && colours.len() <= 1 && mask_colour.is_some() && !p.alpha_const && checker_of[pi].is_none() && dark_ids[pi].is_none() && std::env::var_os("FM2_NO_MASK_ALPHA").is_none() {
+            let (cid, mid) = (mask_colour.unwrap_or(0), masks[0].0);
+            let key = (cid, mid);
+            let nid = match mask_alpha.get(&key) {
+                Some(v) => *v,
+                None => {
+                    let made = (|| {
+                        let rd = |id: u32| std::fs::read(dir.join("textures").join(format!("{id:08x}.dds"))).ok();
+                        let (cb, mb) = (rd(cid)?, rd(mid)?);
+                        let u = |b: &[u8], o: usize| u32::from_le_bytes(b.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+                        let (ch, cw, mh, mw) = (u(&cb, 12), u(&cb, 16), u(&mb, 12), u(&mb, 16));
+                        if cw * ch > 128 * 128 || mw * mh < 4 * cw * ch || mw == mh || u(&mb, 128) != 80 {
+                            return None;
+                        }
+                        let cf = match u(&cb, 128) { 71 => texpresso::Format::Bc1, 74 => texpresso::Format::Bc2, 77 => texpresso::Format::Bc3, _ => return None };
+                        let mut crgba = vec![0u8; cw * ch * 4];
+                        cf.decompress(cb.get(148..148 + cf.compressed_size(cw, ch))?, cw, ch, &mut crgba);
+                        let mut mrgba = vec![0u8; mw * mh * 4];
+                        texpresso::Format::Bc4.decompress(mb.get(148..148 + texpresso::Format::Bc4.compressed_size(mw, mh))?, mw, mh, &mut mrgba);
+                        let n = (cw * ch) as f32;
+                        let mean = [0, 1, 2].map(|k| (crgba.chunks_exact(4).map(|q| q[k] as f32).sum::<f32>() / n).round() as u8);
+                        let mut out = Vec::with_capacity(mw * mh * 4);
+                        for q in mrgba.chunks_exact(4) {
+                            out.extend_from_slice(&[mean[0], mean[1], mean[2], q[0]]);
+                        }
+                        crate::textures::rgba_to_dds(out, mw as u32, mh as u32).ok()
+                    })();
+                    let id = made.map(|c| {
+                        let id = 0xFFFF_9000 + 0x400 + mask_alpha.len() as u32;
+                        let _ = std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds);
+                        keyed_ids.insert(id);
+                        cutout_new.push(id);
+                        id
+                    });
+                    mask_alpha.insert(key, id.unwrap_or(0));
+                    id.unwrap_or(0)
+                }
+            };
+            if nid != 0 {
+                colours = vec![(nid, 0)];
+                masks.clear();
+            }
+        }
+        let cutout_first = colours.first().is_some_and(|c| keyed_ids.contains(&c.0)) && checker_of[pi].is_none() && !p.alpha_const && std::env::var_os("FM2_NO_BLEND_CUTOUT").is_none();
+        if cutout_first && std::env::var_os("FM2_MARK_BAKE").is_some() {
+            // (Opt-in, tried 2026-10-26: came out as a dim filled box and lost the chequer line.) The frame texture's alpha is noisy (0 to 0.63): as a hard cut-out it speckles. Bake a copy with the alpha opened to a solid frame
+            // (alpha >= 0.12 -> 1) and the colour dimmed (INFERRED: Xenia shows the marks as a faint line, about half the card colour).
+            let src = colours[0];
+            let nid = *cutout_baked.entry(src.0).or_insert_with(|| {
+                let id = 0xFFFF_9000 + cutout_baked_len;
+                let made = (|| {
+                    let dds = std::fs::read(dir.join("textures").join(format!("{:08x}.dds", src.0))).ok()?;
+                    let u = |o: usize| u32::from_le_bytes(dds.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap());
+                    let fmt = match u(128) { 71 => texpresso::Format::Bc1, 74 => texpresso::Format::Bc2, 77 => texpresso::Format::Bc3, _ => return None };
+                    let (h, w) = (u(12) as usize, u(16) as usize);
+                    let mut rgba = vec![0u8; w * h * 4];
+                    fmt.decompress(dds.get(148..148 + fmt.compressed_size(w, h))?, w, h, &mut rgba);
+                    let dim: f32 = std::env::var("FM2_MARK_DIM").ok().and_then(|v| v.parse().ok()).unwrap_or(0.55);
+                    for px in rgba.chunks_exact_mut(4) {
+                        px[3] = if px[3] >= 30 { 255 } else { 0 };
+                        for c in &mut px[..3] {
+                            *c = (*c as f32 * dim).round() as u8;
+                        }
+                    }
+                    crate::textures::rgba_to_dds(rgba, w as u32, h as u32).ok()
+                })();
+                if let Some(c) = made {
+                    let _ = std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds);
+                    keyed_ids.insert(id);
+                    cutout_new.push(id);
+                    id
+                } else {
+                    src.0
+                }
+            });
+            cutout_baked_len = cutout_baked.len() as u32;
+            colours[0] = (nid, src.1);
+        }
+        let blend = masks.len() == 1 && colours.len() >= 2 && std::env::var_os("FM2_NO_BLEND").is_none() && !cutout_first;
         // A decoded lightmap atlas tile that isn't used by the blend path (its shader shares the mask's uv, so the two
         // cannot be told apart yet). FM2_LIGHTMAPS=1 only (opt-in: the mapping is new).
         let small = p.candidates.iter().find(|t| small_lm.contains(&t.0)).map(|t| (t.0, 0u32, [1.0f32, 1.0, 0.0, 0.0]));
@@ -1504,6 +1895,14 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         };
         // Families whose colour textures the console decodes as sRGB (`FAMILY_GAMMA` value `COLOURS`, checked at the patch with `FM2_PROBE_AT`): the
         // material says so and the remaster table uploads its colour layers as sRGB (their format word alone says linear).
+        // LED / lamp boards: two pixel-shader families (New York: the marquee strip, the dome lamps, the Forza strips) whose texture alpha mixes lit and unlit colour.
+        let (key, material_json) = if LED_SIGS.contains(&ps_sig(&p)) && std::env::var_os("FM2_NO_LED").is_none() {
+            let mut m = material_json;
+            m["led"] = json!(true);
+            (format!("{key} led"), m)
+        } else {
+            (key, material_json)
+        };
         let (key, material_json) = if family_gamma(&p) == Some(COLOURS) {
             let mut m = material_json;
             m["colour_srgb"] = json!(true);
@@ -1517,6 +1916,16 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             materials.push(material_json);
             materials.len() as u32 - 1
         });
+        if std::env::var("FM2_SHOW_MODEL").is_ok_and(|v| v.trim().parse::<usize>().ok() == Some(p.model as usize)) {
+            println!("[fm2] model {} draw: material {material} {} tris {} alpha_const {} blend {blend} cands {:?}", p.model, materials[material as usize]["shader"], p.indices.len() / 3, p.alpha_const, p.candidates);
+            for (k, c) in p.candidates.iter().enumerate() {
+                let span = p.cand_slots.get(k).and_then(|sl| p.resolved.get(sl)).map(|u| {
+                    let (lo, hi) = u.iter().fold(([f32::MAX; 2], [f32::MIN; 2]), |a, t| ([a.0[0].min(t[0]), a.0[1].min(t[1])], [a.1[0].max(t[0]), a.1[1].max(t[1])]));
+                    [hi[0] - lo[0], hi[1] - lo[1]]
+                });
+                println!("[fm2]   cand {k}: texture {} resolved uv span {span:?}", c.0);
+            }
+        }
         if let Some(f) = std::env::var("FM2_NEAR").ok().map(|v| v.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 3) {
             // x, z, radius: draws with any vertex within the radius (horizontal) of (x, z), with their lightmap tile and shader hash
             let near = p.positions.iter().any(|q| (q[0] - f[0]).powi(2) + (q[2] - f[1]).powi(2) < f[2] * f[2]);
@@ -1572,7 +1981,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         b.normals.extend(normals);
         // Sprite cards map their sheet once (x1), not tiled.
         // The texture coordinates the draw's shaders feed the colour / mask samplers (`fm2_uv`), when they resolved; else the old guess.
-        let slot_uv = |id: u32| p.candidates.iter().enumerate().filter(|(_, c)| c.0 == id).find_map(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)).filter(|u| !u.is_empty()));
+        let slot_uv = |id: u32| p.candidates.iter().enumerate().filter(|(_, c)| c.0 == id).find_map(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)).filter(|u| !u.is_empty() && !degenerate_uv(u)));
         // Sprite cards sample their sheet (a mask) with the first resolved coordinate; wear blends keep their base colour's and mask's.
         // A baked road (colour from shader constants) tiles with its grain mask's coordinate: the first resolved mask that is not the wear streak.
         let wear_id = dark_ids[pi].map(|d| d.1);
@@ -1582,7 +1991,7 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         // grain out in world metres, `FM2_GRAIN_M` per repeat (default 2.5; `FM2_NO_PLANAR_GRAIN=1` keeps the old x32 guess).
         let planar_grain: Option<Vec<[f32; 2]>> = (colour_uv.is_none()
             && sprite.is_none()
-            && colours.first().is_some_and(|c| c.0 >= 0xFFFF_2000)
+            && (colours.first().is_some_and(|c| c.0 >= 0xFFFF_2000) || colours.first().is_some_and(|c| p.candidates.iter().enumerate().filter(|(_, x)| x.0 == c.0).any(|(k, _)| p.cand_slots.get(k).and_then(|s| p.resolved.get(s)).is_some_and(|u| degenerate_uv(u)))))
             && p.candidates.iter().any(|c| mask(c.0) && Some(c.0) != wear_id)
             && std::env::var_os("FM2_NO_PLANAR_GRAIN").is_none())
         .then(|| {
@@ -1646,6 +2055,9 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             flipped += 1;
             b.indices.extend(p.indices.chunks_exact(3).flat_map(|t| [t[0] + base, t[2] + base, t[1] + base]));
         }
+    }
+    for id in cutout_new {
+        textures.insert(id, (true, 0x3F00));
     }
     if !fallback_why.is_empty() {
         let mut v: Vec<_> = fallback_why.iter().collect();
@@ -1823,9 +2235,17 @@ fn cutout_texture(dds: &[u8]) -> bool {
     let mut rgba = vec![0u8; w * h * 4];
     fmt.decompress(data, w, h, &mut rgba);
     let low = rgba.chunks_exact(4).filter(|p| p[3] < 128).count();
+    // A real cut-out has texels that are (nearly) clear and (nearly) opaque; an alpha that only spans the middle of the range (the New York marquee strip:
+    // 21..168, facade glass 116..255) is another map in the alpha channel, and testing it at 0.5 deletes the picture. `FM2_OLD_CUTOUT=1` = the old rule.
+    let (lo, hi) = rgba.chunks_exact(4).fold((255u8, 0u8), |(lo, hi), p| (lo.min(p[3]), hi.max(p[3])));
+    if (lo > 64 || hi < 128) && std::env::var_os("FM2_OLD_CUTOUT").is_none() {
+        return false;
+    }
     // 3..97 % transparent: a sprite sheet. Fully transparent textures are an unused alpha channel (X8R8G8B8 decoded with
     // alpha 0), and a few percent is noise.
-    low * 100 >= w * h * 3 && low * 100 <= w * h * 97
+    // Sparse sheets (grass tufts: 98 to 99 % clear) still have a few hundred opaque texels; only a texture with (almost) none is an unused alpha channel.
+    let solid = w * h - low;
+    low * 100 >= w * h * 3 && (low * 100 <= w * h * 97 || (solid >= 1 && std::env::var_os("FM2_OLD_CUTOUT_SPARSE").is_none()))
 }
 
 /// Mean RGB (0..255) of a BC1 / BC2 / BC3 DDS (DX10 header), for debugging.
@@ -1955,6 +2375,8 @@ fn sample_rgba(t: &(usize, usize, Vec<u8>), uv: [f32; 2], dec_bc4: bool) -> [f32
 thread_local! {
     /// Texture files of runtime placeholder slots (1x1 black / tiny runtime textures): the interpreter samples them as white, as the slot's neutral value.
     static WHITE_TEX: std::cell::RefCell<std::collections::HashSet<std::path::PathBuf>> = Default::default();
+    /// Baked blend textures with transparent texels (`bake_blend`): added to the cut-out set.
+    static BAKED_CUTOUTS: std::cell::RefCell<Vec<u32>> = Default::default();
 }
 
 /// The colour a draw's own pixel shader produces with neutral lighting: the lightmap blend and the sun term off, fog off, the sampled textures
@@ -1991,10 +2413,28 @@ fn shader_eval_verts(
     verts: &[usize],
     gmask_over: Option<u32>,
 ) -> Option<Vec<(usize, [f32; 3])>> {
+    let n = p.positions.len();
+    let uv_of = |k: usize, item: usize| p.resolved.get(&item).and_then(|u| u.get(verts[k]).copied());
+    let out = shader_eval_at(p, texdir, cache, const_over, reg_over, verts.len(), &uv_of, gmask_over)?;
+    Some(out.into_iter().filter(|(k, _)| verts[*k] < n).map(|(k, c)| (verts[k], [c[0], c[1], c[2]])).collect())
+}
+
+/// The pixel shader run at `count` points; `uv_of(point, item)` is the texture coordinate the draw item's sampler reads at that point (the vertex's resolved uv, or an
+/// interpolated one when baking). (point, output rgb) for the points that were not killed. None when the shader cannot run.
+#[allow(clippy::too_many_arguments)]
+fn shader_eval_at(
+    p: &Pending,
+    texdir: &Path,
+    cache: &mut HashMap<std::path::PathBuf, Option<(usize, usize, Vec<u8>)>>,
+    const_over: &[(u32, [f32; 4])],
+    reg_over: &[(usize, [f32; 4])],
+    count: usize,
+    uv_of: &dyn Fn(usize, usize) -> Option<[f32; 2]>,
+    gmask_over: Option<u32>,
+) -> Option<Vec<(usize, [f32; 4])>> {
     use fh1_shaders::ps_cpu::{fog_register, Machine};
     let ps = p.ps_run.as_ref()?;
-    let n = p.positions.len();
-    if n == 0 || ps.words.is_empty() {
+    if p.positions.is_empty() || ps.words.is_empty() {
         return None;
     }
     // Samplers decoded as sRGB (the family's table entry; with FM2_BC4_SRGB on and no entry: the BC4 rule), and placeholder samplers read white.
@@ -2025,29 +2465,29 @@ fn shader_eval_verts(
     }
     let fog = fog_register(&ps.words)?;
     let mut out = Vec::new();
-    for &v in verts.iter().filter(|&&v| v < n) {
-        let sampler_tex: HashMap<u32, &(usize, usize, Vec<u8>)> = ps
-            .item_sampler
-            .iter()
-            .filter_map(|(item, s)| Some((*s, cache.get(tex_of_item.get(item)?)?.as_ref()?)))
-            .collect();
-        let white: std::collections::HashSet<u32> = WHITE_TEX.with(|w| {
-            let w = w.borrow();
-            ps.item_sampler.iter().filter(|(item, _)| tex_of_item.get(item).is_some_and(|pth| w.contains(pth))).map(|(_, s)| *s).collect()
-        });
-        let sample = |s: u32, uv: [f32; 2]| {
-            if white.contains(&s) {
-                return [1.0; 4];
+    let sampler_tex: HashMap<u32, &(usize, usize, Vec<u8>)> = ps
+        .item_sampler
+        .iter()
+        .filter_map(|(item, s)| Some((*s, cache.get(tex_of_item.get(item)?)?.as_ref()?)))
+        .collect();
+    let white: std::collections::HashSet<u32> = WHITE_TEX.with(|w| {
+        let w = w.borrow();
+        ps.item_sampler.iter().filter(|(item, _)| tex_of_item.get(item).is_some_and(|pth| w.contains(pth))).map(|(_, s)| *s).collect()
+    });
+    let sample = |s: u32, uv: [f32; 2]| {
+        if white.contains(&s) {
+            return [1.0; 4];
+        }
+        let Some(t) = sampler_tex.get(&s) else { return [0.0; 4] };
+        let mut v = sample_rgba(t, uv, gmask & BC4 != 0);
+        if s < 31 && gmask >> s & 1 == 1 {
+            for c in &mut v[..3] {
+                *c = if *c <= 0.04045 { *c / 12.92 } else { ((*c + 0.055) / 1.055).powf(2.4) };
             }
-            let Some(t) = sampler_tex.get(&s) else { return [0.0; 4] };
-            let mut v = sample_rgba(t, uv, gmask & BC4 != 0);
-            if s < 31 && gmask >> s & 1 == 1 {
-                for c in &mut v[..3] {
-                    *c = if *c <= 0.04045 { *c / 12.92 } else { ((*c + 0.055) / 1.055).powf(2.4) };
-                }
-            }
-            v
-        };
+        }
+        v
+    };
+    for v in 0..count {
         let mut m = Machine::new(consts.clone(), HashMap::new(), &sample);
         m.r[2] = [0.0, 0.7, 0.7, 0.0];
         m.r[3] = [0.0, 1.0, 0.0, 0.0];
@@ -2055,22 +2495,23 @@ fn shader_eval_verts(
             m.r[*r] = *v;
         }
         for (item, s) in &ps.item_sampler {
-            if let (Some(reg), Some(uvs)) = (ps.sampler_reg.get(s), p.resolved.get(item)) {
-                if let Some(u) = uvs.get(v) {
-                    m.r[*reg as usize][0] = u[0];
-                    m.r[*reg as usize][1] = u[1];
-                }
+            if let (Some(reg), Some(u)) = (ps.sampler_reg.get(s), uv_of(v, *item)) {
+                m.r[*reg as usize][0] = u[0];
+                m.r[*reg as usize][1] = u[1];
             }
         }
         m.r[fog as usize][0] = 1.0;
         m.run(&ps.words);
         if !m.unsupported.is_empty() {
+            if std::env::var_os("FM2_DEBUG").is_some() {
+                println!("[fm2] shader {:016x} unsupported: {:?}", ps_sig(p), m.unsupported);
+            }
             return None;
         }
         if m.killed {
             continue;
         }
-        out.push((v, [m.out[0], m.out[1], m.out[2]]));
+        out.push((v, m.out));
     }
     Some(out)
 }
