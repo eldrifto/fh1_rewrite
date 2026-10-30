@@ -90,6 +90,16 @@ pub fn decal_mask_on() -> bool {
     *ON.get_or_init(|| std::env::var("FH1_RM_DECAL_MASK").is_ok_and(|v| v == "1"))
 }
 
+/// OPT-IN `FH1_RM_CUTOUT_A2C=1` (MODLOG 122/123): FM2 cut-outs (lightmap materials) use the game's own alpha-to-coverage (its draws set `D3DRS 0x150`)
+/// instead of an alpha test; needs MSAA (`FH1_AA=msaa4`), without it Bevy falls back to a plain 0.5 mask.
+pub fn cutout_a2c() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("FH1_RM_CUTOUT_A2C").is_ok_and(|v| v == "1"))
+}
+
+/// The `FLAG_LM_LIGHT` bit (FM2 baked-lightmap materials), as the shader's constant of the same name.
+const FLAG_LM_LIGHT_BIT: u16 = 16384;
+
 fn decal_mask_cutoff() -> f32 {
     std::env::var("FH1_RM_DECAL_MASK_CUTOFF").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5)
 }
@@ -295,6 +305,7 @@ pub fn base(r: &Record, mirrored: bool) -> StandardMaterial {
     // record's own culling as before 2026-10-08).
     let two_sided = r.flags & FLAG_TWO_SIDED != 0 || (r.class == Class::Water && !std::env::var("FH1_RM_WATER_CULL").is_ok_and(|v| v == "1"));
     let alpha_mode = match r.class {
+        Class::Cutout if cutout_a2c() && r.flags & FLAG_LM_LIGHT_BIT != 0 => AlphaMode::AlphaToCoverage,
         Class::Cutout => AlphaMode::Mask(r.params[2][3].clamp(0.05, 0.95)),
         Class::Decal if decal_mask_on() => AlphaMode::Mask(decal_mask_cutoff()),
         Class::Decal | Class::Water => AlphaMode::Blend,
@@ -453,7 +464,13 @@ fn wgsl() -> String {
         .replace("RM_FM2_DYN_SHADOW", &format!("{:.3}", wenv("FH1_RM_FM2_DYN_SHADOW", 0.6)))
         .replace("RM_FM2_SHADOW_GAME", &format!("{:.1}", wenv("FH1_RM_FM2_SHADOW_GAME", 0.0)))
         .replace("RM_FM2_SHADOW_DBG", &format!("{:.1}", wenv("FH1_RM_FM2_SHADOW_DBG", 0.0)))
+        .replace("RM_FM2_SHADOW_GAMMA", &format!("{:.3}", wenv("FH1_RM_FM2_SHADOW_GAMMA", 1.0)))
         .replace("RM_FM2_SHADOW_COL", &format!("{:.4}", wenv("FH1_RM_FM2_SHADOW_COL", 0.4)))
+        .replace("RM_FM2_SHEEN_FIX", &format!("{:.1}", if std::env::var_os("FH1_RM_FM2_SHEEN_DIR").is_some() { 1.0 } else { 0.0 }))
+        .replace("RM_FM2_SHEEN_VEC", &{
+            let v: Vec<f32> = std::env::var("FH1_RM_FM2_SHEEN_DIR").ok().map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default();
+            format!("vec3<f32>({:.4}, {:.4}, {:.4})", v.first().copied().unwrap_or(0.0), v.get(1).copied().unwrap_or(1.0), v.get(2).copied().unwrap_or(0.0))
+        })
         .replace("RM_FM2_SHEEN_POW", &format!("{:.1}", wenv("FH1_RM_FM2_SHEEN_POW", 24.0)))
         .replace("RM_FM2_SPEC_MAT", &format!("{:.1}", wenv("FH1_RM_FM2_SPEC_MAT", 0.0)))
         .replace("RM_FM2_SPEC_FIX", &format!("{:.1}", if std::env::var_os("FH1_RM_FM2_SPEC_DIR").is_some() { 1.0 } else { 0.0 }))
@@ -465,6 +482,8 @@ fn wgsl() -> String {
         .replace("RM_FM2_SPEC_UNIT", &format!("{:.3}", wenv("FH1_RM_FM2_SPEC_UNIT", 0.32)))
         .replace("RM_FM2_SHEEN", &format!("{:.3}", wenv("FH1_RM_FM2_SHEEN", 0.1)))
         .replace("RM_LM_LIGHT_NOLM", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_NOLM", 0.75)))
+        .replace("RM_CUTOUT_FAR", &format!("{:.3}", wenv("FH1_RM_CUTOUT_FAR", 0.3)))
+        .replace("RM_CUTOUT_A2C", if cutout_a2c() { "1.0" } else { "0.0" })
         .replace("RM_LM_LIGHT_FLOOR", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_FLOOR", 0.12)))
         .replace("RM_FM2_GAMMA_LM", &format!("{:.1}", wenv("FH1_RM_FM2_GAMMA_LM", 0.0)))
         .replace("RM_FM2_DBG", &format!("{:.1}", wenv("FH1_RM_FM2_DBG", 0.0)))
@@ -1079,7 +1098,9 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
                         // so the shadow only darkens where the lightmap light is above the track's shadow level. `FH1_FM2_SHADOW_GAME=1`.
                         let lerpv = max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(0.001));
                         let lit = min(vec3<f32>(1.0 - (1.0 - RM_FM2_SHADOW_COL) * (1.0 - sh)), lerpv);
-                        col = col * (lit / lerpv);
+                        // The game multiplies display-coded values, so its shadow ratio (ShadowColor / lightmap term) is a ratio of display values;
+                        // `FH1_RM_FM2_SHADOW_GAMMA` (1 = old) raises it to that power to get the linear ratio (2.2 = sRGB-like).
+                        col = col * pow(lit / lerpv, vec3<f32>(RM_FM2_SHADOW_GAMMA));
                         if RM_FM2_SHADOW_DBG > 0.5 { col = vec3<f32>(sh * sh * sh, lerpv.g / 2.0, 0.0); }
                     } else {
                         col = col * (1.0 - RM_FM2_DYN_SHADOW * lit_lm * (1.0 - sh));
@@ -1114,7 +1135,9 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
                 var spec = vec3<f32>(0.0);
                 for (var i = 0u; i < view_bindings::lights.n_directional_lights; i = i + 1u) {
                     let light = &view_bindings::lights.directional_lights[i];
-                    let h = normalize((*light).direction_to_light + pbr.V);
+                    // FH1_RM_FM2_SHEEN_DIR: the sheen keeps the track's own sun vector when the cast light is moved (FH1_FM2_SUN_SKY).
+                    let ld = select((*light).direction_to_light, normalize(RM_FM2_SHEEN_VEC), RM_FM2_SHEEN_FIX > 0.5);
+                    let h = normalize(ld + pbr.V);
                     let nh = max(dot(n, h), 0.0);
                     spec += (*light).color.rgb * pow(nh, RM_FM2_SHEEN_POW);
                 }
@@ -1191,7 +1214,16 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
 
     pbr.material.base_color = vec4<f32>(col, alpha);
     pbr.material.metallic = 0.0;
-    if (cls == CLASS_CUTOUT || (flags & FLAG_DECAL_MASK) != 0u) && alpha < smat.alpha_cutoff {
+    // Far cut-outs: the game's alpha-to-coverage keeps a leaf sheet's coverage as it shrinks, the mip-averaged alpha of a plain alpha test loses it (distant canopies
+    // thin to a few specks), so the cutoff falls with distance (`FH1_RM_CUTOUT_FAR` = its factor at 80 m and beyond, 1 = off).
+    var cutoff = smat.alpha_cutoff;
+    if cls == CLASS_CUTOUT {
+        let dist = length(in.world_position.xyz - view_bindings::view.world_position);
+        cutoff = cutoff * mix(1.0, RM_CUTOUT_FAR, smoothstep(15.0, 80.0, dist));
+    }
+    // FM2 cut-outs with alpha-to-coverage (RM_CUTOUT_A2C): no discard, the multisampled output alpha is the coverage.
+    let a2c = RM_CUTOUT_A2C > 0.5 && cls == CLASS_CUTOUT && (flags & FLAG_LM_LIGHT) != 0u;
+    if !a2c && (cls == CLASS_CUTOUT || (flags & FLAG_DECAL_MASK) != 0u) && alpha < cutoff {
         discard;
     }
 

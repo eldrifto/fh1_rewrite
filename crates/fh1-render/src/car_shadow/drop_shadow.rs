@@ -278,7 +278,8 @@ fn proj_on() -> Option<f32> {
         if std::env::var("FH1_FM2_CAR_SHADOW").is_ok_and(|v| v == "0") {
             return None;
         }
-        std::env::var("FH1_RM_FM2_SHADOW_COL").ok().and_then(|v| v.parse().ok())
+        // The decal has its own colour (`FH1_RM_FM2_PROJ_COL`, the engine sets ShadowColor squared); the plain shadow colour otherwise.
+        std::env::var("FH1_RM_FM2_PROJ_COL").ok().or_else(|| std::env::var("FH1_RM_FM2_SHADOW_COL").ok()).and_then(|v| v.parse().ok())
     })
 }
 
@@ -406,7 +407,11 @@ fn update_proj_shadows(
 ) {
     let Some(shadow_col) = proj_on() else { return };
     // The light that casts the scenery shadow (the same direction doubles it).
-    let Some(to_light) = lights.iter().find(|(l, _)| l.shadow_maps_enabled).map(|(_, t)| -t.forward().as_vec3()) else { return };
+    let Some(mut to_light) = lights.iter().find(|(l, _)| l.shadow_maps_enabled).map(|(_, t)| -t.forward().as_vec3()) else { return };
+    // `FH1_RM_FM2_PROJ_DIR=x,y,z` (engine space, towards the sun): the projected car shadow follows this direction instead of the scene sun.
+    if let Some(v) = std::env::var("FH1_RM_FM2_PROJ_DIR").ok().map(|s| s.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect::<Vec<_>>()).filter(|v| v.len() == 3) {
+        to_light = Vec3::new(v[0], v[1], v[2]).normalize_or(to_light);
+    }
     for (car, input, gt, s, proj) in &mut cars {
         if s.mask.is_empty() {
             continue;
@@ -462,7 +467,7 @@ fn update_proj_shadows(
         if let Some(mut mat) = materials.get_mut(&proj.material) {
             mat.params = ProjShadowParams {
                 car_from_world,
-                to_light: l_car.extend(n.dot(to_light).max(0.0)),
+                to_light: l_car.extend(if std::env::var_os("FH1_FM2_PROJ_FULL").is_some() { 1.0 } else { n.dot(to_light).max(0.0) }),
                 bounds: Vec4::new(s.min.x, s.min.z, s.max.x, s.max.z),
                 heights: Vec4::new(s.min.y + 0.1, s.max.y, PROJ_SAMPLES, 0.0),
                 colour: Vec4::new(shadow_col, shadow_col, shadow_col, 1.0),

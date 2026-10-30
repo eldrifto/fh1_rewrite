@@ -8,6 +8,7 @@ pub mod batch;
 pub mod car;
 pub mod car_probe;
 pub mod car_paint;
+pub mod car_prt;
 pub mod light;
 pub mod material;
 pub mod night;

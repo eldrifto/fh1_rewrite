@@ -412,6 +412,8 @@ impl Plugin for RemasterCarPlugin {
         }
         app.add_plugins(MaterialPlugin::<CarPaintMaterial>::default()).init_resource::<CarMaterials>().init_resource::<CarFill>();
         let _ = app.world_mut().resource_mut::<Assets<Shader>>().insert(&crate::car_paint::SHADER, Shader::from_wgsl(crate::car_paint::wgsl(), "fh1_remaster/car_paint.wgsl"));
+        app.add_systems(Startup, crate::car_paint::load_cube);
+        crate::car_prt::plugin(app);
         app.add_systems(Update, (update_car_fill, mark_bodies, request_variants, restyle_car_materials, update_lamps).chain()).add_observer(apply_variants);
         if transp_lod_on() {
             app.add_systems(Update, transparency_lod.after(restyle_car_materials));
@@ -438,7 +440,10 @@ fn update_car_fill(tod: Option<Res<fh1_render::lighting::FxTimeOfDay>>, mut fill
         LinearRgba::rgb(v.x, v.y, v.z)
     };
     // Car sun share (car_paint.rs): IBLDirectScaleCar / IBLDirectScaleEnvironment, in fill_top.alpha. FH1_RM_CAR_SUN=0 = 1 (old).
-    let keep = if std::env::var("FH1_RM_CAR_SUN").is_ok_and(|v| v == "0") {
+    // `FH1_RM_CAR_SUN_KEEP=k` (experiment): the share of the sun's diffuse kept on the paint, whatever the game ratio says.
+    let keep = if let Ok(k) = std::env::var("FH1_RM_CAR_SUN_KEEP") {
+        k.parse().unwrap_or(1.0)
+    } else if std::env::var("FH1_RM_CAR_SUN").is_ok_and(|v| v == "0") {
         1.0
     } else {
         (t.tod.scalar_or("IBLDirectScaleCar", m, 1.0) / t.tod.scalar_or("IBLDirectScaleEnvironment", m, 1.0).max(1e-3)).clamp(0.0, 1.0)
@@ -514,7 +519,8 @@ fn restyle_car_materials(
                     None => (src.base_color.to_linear(), false, matte),
                 })
             }
-            Kind::Surface if src.base_color_texture.is_some() && !std::env::var("FH1_RM_PAINTCOLOR").is_ok_and(|v| v == "0") => {
+            Kind::Surface if src.base_color_texture.is_some() && !std::env::var("FH1_RM_PAINTCOLOR").is_ok_and(|v| v == "0") && !(name.0.starts_with("emblem") && !dir.join("fx").exists() && std::env::var("FH1_RM_FM2_EMBLEM_PAINT").is_err()) => {
+                // (An FM2 car has no `fx/`: its emblems keep their own atlas colours; FH1's emblem PaintColor made the GT-R dark.)
                 setting_colour(&settings, &name.0, &["PaintColor"]).map(|c| (c, false, false))
             }
             _ => None,
@@ -545,8 +551,8 @@ fn restyle_car_materials(
                         };
                         base.metallic = if metallic { metal } else { 0.0 };
                         base.perceptual_roughness = if metallic { rough } else { 0.42 };
-                        base.reflectance = 0.5;
-                        base.clearcoat = 1.0;
+                        base.reflectance = env_f32("FH1_RM_PAINT_REFLECTANCE", 0.5);
+                        base.clearcoat = env_f32("FH1_RM_PAINT_CLEARCOAT", 1.0);
                         base.clearcoat_perceptual_roughness = 0.03;
                         // Paint albedo scale. c3 (2026-10-06) measured the raw Combo_Colors colour ~0.6 EV too bright under
                         // the TrackSettings-shadow-azimuth sun; with the TOD sun + frame EV (2026-10-07) the raw colour
@@ -571,6 +577,9 @@ fn restyle_car_materials(
                         flake_scale: 2048.0,
                         fill_top: fill.top,
                         fill_bottom: fill.bottom,
+                        cube: crate::car_paint::cube(),
+                        prt: crate::car_prt::gain(),
+                        shade: crate::car_prt::shade(),
                     };
                     paints.add(CarPaintMaterial { base, extension: ext })
                 })
@@ -634,6 +643,11 @@ fn restyle_car_materials(
                         let wheel = crate::wheel::look(&base_name(&name.0)).is_some();
                         if matches!(lk.kind, Kind::Surface | Kind::Lens(_) | Kind::Cover(_)) && src.base_color_texture.is_some() && !wheel {
                             scale_base(&mut m, paint_scale(&settings, &name.0));
+                        }
+                        // Emblems (GT-R, Nissan) drew as dark relief at the Skyline's size: the game shows chrome there (reflection), so the plain
+                        // texture is brightened (`FH1_RM_EMBLEM_GAIN`, default 2.5, INFERRED).
+                        if name.0.starts_with("emblem") {
+                            scale_base(&mut m, env_f32("FH1_RM_EMBLEM_GAIN", 2.5));
                         }
                         if matches!(lk.kind, Kind::Glass | Kind::DarkGlass) {
                             if let Some(r) = glass_reflectance(&settings, &name.0) {
@@ -884,7 +898,7 @@ fn update_lamps(
         let heads = h.map_or(0.0, |h| h.amount);
         let level = |lamp: Lamp| match lamp {
             Lamp::Head => heads,
-            Lamp::Tail => (0.3 * heads).max(l.brake),
+            Lamp::Tail => (0.3 * heads).max(l.brake).max(env_f32("FH1_RM_TAIL_FLOOR", 0.0)),
             Lamp::Reverse => l.reverse,
             Lamp::IndicatorLeft => l.indicator_left,
             Lamp::IndicatorRight => l.indicator_right,

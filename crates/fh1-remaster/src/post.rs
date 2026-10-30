@@ -79,9 +79,15 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         // FM2's own FinalCombineBloomTonemap (docs: STATUS.md, read from the game's post shader): desaturate toward the
         // luminance, tint, then a luminance tone curve blending the dark and light parameter sets (xyzw = black point,
         // white point, gamma, boost).
-        var x = max(c.rgb, vec3<f32>(0.0));
+        // The game's scene buffer holds gamma-coded values (a 360 render target written with the console's gamma), and the whole combine
+        // (desaturate, tint, curve, the average that picks the curve) works on those codes: convert in, and back out for the display.
+        var x = to_srgb(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(8.0)));
         let l = dot(x, p.lum.xyz);
+        // `p.m.w` (FH1_FM2_SAT, INFERRED): extra saturation about the luminance; the Xenia shots are about 1.4x as colourful as the plain combine.
         x = (vec3<f32>(l) + (x - vec3<f32>(l)) * p.m.y) * p.tint.xyz;
+        // The extra saturation turns about the true luminance, so it leaves the brightness the curve sees alone.
+        let y0 = dot(x, vec3<f32>(0.2125, 0.7154, 0.0721));
+        x = max(vec3<f32>(y0) + (x - vec3<f32>(y0)) * p.m.w, vec3<f32>(0.0));
         let y = dot(x, vec3<f32>(0.2125, 0.7154, 0.0721));
         // The game's blend (vertex shader of the technique): t = saturate((average scene luminance - min) / (max - min)) with the track's
         // TrackLumLimits; its average comes from a small adaptation texture, here a grid of samples of the frame. m.z >= 0 overrides t.
@@ -91,14 +97,29 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
             for (var gy = 0; gy < 6; gy = gy + 1) {
                 for (var gx = 0; gx < 8; gx = gx + 1) {
                     let sc = textureSampleLevel(src, src_s, vec2<f32>((f32(gx) + 0.5) / 8.0, (f32(gy) + 0.5) / 6.0), 0.0).rgb;
-                    sum = sum + dot(max(sc, vec3<f32>(0.0)), vec3<f32>(0.2125, 0.7154, 0.0721));
+                    sum = sum + dot(to_srgb(clamp(sc, vec3<f32>(0.0), vec3<f32>(8.0))), vec3<f32>(0.2125, 0.7154, 0.0721));
                 }
             }
             t = clamp((sum / 48.0 - p.lum.w) * p.tint.w, 0.0, 1.0);
         }
         let q = mix(p.dark, p.lite, t);
         let y2 = pow(max(y - q.x, 0.0) / max(q.y - q.x, 1e-4), 1.0 / max(q.z, 0.1)) + q.w;
-        return vec4<f32>(x * (y2 / max(y, 1e-6)), c.a);
+        var o = clamp(x * (y2 / max(y, 1e-6)), vec3<f32>(0.0), vec3<f32>(1.0));
+        // `p.lum`-independent global contrast (INFERRED, FH1_FM2_CONTRAST=1): a piecewise-linear map of the coded value that matches the luminance
+        // percentiles of the twelve Xenia shots (5 / 25 / 50 / 75 / 95 % : 33 / 75 / 103 / 141 / 179 in ours -> 13 / 51 / 90 / 150 / 210, mean of the twelve; the new Xenia shots of 2026-10-27).
+        if (p.a.z > 0.5) {
+            let xs = array<f32, 7>(0.0, 33.0, 75.0, 103.0, 141.0, 179.0, 255.0);
+            let ys = array<f32, 7>(0.0, 13.0, 51.0, 90.0, 150.0, 210.0, 255.0);
+            let v = o * 255.0;
+            var r = v;
+            for (var k = 0; k < 6; k = k + 1) {
+                let t = clamp((v - vec3<f32>(xs[k])) / (xs[k + 1] - xs[k]), vec3<f32>(0.0), vec3<f32>(1.0));
+                let seg = vec3<f32>(ys[k]) + (ys[k + 1] - ys[k]) * t;
+                r = select(r, seg, v >= vec3<f32>(xs[k]));
+            }
+            o = r / 255.0;
+        }
+        return vec4<f32>(from_srgb(o), c.a);
     }
     var s: vec3<f32>;
     var g: vec3<f32>;
@@ -337,14 +358,14 @@ fn grade_system(
     let params: [f32; 36] = [
         settings.strength.min(1.0),
         settings.game_tonemap as u32 as f32,
-        0.0,
+        env_f32("FH1_FM2_CONTRAST", 0.0),
         0.0,
         settings.vignette,
         2.2,
         aspect,
         0.0,
         f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7],
-        settings.fm2.is_some() as u32 as f32, settings.fm2.as_ref().map_or(1.0, |m| m.desat), settings.fm2.as_ref().map_or(1.0, |m| m.t), 0.0,
+        settings.fm2.is_some() as u32 as f32, settings.fm2.as_ref().map_or(1.0, |m| m.desat), settings.fm2.as_ref().map_or(1.0, |m| m.t), env_f32("FH1_FM2_SAT", 1.0),
         settings.fm2.as_ref().map_or(0.0, |m| m.lum[0]), settings.fm2.as_ref().map_or(0.0, |m| m.lum[1]), settings.fm2.as_ref().map_or(0.0, |m| m.lum[2]), settings.fm2.as_ref().map_or(0.0, |m| m.lum_min),
         settings.fm2.as_ref().map_or(1.0, |m| m.tint[0]), settings.fm2.as_ref().map_or(1.0, |m| m.tint[1]), settings.fm2.as_ref().map_or(1.0, |m| m.tint[2]), settings.fm2.as_ref().map_or(1.0, |m| m.lum_inv_range),
         settings.fm2.as_ref().map_or(0.0, |m| m.light[0]), settings.fm2.as_ref().map_or(1.0, |m| m.light[1]), settings.fm2.as_ref().map_or(1.0, |m| m.light[2]), settings.fm2.as_ref().map_or(0.0, |m| m.light[3]),
