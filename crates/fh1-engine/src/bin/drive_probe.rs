@@ -21,6 +21,29 @@ fn main() -> anyhow::Result<()> {
     let point = if flat { Vec3::new(point.x, 0.0, point.z) } else { point };
     let ground: &dyn Ground = if flat { &FlatGround } else { &world };
     let d = CarData::load(&assets.join("cars").join(&car))?;
+    // SETTLE=1: no input for 5 s, then each wheel's load averaged over the last second, against the static share
+    // (mass x g x front weight / 2 per front wheel).
+    if std::env::var_os("SETTLE").is_some() {
+        let mut v = Vehicle::new(d.clone(), point);
+        v.place(point, yaw);
+        let dt = 1.0 / 480.0;
+        let mut sum = [0.0f32; 4];
+        for step in 0..(480 * 5) {
+            v.step(Controls { abs: true, tcs: true, ..Default::default() }, dt, ground);
+            if step >= 480 * 4 {
+                for (s, w) in sum.iter_mut().zip(&v.wheels) {
+                    *s += w.load / 480.0;
+                }
+            }
+        }
+        let total: f32 = sum.iter().sum();
+        let g = d.mass * 9.81;
+        println!(
+            "settled loads LF {:.0} RF {:.0} LR {:.0} RR {:.0} N; front share {:.1} % (data {:.1} %); total {:.0} N = {:.1} % of weight",
+            sum[0], sum[1], sum[2], sum[3], 100.0 * (sum[0] + sum[1]) / total, 100.0 * d.front_weight, total, 100.0 * total / g
+        );
+        return Ok(());
+    }
     if std::env::var_os("CHECKS").is_some() {
         for scales in [true, false] {
             checks(&d, point, yaw, ground, scales);

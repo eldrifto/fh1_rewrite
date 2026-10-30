@@ -257,7 +257,7 @@ pub struct OptionalGame {
     pub coming_soon: bool,
 }
 
-pub const OPTIONAL_GAMES: [OptionalGame; 5] = [
+pub const OPTIONAL_GAMES: [OptionalGame; 8] = [
     // fh1setup fh2.rs MAP_NAME.
     OptionalGame { folder: "fh2", name: "Forza Horizon 2", worlds: &[("fh2/anthem", "Southern Europe (FH2)")], circuits: false, cars: true, coming_soon: false },
     OptionalGame { folder: "fm4", name: "Forza Motorsport 4", worlds: &[], circuits: true, cars: true, coming_soon: false },
@@ -267,6 +267,12 @@ pub const OPTIONAL_GAMES: [OptionalGame; 5] = [
     OptionalGame { folder: "fm2", name: "Forza Motorsport 2", worlds: &[], circuits: true, cars: false, coming_soon: false },
     // `fh1setup import-fm1 <extracted disc>`: the original Xbox game's cars (its circuits aren't converted).
     OptionalGame { folder: "fm1", name: "Forza Motorsport 1", worlds: &[], circuits: false, cars: true, coming_soon: false },
+    // `fh1setup import-fm6 <FM6 Mount folder> [--cars A,B]`: the Xbox One game's cars (its circuits aren't converted).
+    OptionalGame { folder: "fm6", name: "Forza Motorsport 6", worlds: &[], circuits: false, cars: true, coming_soon: false },
+    // `fh1setup import-fm5 <FM5 Mount folder> [--cars A,B]`: the Xbox One game's cars (its circuits aren't converted).
+    OptionalGame { folder: "fm5", name: "Forza Motorsport 5", worlds: &[], circuits: false, cars: true, coming_soon: false },
+    // `fh1setup import-fh2xb1 <FH2 Mount folder> [--cars A,B]`: FH2 for Xbox One, cars only (`fh2` is the Xbox 360 import).
+    OptionalGame { folder: "fh2xb1", name: "Forza Horizon 2 (Xbox One)", worlds: &[], circuits: false, cars: true, coming_soon: false },
 ];
 
 impl OptionalGame {
