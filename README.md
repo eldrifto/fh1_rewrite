@@ -132,10 +132,35 @@ The Xbox 360 retail XEX key is needed to read the shaders inside `default.xex`. 
 cargo run --release -p fh1setup --features fh2 -- import-fh2 "path/to/FH2.iso"
 cargo run --release -p fh1setup --features fm4 -- import-fm4 "path/to/FM4 Play Disc.iso" --content "path/to/FM4 Content Install Disc.iso"
 cargo run --release -p fh1setup --features fm3 -- import-fm3 "path/to/FM3 Play Disc.iso" --disc2 "path/to/FM3 Content Install Disc.iso"
+cargo run --release -p fh1setup -- import-fm6 "path/to/FM6/Mount" --cars NIS_IDxNISMO_15
 ```
+
+FM6 (Xbox One) cars, first one only (2026-10-30, MODLOG 97 to 110): the Nissan IDx Nismo imports from the game folder (`import-fm6`; textures,
+models, materials, wheels sized by the game's own morph data, physics from FM6's database) and loads and drives in the engine
+(`fh1-engine --car ../imported/fm6/cars/NIS_IDxNISMO_15`). Checked by numbers, not by eye: headless 0-60 mph 6.4 s (FM6's database: 6.0 s),
+60-0 in 38 m, 1.06 g cornering; one game run with no errors. Not done: tyres are our own shape (the game has no tyre model file), several
+looks are inferred, no normal maps / lamps / cockpit / damage, three detail textures missing, FM6's tyre-width grip rule not ported, the
+launcher's setup does not offer FM6 yet. Other FM6 cars: not tried.
+
+FM5 (Xbox One) cars, first one only (2026-10-30, MODLOG 113): the Lotus E21 imports with the same code (`fh1setup import-fm5 "path/to/FM5/Mount" --cars LOT_E21_13`)
+and loads and drives (`--car ../imported/fm5/cars/LOT_E21_13`): headless 0-60 mph 3.1 s (FM5's database: 2.8 s), 60-0 in 21 m, 1.29 g cornering, weight
+split at rest as in FM5's data (MODLOG 113, 114); one game run with no errors. Not looked at in the game.
+
+FH2 (Xbox One) cars, first one only (2026-10-30, MODLOG 115): the Jaguar F-Type Coupe, a car the engine did not have, imports with the same code
+(`fh1setup import-fh2xb1 "path/to/FH2/Mount" --cars JAG_FTypeCoupe_15`, into `imported/fh2xb1`, separate from the Xbox 360 FH2 import) and loads and drives
+(`--car ../imported/fh2xb1/cars/JAG_FTypeCoupe_15`): headless 0-60 mph 4.3 s (database: 3.6 s), 60-0 in 28 m, 1.30 g cornering, weight split as in the data;
+the Fast7 Nissan GT-R from the standalone FH2 Fast & Furious game (`NIS_GTRFast7_12`, same command with that game's Mount folder, MODLOG 116) imports too, weight split 55.0 % front as in the data, not yet seen in the game window;
+one game run with no errors. Not looked at in the game.
 
 FM2 circuits use FM2's own in-race HUD (LAPS, RACE / Lap timer, tach and boost gauge, minimap) and pause screen, drawn from the disc's UI
 files (`fh1setup import-fm2 <disc> --only ui`); not done: the countdown lights, results pages, the main menus (see MODLOG 35 to 39).
+
+FM2 circuits' 3D look (work in progress, not matched to the original yet): the car reflects the track's own car cube map at full resolution; Test Track's
+car shadow follows the game's display-space shadow rule; opt-in switches `FH1_FM2_CAR_PRT=1` (the car lit by the game's own spherical-harmonic light and the
+per-vertex transfer data of its model; better on some circuits, worse on others, so off by default) and `FH1_FM2_GLOW=1` (the sun's glow card). Details and
+numbers: MODLOG 76 to 82, STATUS.md section 0b.
+
+FM2 circuits' scenery (2026-10-29, checked by eye against twelve Xenia shots, `STATUS.md` 0c): spectators and crowds, the New York marquee, curb edges and road paint baked from the game's own pixel shaders, cut-out foliage drawn two-sided, grass tufts and sky brightness; two values are inferred from the shots, not game data (per-circuit sky gain, far leaf-alpha factor), both switchable.
 
 Imported circuits (FM2, FM4) have a race against 7 of that game's cars, through the same race code as Colorado's events
 (grid, countdown, laps, results): `FH1_RACE=0 fh1-engine --track fm2/lagunaseca_00` (`FH1_RACE_LAPS=n`, default 3). The AI follow the

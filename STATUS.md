@@ -1,11 +1,453 @@
+# STATUS, 2026-10-30: the project and where it stands now
+
+This top part is the current, plain-language picture. Everything under "HISTORY AND EVIDENCE" further down is older, dated material, kept because it holds the numbers and the dead ends; where it disagrees with this part, this part is newer. Every step with its numbers is in `MODLOG.md` (entries 86 to 96: the FM2 scenery pass; 97 to 118: the Xbox One imports).
+
+**Nothing from the last sessions is committed** (AGENTS.md: commit only when asked). Branch `ui-elements`, last commit `3989c1c` (FM2 UI docs). The working tree holds 57 changed or new files: the FM2 scenery / crowd / car work of 2026-10-27..29 and all of the Xbox One work of 2026-10-29..30. Commit in small steps when asked (suggested split in section 11).
+
+Words used here: **engine** = the game program (`fh1-engine`); **importer** = `fh1setup`, which turns a game's files into files the engine reads; **Xbox One family** = FM5, FM6 and FH2 for Xbox One, which share one file format (section 3); **LOD0** = a model's full-detail level; **mip** = one of a texture's smaller copies (mip 0 = full size); **inferred** = a value or rule worked out from the data's behaviour or from pictures, not read from the game's own code or files; **probe** = a small command-line tool in `crates/*/examples` or `src/bin` that prints numbers.
+
+## 1. What this project is
+
+A Rust / Bevy rewrite of the Xbox 360 era Forza games. It plays Forza Horizon 1 from the user's own disc and imports content from other Forza games the user owns: FH2 (Xbox 360 and, new, Xbox One), FM4, FM3, FM2, FM1's cars, and now one car each from FM6, FM5 and FH2 for Xbox One, plus four more cars (section 4b). It reads the games' own data and rebuilds the game systems from it; it is not an emulator.
+
+Hard rules (AGENTS.md): no game files or extracted data in the repository (converted data lives in git-ignored `data/installations/<id>/assets/private/`, scratch work in git-ignored `data/work/`); `.gitignore` is a whitelist; game installs are read only (every Xbox One import only reads `D:\Games\Non-Steam Games\Azimuth\Game Files\...`); single-player and offline only; prefer the game's own data to guesses; the assistant cannot see the game, so it checks by numbers and logs and says "not tested" when something is not.
+
+| Crate | Job |
+|---|---|
+| `fh1setup` | The importer: FH1 disc -> asset groups; `import-fh2`, `import-fm4`, `import-fm3`, `import-fm2`, `import-fm1`; new: `import-fm6`, `import-fm5`, `import-fh2xb1` (one module, `fm6.rs`) |
+| `fh1-formats` | File parsers; new for the Xbox One family: `grub.rs` (container), `swatch.rs` (textures), `modelbin.rs` (models, skeleton, morphs), `materialbin.rs` (materials), `tyre.rs` (our tyre shape) |
+| `fh1-engine` | The game: physics, cameras, streaming, races, AI, HUD, crowds; `track.rs` lists the optional games (now 8) |
+| `fh1-remaster`, `fh1-render`, `fh1-shaders` | Renderers and the Xbox 360 shader tools |
+| `fh1-world`, `fh1-audio`, `fh1-radio`, `fh1-video`, `fh1-ui`, `fh1-net`, `fh1-launcher` | Collision, sound, radio, movies, UI, online, launcher |
+
+Data flow: game files -> `fh1setup` -> `data/installations/<id>/assets/private/...` (imported games under `imported/<game>/`) -> `fh1-engine`. Imported cars are addressed as `../imported/<game>/cars/<MediaName>`.
+
+## 2. State at a glance
+
+| Area | State | Evidence |
+|---|---|---|
+| Forza Horizon 1 (Colorado) | Works per README; only regression-checked lately (Colorado crowd; FH1's NIS_GTR_12 in `drive_probe`: settled 53.0 % front, data 53.0 %) | MODLOG 86, 114 |
+| FM2 circuits, 3D scene vs Xenia | Close on all twelve reference shots, not identical; global brightness and three inferred values remain | section 9, MODLOG 86-96 |
+| FM2 HUD, minimap, pause | Done and committed earlier | commits `0f62149`..`3989c1c` |
+| FM2 cars | Imported and raced; body paint brighter than Xenia's | history section 0a / 0b |
+| FM1 / FM3 / FM4 / FH2 (Xbox 360) | Imported earlier; not re-checked in these sessions | README |
+| Races on imported circuits (FM2 / FM4) | Work through a dev hook; not in the menus | history section 6 |
+| **FM6: Nissan IDx Nismo** | Imports, loads, drives; user drove it: "everything looks good" except the camera (fixed since) and missing textures (mostly fixed since) | section 4, MODLOG 97-112 |
+| **FM5: Lotus E21** | Imports, loads, drives; user: "feels good" after the front-load fix | MODLOG 113-114 |
+| **FH2 Xbox One: Jaguar F-Type Coupe** | Imports, loads, drives; not yet seen by the user | MODLOG 115 |
+| **FH2 Fast & Furious (Xbox One): Fast7 Nissan GT-R** (car only in the standalone game) | Imports, headless numbers sane (55.0 % front, data 55.0 %); not tested in the game window; the other exclusive is `BUG_VeyronFast7_12` | MODLOG 116 |
+| **FM6: Rocket 69** (`FAL_Atom_77`, electric) | Imports and loads after an electric-motor path was added; headless 48.1 % front (data 48.0 %), 0-60 6.27 s (database 5.0 s); not tested in the game window | MODLOG 117 |
+| **FH2 Xbox One: Fast & Furious R34** (`NIS_SkylineFF_99`) | Imports, headless numbers sane (56.8 % front, data 57.0 %); headlights missing; not tested in the game window | MODLOG 118 |
+| Other FM5 / FM6 / FH2 Xbox One cars | Not tried (FH2 Xbox One: 127 more cars the engine does not have) | |
+| Launcher / setup UI | Does not offer FM5, FM6 or FH2 Xbox One (command line only) | |
+
+## 3. The Xbox One family: what is decoded, and how sure
+
+FM6 (Xbox One) was decoded first on the Nissan IDx (proof of concept, user 2026-10-30: "leave fm6 for now"); FM5 and FH2 for Xbox One turned out to be the same family with older versions. Each line says how it was checked.
+
+| Piece | What it is | Checked by |
+|---|---|---|
+| Container `burG` (`grub.rs`) | Header + table of chunks (`Mesh`, `VerB`, `IndB`, `VLay`, `MatI`, `Skel`, `Mrph`, `MBuf`, `TXCB`...). Version 0x0101 (FM6): count u32 at 16, table at 0x14. Version 1 (FM5, FH2 Xbox One, FM6's generic wheel): count u16 at 6, table at 0x10 | Every file of every car passes the layout rules: IDx 159 / 159, E21 88 / 88, F-Type 213 / 213 |
+| Textures `.swatchbin` (`swatch.rs`) | Header (size, mips, 4 flag bytes); formats from the flags: BC1, BC4, BC5, BC7, 8888. Pixels in AMD GCN tiling as in Microsoft's `xg_x.dll`: micro tiles of 8x8 blocks with Morton order inside; mips under 64x32 blocks in rows of tiles; larger mips in macro tiles of 64x32 blocks with pipe / bank XOR bits (`p0 = x3^y3^x4, p1 = x4^y4, p2 = x5^y5, b0 = y4^y5^x6, b1 = y3^x7`). Small compressed textures: mip 0 is macro-tiled even below one macro tile | In-tile order read from `xg_x.dll`'s code (capstone); the rest fitted from the data and checked by "each mip shrunk 2x equals the next" (mismatch 0.06-1.7 against 5-113 for wrong layouts) and by clean pictures (Nissan badge, interior atlas, livery, grille patterns) |
+| Models `.modelbin` (`modelbin.rs`) | Shared position stream + per-range attribute streams, vertex layouts with DXGI formats, mesh records (material, bone, LOD, index range, base vertex, bindings, five UV rects). FM6: packed 16-bit positions with scale / offset, normal split between position.w and two values. FM5 / FH2 Xbox One: float positions, half-float normals | Decoded box equals the stored box on every LOD0 mesh (largest difference 0.0000 m, all three cars); normals agree with triangles at 0.978-0.984 |
+| Skeleton and placement | `Skel` bones (29 on the IDx); a mesh's u16 at +2 is its bone; shared-library parts (wheels, brakes, arms) placed by name at the wheel locators (`Locators.xml`) | Doors / glass / wipers / gauges land in plausible places; wheels match the body's wheel arches (IDx: front arch centre z +1.21, locator +1.240) |
+| Morphs (`Mrph`, `MBuf`) | The wheel model has two targets: rim radius (x 1.3182 of the distance from the axle per unit weight) and barrel width (inner edge moves -0.9) | Exact fits (spread +-0.0003, error 0.0000); rims then come out at the database's rim radius |
+| Materials (`materialbin.rs`) | Instance -> parent chain through the shared libraries (`media/cars/_library`, `media/_library`); shader name; parameters (types 0, 1, 2, 3, 4, 6, 11; texture path lengths are 7-bit variable-length numbers; FM5-version entries have no 16-byte GUID) | All 310 IDx material instances resolve; 3,145 of 3,151 library material files parse to the end |
+| Physics | FH1's own builder (`cars::physics_for`) on each game's database (FM6 `media/db/GameDB.slt`, FM5 `media/db/gamedb.slt`, FH2 Xbox One `media/stripped/gamedbRC.slt`); every table and column it reads exists in all three | Cars load and drive (section 4) |
+
+## 4. The three cars, by numbers
+
+All from `drive_probe` (headless, release build): `SETTLE=1 FLAT=1` = wheel loads after 5 s at rest; `CHECKS=1 FLAT=1` = launch, 60-0 stop, full lock at 40 mph. FH1's own NIS_GTR_12 for comparison: settled 53.0 % front (data 53.0 %), 0-60 3.63 s, 60-0 27.2 m, 1.17 g.
+
+| | FM6 Nissan IDx Nismo | FM5 Lotus E21 | FH2 XB1 Jaguar F-Type Coupe |
+|---|---|---|---|
+| Command | `import-fm6 ... --cars NIS_IDxNISMO_15` | `import-fm5 ... --cars LOT_E21_13` | `import-fh2xb1 ... --cars JAG_FTypeCoupe_15` |
+| Output | `imported/fm6/cars/NIS_IDxNISMO_15` | `imported/fm5/cars/LOT_E21_13` | `imported/fh2xb1/cars/JAG_FTypeCoupe_15` |
+| Model | 79 parts, 307 body meshes, 207,580 triangles, 25 textures | 30 parts, 184 body meshes, 243,863 triangles, 42 textures | 85 parts, 411 body meshes, 235,050 triangles, 30 textures |
+| Tyres (database) | 225/40 R19 all round | 265/60 R13 front, 355/45 R13 rear | 255/35 R20 front, 295/30 R20 rear |
+| Settled front share | 54.0 % (data 54.0 %) | 45.9 % (data 46.0 %) | 52.1 % (data 52.0 %) |
+| 0-60 mph | 6.37 s (database 6.0 s) | 3.09 s (database 2.8 s) | 4.26 s (database 3.6 s) |
+| 60-0 mph | 38.3 m, 0.90 g | 20.6 m, 1.58 g | 27.8 m, 1.27 g |
+| Full lock, 40 mph | 1.06 g | 1.29 g | 1.30 g |
+| Game run (log) | spawned, no errors | spawned, no errors | spawned, no errors |
+| Seen by the user | yes | yes (driven) | no |
+
+## 4b. Cars added after the first three (2026-10-30, later)
+
+| Car | Command (importer / game folder) | Headless result | Notes |
+|---|---|---|---|
+| FH2 FnF standalone: Fast7 Nissan GT-R `NIS_GTRFast7_12` | `import-fh2xb1 .../FH2FNF/Mount` | 55.0 % front (data 55.0 %); scale 1.0: 0-60 2.97 s, 60-0 43.8 m | One of only two cars exclusive to the standalone (other: `BUG_VeyronFast7_12`, not imported); 2 textures missing |
+| FM6 Rocket 69 `FAL_Atom_77` (electric) | `import-fm6 .../FM6/Mount` | 48.1 % front (data 48.0 %); 0-60 6.27 s (database 5.0 s) | Needed the new electric path (fix 8). Found by decoding the string table, not by file name |
+| FH2 Fast & Furious R34 `NIS_SkylineFF_99` | `import-fh2xb1 .../FH2/Mount` | 56.8 % front (data 57.0 %); 0-60 3.41 s, 60-0 45.0 m | Chosen by name only; headlight models skipped (72-byte layout); 4 textures missing |
+
+None of these three has been seen in the game window. Run any with `--car ../imported/<fh2xb1|fm6>/cars/<name>`.
+
+## 5. Fixes found by loading the cars (all in the importer unless said)
+
+1. **Split tyre curve** (FM6, FM5, FH2 XB1): the databases split the tyre's forward grip curve into acceleration and braking; the engine has one. It gets the acceleration curve (inferred); the braking curve is kept as `friction_longitudinal_brake`. Symptom before: the engine refused to load the car (`missing number MinLoadCurve`).
+2. **Zero tyre-width grip** (FM6 only): FM6 stores `TireFricScale0/1` as 0 and FH1 multiplies grip by them; zeros become the engine's neutral defaults. Symptom before: 0.02 g cornering, never reached 60 mph. FM6's own replacement rule (`DiameterAffectFriction*`) is not ported.
+3. **Camera box** (FM6, and all three now): the engine's cameras measure from the car's box, which FM6's database has as zeros and none of these games ship as MAXData. The importer writes the whole car's box as the camera box. Symptom before (user): "the camera is way too far forward".
+4. **Body contact box** (FM5 E21, all three now): the engine's fallback body contact points are placed from `PristineBoundingBox`; with the wheels inside that box a point rested on the ground and took weight off the E21's front tyres. The importer now writes a body-only box there. (An earlier written guess, "FM5's suspension data means something else", was wrong.)
+5. **Hub height** (all three): FH1's own rule (tyre radius - the database's ride height) instead of the locators' height; the raked E21 otherwise stood on its rear wheels.
+6. **Opacity masks and small textures**: cut-out decals, emblems and grilles (37 cut-out materials on the IDx); mip 0 of small compressed textures decoded. Symptom before (user): "several missing textures".
+7. **Wheel motion-blur disc** dropped (the game draws it only at speed; it covered the spokes).
+8. **Electric cars** (`cars.rs`, `car_physics`): a car with a stock `List_UpgradeMotor` row and no engine row (Rocket 69) now takes `Data_Motor` as its engine and the motor's torque curve as its camshaft's; before, the engine refused it ("torque samples"). INFERRED: 100 rpm sample spacing, stall / start 0. The 11 other electric FM6 cars (Tesla Model S, ten Formula E) are untried; no battery or motor upgrades.
+
+## 6. Values and rules that are INFERRED (Xbox One family)
+
+- Which material parameter is the base colour: `1f9b6488` (textured shaders), `938926b0` (simple shaders), `c0cb2820` (paint in a car's colour file). Parameter names are hashes that match no CRC-32 / FNV-1a of strings in the shaders; meanings come from values across the IDx's materials.
+- Metal and glass looks from the shader's name; glass drawn as dark see-through (alpha 0.35).
+- UV set 0 with the third of five rects, as offset + scale (checked only where that rect is the identity: the IDx's interior atlas, 0.0 % of triangles on empty background).
+- Paint fallback when a car has no colour file: the database's first `Combo_Colors` row. It looks like a placeholder (the same value on the IDx and the E21); FM5's `ManufacturerColors.bin` probably holds the real paint, not decoded.
+- Shared-library parts' positions: their bone's x, the wheel locator's y and z; right-side parts turned half a circle rather than mirrored.
+- Rim width = tyre width (the databases have no rim width).
+- **The tyre's whole shape** (`tyre.rs`): no tyre model exists in the games' files (searched: every zip under `media`, the executable's strings); the database names the tyre "model b" and its materials `tireTread_b` / `tireSidewall_b`, so the game probably builds the shape in code. Ours: rounded sidewalls, flat tread over 80 % of the width, dark rubber. Textures of those materials not used.
+- The camera box and the body contact box are the model's own extent, not the games' (they ship none).
+- A morph buffer with one target holds the last target (seen once).
+
+## 7. Known gaps (not done)
+
+- Normal, gloss and ambient-occlusion maps are ignored (carbon weave, stitching, brushed metal look flat). Normal maps need tangents.
+- About 21 IDx meshes whose only colour source is the game's grey placeholder texture stay mid grey (brake calipers, some trim).
+- Missing textures that are in no library zip: IDx `gradient_012`, `rtint_colors_001`, `screw_003_opac`; E21 `exhausthole`, two screw masks; F-Type `exhausthole`, `gradient_002`, its symbol sheet, a pattern mask.
+- The ambient-occlusion texture format (flags `6e 02 00 90`) and 16-bit float textures do not decode.
+- The gauge cluster's 72-byte vertex layout (IDx and E21) and FM6's `ProxyLOD` (48-byte layout) are not read.
+- Cockpit view, lit lamps, damage, morph normals, skinning: not done.
+- Car names: the string tables of these games are not resolved; the index shows the media name.
+- The launcher's setup does not offer FM5, FM6 or FH2 Xbox One.
+- Headlight models (72-byte vertex layout) are skipped on cars that have them (the R34).
+- The Rocket 69's 0-60 is 1.3 s slower than the database (one gear, flat curve; not investigated).
+- 0-60 times are 0.3-0.7 s slower than the databases' figures on all three (launches are grip-limited; not investigated).
+
+## 8. Not tested
+
+The F-Type in the game (only the log of one run); the Fast7 GT-R, Rocket 69 and R34 in the game window; the IDx since the camera / texture / small-texture fixes; any other FM5, FM6 or FH2 Xbox One car; these cars in the car browser, in races, with AI, online (offline only by design); their sound (each uses an FH1 sound donor picked by the FM4 rule); Linux builds; textures above 1024 pixels (pipe / bank terms beyond x7 unknown); 2D mips whose sides are not multiples of 64x32 blocks (the decoder refuses them).
+
+## 9. FM2 circuits (the previous focus, 2026-10-27..29)
+
+Unchanged since 2026-10-29; full detail in the history section "PREVIOUS STATUS (2026-10-29)" below. In short: crowds (358,757 spectators from the game's `.crowd` files), the New York marquee, Silverstone's curbs (terrain-blend pixel shaders run on the CPU and baked), Nurburgring's trees (two-sided cut-outs, a distance alpha rule), Road Atlanta's grass tufts were fixed against twelve Xenia screenshots (road-band score 6.75 -> 6.44). Still different: global brightness (ours ~20 too bright in the darks, ~19 too dim in the highlights), car body paint, shadows, Tsukuba's clouds. Inferred values there: per-circuit sky gain, far cut-out factor 0.3, lightmap light floor 0.06, LED gain 1.3, near-figure grey 0.75 (each has a switch).
+
+## 10. How to check it (Windows, PowerShell)
+
+Build (without the DLSS SDK):
+```powershell
+cargo build --release -p fh1-engine --no-default-features
+cargo build --release -p fh1setup
+```
+Import the three Xbox One cars (reads the game folders, writes the install only):
+```powershell
+./target/release/fh1setup.exe import-fm6 "D:/Games/Non-Steam Games/Azimuth/Game Files/FM6/Mount" --cars NIS_IDxNISMO_15
+./target/release/fh1setup.exe import-fm5 "D:/Games/Non-Steam Games/Azimuth/Game Files/FM5/Mount" --cars LOT_E21_13
+./target/release/fh1setup.exe import-fh2xb1 "D:/Games/Non-Steam Games/Azimuth/Game Files/FH2/Mount" --cars JAG_FTypeCoupe_15
+```
+Expected report lines: IDx `79 parts, 307 body meshes, 4 wheels, 207580 triangles, 25 textures`; E21 `30 parts, 184 body meshes, 4 wheels, 243863 triangles, 42 textures`; F-Type `85 parts, 411 body meshes, 4 wheels, 235050 triangles, 30 textures` (each followed by the textures that did not load).
+
+Drive one (`$env:FH1_OWNERSHIP="0"` turns off the owned-games check if a car is refused):
+```powershell
+cargo run --release -p fh1-engine --no-default-features --bin fh1-engine -- --car ../imported/fh2xb1/cars/JAG_FTypeCoupe_15
+```
+Numbers without the game window:
+```powershell
+$env:SETTLE="1"; $env:FLAT="1"; ./target/release/drive_probe ../imported/fh2xb1/cars/JAG_FTypeCoupe_15
+```
+(expected: front share 52.1 %, total 100.0 % of weight). Clear `SETTLE` and set `CHECKS=1` for the launch / stop / cornering lines.
+
+Format probes (point them at a car unpacked with `cargo run -p fh1-formats --example zip_extract -- <car.zip> <git-ignored folder>`): `grub_probe` (container), `modelbin_probe` (models, box and normal checks, OBJ output), `swatch_dump` (textures to PNG), `swatch_survey` (texture sizes in zips), `fm6_car_probe` (placement, materials, wheels, tyres).
+
+FM2 circuit checks: see the history section below ("How to check it").
+
+## 11. Files changed and not committed
+
+- New, Xbox One family: `crates/fh1-formats/src/{grub,swatch,modelbin,materialbin,tyre}.rs`; examples `zip_extract`, `grub_probe`, `swatch_probe`, `swatch_dump`, `swatch_survey`, `modelbin_probe`, `fm6_car_probe`; `crates/fh1setup/src/fm6.rs`.
+- Changed for it: `fh1-formats/src/lib.rs`; `fh1setup/src/{main.rs, cars.rs (physics_for, electric motor path), fm4.rs (finish, gamedb)}`, `fh1setup/Cargo.toml` (feature `fm6`, on by default); `fh1-engine/src/track.rs` (FM6, FM5, FH2 Xbox One in `OPTIONAL_GAMES`), `fh1-engine/src/bin/drive_probe.rs` (`SETTLE=1`).
+- The FM2 work of 2026-10-27..29 (crowds, scenery, car paint, sky, HUD): `fm2_crowd.rs`, `car_prt.rs`, many `fm2*` / `remaster` / `crowd` files and examples (listed in the history section).
+- Docs: `MODLOG.md` (entries to 118), `README.md`, `STATUS.md`, `docs/DESIGN.md`.
+- An untracked file named `1` at the repository root was already there at the start of these sessions; its origin is unknown and it was left alone.
+
+Suggested commits, each on its own: (1) Xbox One parsers in `fh1-formats` with their probes; (2) `fh1setup` importer (`fm6.rs`, `cars.rs`, `fm4.rs` split, main / Cargo); (3) engine (`track.rs`, `drive_probe`); (4) the FM2 scenery / crowd / car work; (5) docs.
+
+## 12. Mistakes recorded in these sessions (so they are not repeated)
+
+- Named a helper `dis.py`, which shadowed Python's `dis` module and broke capstone (the same mistake as `bisect.py` before).
+- Wrote files with shell heredocs and lost backslashes in Python / Rust string literals three times; write such files with the editor tool.
+- Read texture tiles with two unknowns varied at once (format and layout) on a mostly dark texture: five rounds of fitting before reading the layout code in `xg_x.dll` gave the in-tile order directly.
+- Read a texture path's length as one byte; long paths (128+ characters) use two, which silently cut six IDx textures.
+- Wrote in STATUS that the E21's front problem was FM5's suspension data; it was a body contact point resting on the ground. Check what else carries load before blaming the springs.
+- Gave the user a `cargo run` command without `--bin fh1-engine` (the crate has three programs).
+- Put the wheels into the box the engine uses for body contact points (fixed in 5.4).
+- Told the user the Rocket 69 "is not in the install" after a file-name search, and called `FAL_Atom_77` junk because of a placeholder-looking weight column. The car has a codename; the string table (decoded by key and offset gaps) and the motor table settled it. Search the database and string tables before concluding a car is absent.
+
+## 12b. Stopped (2026-10-30, after two attempts): the FM2 car body's shadow inputs
+The body pixel shader's self-shadow is decoded (variance shadow map, multiplies the whole lit body colour; MODLOG 126). What fills `c_shadowParams` / `c_shadowColour` / `doselfshadow` is NOT found: reading `default.xex` for readers of the effect-parameter handles (`0x2cc` / `0x2d0` in the car effect object) only returned unrelated fields. Not tried: following the object's own methods that call SetValue with those handles, or a Xenia GPU capture. Other findings of the same day (LED gain, lightmap x2, spectator tint, alpha-to-coverage): MODLOG 119 to 125.
+
+## 12c. Stopped (2026-10-30, after two attempts): the lightmap shaders' x2 and the global brightness
+The FM2 lightmap pixel shaders compute `2 * lerp(DarkColor, LightColor, lightmap) * texture` but our engine omits the 2 and matches the roads; doubling it made the road-band score 6.54 -> 13.58, and the x2 in gamma-coded space 28.40 (MODLOG 129). The final combine has no 0.5 (MODLOG 127) and the lightmap texture descriptors carry no exponent field (MODLOG 128). Not tried: the EDRAM resolve's exponent bias, found in the scene-resolve setup code. This blocks the real source of the per-circuit tone blend, sky gain and saturation x1.5, and the Test Track shadow gamma (plan values 7 and 8). Road wear 0.2 / Nurburgring grain 0.78 (value 5) need the road shader run with real inputs.
+
+## 13. What to do next (pick one)
+
+1. Let the user look at the F-Type, Fast7 GT-R, Rocket 69 and R34 in the game.
+2. Import more FH2 Xbox One cars (127 the engine does not have), reporting which fail.
+3. Normal maps (with tangents) for the Xbox One cars; headlight vertex layout; the other 11 electric cars and the Veyron.
+4. The FM2 global brightness: the game's adaptive exposure code in `default.xex` (history section 10).
+5. Commit in the steps of section 11 when asked.
+
+---
+
+
+# HISTORY AND EVIDENCE (older sections, newest first)
+
+# PREVIOUS STATUS (2026-10-29): the FM2 scenery pass, then the first FM6 / FM5 notes
+
+(This was the top of STATUS.md on 2026-10-29; superseded by the 2026-10-30 status above.) The change log with every step and every number is `MODLOG.md` (entries 86 to 96 are this latest pass).
+
+**Nothing from the last sessions is committed** (AGENTS.md: commit only when asked). The working tree on branch `ui-elements` holds a lot of uncommitted work (importer, engine, renderer, formats, docs). Before any commit, run the commands in "How to check it" and commit in small steps.
+
+## FM6 Nissan IDx, step 2 (textures): was BLOCKED, SOLVED in the sixth round below (2026-10-29)
+
+(The template `STATUS-handoff.md` named in AGENTS.md does not exist in the repository, so this follows the rules in AGENTS.md instead.)
+
+**Goal:** get the Nissan IDx Nismo from Forza Motorsport 6 (`D:\Games\Non-Steam Games\Azimuth\Game Files\FM6\Mount\media\cars\NIS_IDXNismo_15.zip`) into the engine. Plan: `docs/DESIGN.md` "FM6 IDx". Step 1 (the `burG` wrapper) is done and checked (MODLOG 97).
+**Where it stops:** step 2, turning `.swatchbin` textures into pictures. The header is understood; the pixel layout is not.
+
+What is known (checked on all 68 textures of the IDx, `crates/fh1-formats/examples/swatch_probe.rs`):
+- The metadata of the `TXCB` chunk is: `HCXT` tag, 4 bytes, a 16-byte GUID, then u16 width, u16 height, u16 depth (1), the same three again, u8 mip count twice, a zero byte, and 4 flag bytes. Example: symbols DIFF = 512x256, 10 mips, flags `0e 00 00 a0`.
+- Pixel byte counts fit block-compressed data with a full mip chain plus padding: 0.5 byte per pixel (flags start `6e`, GLOS / OPAC maps: probably BC4), 1 byte per pixel (flags `ae`, NRML maps: probably BC5; `2e`: probably BC3 or BC7), 4 bytes per pixel (the radiosity maps, flags `ae 01 12 90`, probably uncompressed 32-bit). The first flag byte looks like [3 format bits][5 bits always 01110]; this is a guess from the pattern, not read from the game's code.
+- Reading mip 0 row by row gives a recognisable but scrambled picture, so the blocks are stored tiled, not linear.
+
+Tried and failed (all on `NIS_idxnismo_15_symbols_DIFF`, as BC1, mip 0 only): linear order; 4x4, 8x8, 16x16, 32x32 blocks per tile in Morton order (x first and y first); the AddrLib "1D thin" micro-tile bit pattern for 8-byte elements with tiles row by row. The 8x8 attempts gave partly coherent pieces, so a tile structure exists, but no attempt gave a clean picture. The picture is also tinted red, so the format guess (BC1) may be wrong too; two unknowns were being varied at once.
+**Not tested:** any other format guess for this file; a texture with known content (a flat colour or gradient) to read the layout from; the game's own code (`forza_durango_release_final.exe` in the FM6 Mount folder, 31 MB) for the swizzle routine or the format table.
+
+**Second round (same day, after "try the leads"):** partly new facts, still no clean picture.
+- NEW, solid (arithmetic, checked on two textures): the pixel data is mip 0 first, then each smaller mip in turn, and EVERY mip is padded to a multiple of one micro tile = 8x8 blocks (512 bytes for 8-byte blocks, 1024 for 16-byte blocks). Example: 1024x1024 BC4, 11 mips: 699,064 bytes of mips + 2,376 bytes of padding = the file's 701,440 (the five smallest mips are padded to 512 each); symbols 512x256 BC1: 90,112 = 65,536 + 16,384 + 4,096 + 1,024 + 6 x 512. This fits a "1D tiled" layout (micro tiles only, no larger macro tiles), where the micro tiles would be in row order and only the order of blocks INSIDE a micro tile is scrambled.
+- NEW, weak (a smoothness score on block means; weak because most textures are mostly dark or noisy): inside a micro tile the order that scores best on three textures is Morton `x0 y0 x1 y1 x2 y2` (or the same with x and y swapped; the score cannot tell). But with row-major micro tiles over the whole image the same score picks a different order for the BC1 symbols texture ([y0 y1 x0 y2 x1 x2]) than for the BC4 gloss map (the Morton one), so the combination is NOT confirmed. No picture decoded with this layout looked right (gloss map by eye: structured fragments, tile boundaries visible).
+- Format column (from byte counts, still a guess): flag byte 0 = `0e` BC1, `2e` BC3 or BC7, `6e` BC4, `ae` BC5 (or 32-bit for the radiosity maps).
+- The two leads: (1) `wiper_motion_gradient` is not a plain gradient (11,264 distinct index patterns in mip 0), so it did not show the order by itself. (3) the smoothness search: pure bit-interleave search, an XOR hill-climb, and a within-tile search all run; see above for what they could and could not say. (2) the game executable: its strings contain no texture tiling routine names (the one "TileMode" hit is the UI brush property), and the loader is x64 code that I did not disassemble. Not tried: `xg_x.dll` (Microsoft's texture layout library, in `FM6\EmbeddedXvd\Windows\System32`), which holds the real tile modes; a disassembler (not installed here).
+- Tools left in git-ignored `data/work`: `swz_search.py`, `swz_gf2.py`, `swz_tile.py`, `swz_macro.py`, `swz_rm.py` (all take a swatchbin path, a format (bc1 / 8 / 16 = bytes per block) and the width and height); in the repo: `swatch_probe.rs` (modes `m<N>`, `my<N>`, `g<N>`, `x=<index positions>`).
+- Recommendation: the picture is the cheaper half to give up on first. Step 3 (the meshes) does not need textures; a grey untextured IDx in the engine would prove the car pipeline, and the texture layout can be solved afterwards (best remaining lead: read `xg_x.dll`'s tile-mode table, or find a texture that is a known solid pattern).
+
+**Third round (same day, "keep on textures"):** a real lead on WHAT the layout is, a correction, still no picture.
+- NEW, solid: `xg_x.dll` (135 KB, in `FM6\EmbeddedXvd\Windows\System32`) is Microsoft's Xbox One texture-layout library and contains AMD's AddrLib (GPU address code): its strings list the tile modes (`ADDR_COLOR_1D_THIN1`, `ADDR_COLOR_2D_THIN1`/`THIN2`/`THIN4`, `ADDR_COLOR_2D_THICK`...) and the fields (`ADDR_PIPES`, `ADDR_BANKS`, `ADDR_MICRO_TILEMODE`, `ADDR_PIPE_CONFIG`, swizzles). So the swatch pixels follow a standard GPU layout, not a Forza-specific shuffle. AddrLib rule I remember (from memory of its source, NOT checked against the dll): big mips use a 2D macro-tiled mode with pipe / bank swizzles, mips smaller than a macro tile fall back to 1D (micro tiles only). That would explain why the small mips are padded to 512 bytes while the big ones show no padding, and why my row-major-tile attempts only gave fragments for mip 0.
+- CORRECTION to the format guess in "Second round": the first flag byte does NOT decide the format alone. Bytes per pixel (file size / pixels of the mip chain) against the four flag bytes: `0e 00 00 a0` 0.5 (symbols); `6e 00 00 a0` 0.5 (mostly; one 4.0); `2e 01 xx b0` 1.0; `6e 02 00 90` 1.0 (the 27 AO maps, so not BC4); `ae 00 00 b0` 1.0 (and one 2.2, one 7.9); `ae 01 00 90` and `ae 01 12 90` 4.0 (NRML maps and the radiosity maps); `6e 01 00 a0` 8.0 (ProxyLOD, one mip); `ad 01 00 40` 5.2 (trip, 33x37). A simple "pad every mip to AxB blocks" size model fits only 32 of the 68 files (best A=B=4), so the mip padding is not that simple (the 2D macro-tile padding of AddrLib is the likely reason). The earlier statement that 6e = BC4 and ae = BC5 should be read as unproven.
+- Not done: reading the 80 KB of x64 code in `xg_x.dll` (capstone is installed for Python; no other disassembler), or implementing AddrLib's 1D/2D thin addressing from its public source and testing it. The cheapest next test is the 1D-thin micro-tile bit order for 64-bit and 128-bit elements on the smallest mips (those are 1D), where no macro-tile guess is needed: decode the last 4 mips of any texture and check them for a plausible picture.
+
+**Fourth round (same day, "more textures"):** two firm facts, one partial fit, still no clean picture of any mip bigger than 8x4 blocks.
+- FIRM: the smallest mips are stored densely and in index order. Which of a mip's 64 (or 1024-byte) slots hold data: a 2x1-block mip uses slots 0-1, 4x2 uses 0-7, 8x4 uses 0-31, 4x4 uses 0-15, 2x2 uses 0-3 (checked on three textures; the rest of the 512-byte slot is padding). So there is no 8x8 Morton scramble for these. Decoded row by row with the mip's own width, the 8x4-block mip of the symbols texture is a coherent picture (two red bars); this is the first decode that looks right.
+- FIRM (statistics of the block bytes): the `2e ...` textures (1 byte per pixel: interior DIFF, gauges, livery, radiosity maps) are BC7, not BC3 (the first byte's mode field clusters on modes 4, 5 and 6; BC3 would show colour endpoints c0 > c1 in nearly every block, and only 35 to 40 percent do). `ae 00 00 b0` (normal maps) behave like BC5; the 27 AO maps (`6e 02 00 90`, 1 byte per pixel) match neither BC3 nor BC7 cleanly (many all-zero blocks): their format is UNKNOWN.
+- PARTIAL: the symbols texture's 16x8-block mip is two 8x8 tiles; its best tile order is the plain one (tile 0 left, tile 1 right), but decoded with rows of 8 blocks inside a tile it still shows jagged staircase edges, so "linear inside the tile" is NOT confirmed (it may be a different in-tile order that happens to agree for the 8x4 case). The 32x16-block mip (8 tiles): an exhaustive search over all 8! tile arrangements cut the edge mismatch from 110.6 to 32.6 with a clear XOR rule (tile index bits: t0 = tx0 ^ ty0, t1 = tx0 ^ tx1 ^ 1, t2 = ty0 ^ 1). The same kind of fit on bigger mips (symbols mip 1; the badge gloss map's mips 0 to 2) gives different rules each time and only partial cost cuts, so those fits are local minima, not answers (the in-tile order they depend on is unconfirmed). No big-mip picture was decoded correctly.
+- Pixel-format chain consequence: nothing can be exported to the engine from textures yet.
+- Next step I would take: get the real rule from the code instead of fitting it: disassemble `xg_x.dll`'s texture-layout routine with capstone (the AddrLib strings are at 0x1e220 to 0x1f5a8 of the file; `XGComputeTexture2DLayout` is export number 8 of 15), or port AddrLib's public SI/GCN tile code (1D thin micro tile, 2D thin macro tile, pipe/bank swizzle) and match its output against the three firm facts above. Both are larger jobs than the probes so far.
+
+**Fifth round (same day, "port tiling code"):** the in-tile order is now PROVEN from the game's own library code; the order of whole tiles in big mips is still unsolved. This corrects the "linear inside the tile" reading in rounds two and four.
+- FIRM, from code: I disassembled `xg_x.dll` (capstone; the function at file RVA 0x10390 turns a position inside a micro tile into x and y). For the "thin" micro-tile types (types 1 and 2 of the setting at +0x160) the in-tile index maps to x and y by plain Morton interleave, whatever the element size: `x0 y0 x1 y1 x2 y2` (index bit 0 = x0, bit 1 = y0, bit 2 = x1, bit 3 = y1, bit 4 = x2, bit 5 = y2). The "display" type (type 0) is row-by-row for 8-bit elements and uses other orders for larger ones. A micro tile is 8x8 elements, and for block-compressed formats an element is one 4x4 block.
+- FIRM, from the data: that Morton rule fits the swatches. Mip-to-mip consistency (a mip shrunk 2x should equal the next mip): with Morton inside the tile the mismatch is 1.8 against 12.8 for row-by-row (symbols, mip 4 to 5), 4.9 / 4.8 against 68.6 / 55.3 (badge gloss map, mips 4 to 5 and 5 to 6), 3.4 against 105 (grill opacity map, mip 3 to 4). This also explains the "dense slots 0..N-1" finding of round four: an 8x4, 4x2 or 2x1 block region in Morton order occupies exactly the first 32, 8 or 2 slots, and a 4x4 region the first 16.
+- FIRM: mips that are 1 to 4 tiles wide and high (up to 32x32 blocks = 128x128 pixels) use plain row-by-row tile order with Morton inside each tile: checked on the badge gloss map (mips 3 and 2, mismatch 3.1 and 1.3) and the symbols texture (mip 2, tile index = tx0, tx1, ty0 on all 5 confident tiles).
+- NOT SOLVED: mips of 8x8 tiles or more (64x64 blocks = 256x256 pixels and up, so mip 0 and 1 of most textures). Row-by-row tile order gives mismatch 77 (badge mip 1) against 1 to 3 for correct ones, so these mips use a different (2D macro-tiled, pipe/bank swizzled) arrangement. A GF(2) hill-climb and a per-tile match against the next mip both failed because most tiles are flat or empty (too few confident matches: 8, 15 and 1 of 64 on three textures, and the fitted rules disagreed). The code for the macro layer is the XOR-heavy functions at RVA 0x10940 (638 instructions), 0xd9a0 and 0xe5d0 in xg_x.dll; they take configuration fields from a struct (pipes, banks, bank width and height, macro aspect: values for the Xbox One GPU are unknown to me) and are not read yet.
+- Mistake recorded: I named a helper script `dis.py`, which shadowed Python's `dis` module and broke the capstone import (the same kind of mistake as `bisect.py` before). Renamed to `xgdis.py`.
+- Next: (1) find textures whose big mips have content in every tile (colourful BC1 or BC7 maps) and run the per-tile match on them (needs a BC7 decoder in the solver; the Rust crate texture2ddecoder has one); (2) read RVA 0x10940 and its callers to get the macro-tile formula directly; (3) with Morton and row-by-row tiles solved, mips 2 and smaller of every texture can already be decoded: that gives 128x128 previews today (and the car's textures at low resolution as a stopgap for step 3).
+
+**Sixth round (same day, "solve macro tiling"): SOLVED for the formats the car's main textures use. Step 2 is no longer blocked.**
+- The full address rule is in `crates/fh1-formats/src/swatch.rs` (doc comment) and decodes 37 of the IDx's 68 textures, including the 1024x1024 BC7 interior atlas (seats, dash, door card, steering wheel, all clean) and the livery number. Check: `cargo run --release -p fh1-formats --example swatch_dump -- data/work/fm6_idx data/work/fm6_png/all` (PNGs go to the git-ignored folder).
+- How it was found: (1) the in-tile Morton order from `xg_x.dll` (round five); (2) per-block matching of a mip against the next smaller mip (each 4x4 block, shrunk, against every 2x2 patch), keeping only clear matches (31 on the badge gloss map), then an exact XOR (GF(2)) fit of every address bit with RANSAC; this gave the 64x64-block rule (mismatch 0.7 against 77 for row order) and decoded the Nissan badge cleanly; (3) the same on mip 0 (139 matches, mismatch 0.33); (4) the two rules together matched AMD's 2D macro tiling with 8 pipes, 4 banks, 256-byte pipe interleave and 64x32-element macro tiles, which I wrote as one formula; (5) a search for extra XOR terms on three wide or large textures found one more: bank bit 1 also takes x7 (combined mismatch 72.7 to 1.77).
+- Checks of the final formula (mismatch of each mip, shrunk, against the next; wrong layouts give 5 to 113): BC4 badge 0.7 / 0.33, BC1 symbols 0.39 / 0.66 (non-square), BC4 grill 0.47, BC4 interior gloss 0.24 / 0.16 / 1.71, BC5 normal maps 0.35, 0.67 / 0.31, 8888 512x512 0.08, 8888 1024x1024 0.06; 1D below 64x32 elements, 2D from 64x32 up (checked at 64x32 and 64x64).
+- Also fixed: mip sizes. Every mip is padded to whole 8x8-element tiles in BOTH directions (a 16x4-block mip takes 16x8 blocks). With that, the exact file size is reproduced for 36 of 67 textures (all BC1, BC4, BC5, BC7 and 8888 ones except the three below). The earlier "pad to 512 bytes" model was wrong for thin mips.
+- Still NOT decoded (31): the 27 baked ambient-occlusion maps and two `Rear_*` maps (flags `6e 02 00 90`: about 1 byte per pixel, but neither BC3 nor BC7 by their block statistics and their size does not fit the padded model; format unknown); `ProxyLOD` (`6e 01 00 a0`, 8 bytes per pixel, probably 16-bit float, not tried); `NIS_grill_001_*` and `PTN_circle_006_NRML` (their sizes are 2 to 4 times what 64x64 / 128x128 needs: unexplained).
+- Not checked: 2D mips whose sides are not multiples of 64x32 elements (the decoder refuses them; none among the decodable IDx textures); textures above 1024 pixels (pipe/bank terms beyond x7 unknown); BC7 decode correctness beyond "the pictures look right" (BC7 cannot be checked by my Python tools; the interior atlas and gauges look correct by eye); the byte order of the 8888 maps (R G B A assumed); sRGB or linear (flag byte 3 might say, unknown).
+
+Next steps I would take (in this order): (1) read `data/work/fm6_idx/Textures/Wiper/wiper_motion_gradient.swatchbin` or `splatterMask`: a gradient or mask shows the block order much more clearly than a symbol atlas; (2) search the Durango executable for the swatch loader and its tile-mode / DXGI format table; (3) score candidate layouts by how smooth the decoded picture is at block borders instead of judging by eye.
+
+## RESOLVED (2026-10-30): FM5 Lotus E21, front tyres under-loaded at rest
+The cause was not FM5's suspension data (the earlier guess here was wrong): a fallback body contact point, placed from a car box that included the wheels, rested on the ground. The importer now gives the engine a body-only box; the E21 settles at 45.9 % front (data 46.0 %) with all of its weight on the tyres. Details: MODLOG 114.
+
+Words used here: **engine** = the game program (`fh1-engine`); **importer** = `fh1setup`, which turns a game disc into files the engine reads; **Xenia** = the Xbox 360 emulator the user runs the original games in, used only as a reference picture (twelve screenshots `screenshots/xenia2/x1..x12.png`); **cut-out** = a flat card with see-through parts (leaves, fences, grass tufts); **baked** = computed once at import time and stored as a texture; **inferred** = a value I fitted to the Xenia pictures, not read from the game's files.
+
+## 1. What this project is
+
+A Rust / Bevy rewrite of the Xbox 360 era Forza games. It plays Forza Horizon 1 from the user's own disc and imports content from other Xbox 360 Forza games the user owns (Forza Horizon 2, Forza Motorsport 4, 3, 2 and the original FM1's cars). It reads the games' own data and rebuilds the game systems from it; it is not an emulator. Hard rules (AGENTS.md): no game files or extracted data in the repository (converted data lives in git-ignored `data/installations/<id>/assets/private/`); `.gitignore` is a whitelist; game installs are read only; single-player and offline only; prefer the game's own data to guesses; the assistant cannot see the game, so it measures from logs and screenshots and says "not tested" when something is not.
+
+| Crate | Job |
+|---|---|
+| `fh1setup` | The importer: disc -> asset groups; `import-fm2` (circuits, cars, spectators, cubes, UI), `import-fm4`, `import-fm3`, `import-fh2`, `import-fm1` |
+| `fh1-formats` | File parsers (Forza zips, Xbox 360 textures, models, scenery, PVS visibility, FM2 `.crowd`, skinned spectator models, animations) |
+| `fh1-engine` | The game: car physics, cameras, streaming, races, AI, HUD, crowds |
+| `fh1-remaster` | The PBR renderer: materials, shadows, sky, car paint, post-processing, FM2 scenery with lightmaps |
+| `fh1-render`, `fh1-shaders` | Shared render pieces and the Xbox 360 shader-microcode disassembler / WGSL translator / CPU interpreter |
+| `fh1-world`, `fh1-audio`, `fh1-radio`, `fh1-video`, `fh1-ui`, `fh1-net`, `fh1-launcher` | Collision, sound, radio, movies, UI, online, launcher |
+
+Data flow: disc -> `fh1setup` -> `data/installations/<id>/assets/private/...` (imported games under `imported/<game>/`, remaster tables under `remaster/imported/...`) -> `fh1-engine`. The engine mirrors z against the game's files; every importer-to-engine path flips it (a mistake of this kind was one of the crowd bugs below).
+
+## 2. Current state at a glance
+
+| Area | State | Evidence |
+|---|---|---|
+| Forza Horizon 1 (Colorado) | Works per README; only regression-checked this pass: Colorado's crowd after the GPU-buffer change (same look, 9.7 / 9.8 ms) | README (not re-tested in full), MODLOG 86 |
+| FM2 circuits, 3D scene vs Xenia | Close on all twelve, not identical; scenery defects found in this pass are fixed (section 3); a global brightness difference and three inferred values remain (sections 4 and 5) | twelve shots by eye, road-band score 6.44 to 6.46 (6.75 before this pass; noise about 0.1) |
+| FM2 HUD, minimap, pause screen | Done, committed earlier (branch `ui-elements`) | section 0 below |
+| FM2 cars | Imported and raced; body paint still much brighter than Xenia's near-black on most circuits | sections 0a, 0b below |
+| Races on imported circuits (FM2 / FM4) | Work through the dev hook `FH1_RACE=0`; never driven by a person; not in the menus | section 6 below |
+| FM1 / FM3 / FM4 / FH2 content | Imported; not re-checked in this pass | README, section 4 below |
+
+## 3. The FM2 scenery pass (2026-10-28 / 29), item by item
+
+For each: what was wrong, the cause found in the game's data, the fix, and the evidence. Evidence is always "by eye against the Xenia shot" plus, where it applies, the road-band score (`data/work/cmp12.py`, lower is better).
+
+1. **Spectators (crowds).** Ours had none. The disc has `Media/Spectators.zip` (skinned figures, animations, a sprite atlas, `spectators.xml`) and a `.crowd` placement file per track (358,757 spectators on 32 maps). New importer `fm2_crowd.rs` (`import-fm2 --only crowd`) and engine support (`crowd.rs`, `crowd.wgsl`, `crowd/figures_gpu.rs`). Bugs found on the way: the `.crowd` z was negated twice (every crowd mirrored, so none near the start); the GPU skinning-matrix buffer was re-created each time a new animation clip was added and figures made earlier read zeros and vanished (now allocated at 16 MB up front); the track's `<Crowds lod0..3>` (5 / 20 / 50 / 125) are read as distances with a 600-figure cap; near figures are drawn unlit at a 0.75 grey on FM2 maps (inferred). Matches Xenia on Sunset, Maple Valley, Tsukuba, New York (both walls), Mugello (balcony marshals and photographers), Nurburgring; the circuits without a visible crowd in Xenia show none in ours. Frame cost: no measurable change (one HUD reading per circuit, 7 to 11 ms).
+2. **New York marquee ("Welcome to Forza Motorsport 2 - Fuel Your Fantasy").** The quads existed but drew as nothing: the importer's cut-out rule called the texture a cut-out because its alpha runs only 21..168, and the 0.5 alpha test deleted it. Cut-out rule fixed; the pixel shader (family `3d69a1a8dce9ca9e` / `8ae1a07996db6f64`) is an LED-board shader, drawn unlit with a 1.3 gain (inferred). Text colour (243,186,109) against Xenia (236,188,125).
+3. **Silverstone's white-and-black curb outline and far-left arc.** The terrain-blend pixel shaders (4 to 6 texture fetches, a branch) were guessed by the importer. They are now run on the CPU and baked into one texture per draw (`fm2_scenery.rs bake_blend`, using `fh1-shaders/src/ps_cpu.rs`): 90 of 90 Silverstone draws, 232 on Road Atlanta, a handful elsewhere. A thin strip needed the texture to cover the draw's own uv box.
+4. **Nurburgring.** (a) The frosted pale-cyan spruces: the shader reads only the alpha of the first texture and the colour of the second; the importer used the first as colour (fixed: alpha-only textures are not colour candidates). (b) Thin, bare-pole trees: every one of 13,148 cut-out materials was one-sided, so single-quad leaf cards vanished from behind; FM2 cut-outs are now two-sided (`remaster.rs`). (c) A distance-dependent alpha cutoff (cutoff x 0.3 from 80 m, `FH1_RM_CUTOUT_FAR`; inferred) keeps far leaf sheets from thinning out as their mip-averaged alpha falls. Result: the round tree at the road's edge has its canopy, the tall dead trees have their branches.
+5. **Road Atlanta's yellow and green boxes along the wall base.** They were grass-tuft cards whose textures are 98 to 99.8 % clear (a few strands); the cut-out rule rejected them and they drew as solid rectangles. Rule fixed (any solid texel, and alpha only has to reach 128). Every record and texture bisection missed it because the boxes came from dozens of materials; it was found by listing the draws round the wall base and looking at their textures.
+6. **Suzuka's red line across the start.** Also in Xenia's shot (thin dark red); ours is only brighter. Not a defect.
+7. **Night.** FM2 circuits have one baked daytime lightmap and no night data; `FH1_TOD=22:00` changes only the car's lamps. Nothing to check.
+8. **Sky.** The sky pixel shader was read (microcode at `.gpu` +0x28e0 of the sky model; `FM2_DUMP_SKY_PS=1`): `out.rgb = tex.rgb * (A + (1 - A) * c104.w)` with `A = tex.a * skyGain`, and `c104.w` (GlobalSpecularLevel's alpha) is 1.0 on every track, so the game's sky shader returns the texture unchanged. `c_skyMultiplier` (constant 188) is `skyGain` from the XML (traced through the executable: field 0x684, per-frame block +0xf50). The per-track differences between Xenia and ours are therefore not from the sky shader. See section 5.
+9. **Small items.** Lightmap light floor 0.12 -> 0.06 on FM2 (inferred; 0 turned New York's red banner blue); the combine and tone curves are the game's own and were not changed.
+
+## 4. What is close and what is still different
+
+Close: overall colour, skies (with the gain table, section 5), roads on most circuits, crowds, banners and signs, curbs, foliage, the New York marquee, the HUD. Verified by eye on all twelve (Nurburgring, Maple Valley, Suzuka, Tsukuba, Sebring, Road Atlanta, Test Track, Sunset, Silverstone, New York, Mugello, Laguna Seca side by side).
+
+Still different (not fixed):
+- **Global brightness.** Luminance percentiles (5 / 25 / 50 / 75 / 95 %, mean of twelve): Xenia 11 / 48 / 86 / 139 / 206, ours 31 / 72 / 102 / 141 / 187: ours is about 20 too bright from the darks to the middle and about 19 too dim at the highlights. A global contrast curve (`FH1_FM2_CONTRAST=1`, full map) moves the percentiles to 19 / 55 / 92 / 148 / 202 but wrecks the road bands (21.5); a partial-strength test was started and not completed (MODLOG 96). The sky residuals below are the same difference seen in the sky.
+- **Car body.** Xenia's Skyline is near-black navy with bright sky reflections on about nine tracks; ours is bright blue with weak reflections. The game's per-vertex transfer-number lighting is rebuilt (`FH1_FM2_CAR_PRT=1`, opt-in, neutral overall); the body shader's own shadow term is what is missing (sections 0a and 0b below).
+- **Shadows** are weaker and softer than Xenia's (Test Track's car shadow was 3.7x too bright; only Test Track has the display-space shadow fix).
+- **Tsukuba's big clouds**, **Mugello's sun disc**, the **start marker speckle** and **Nurburgring's road gloss** are open (older notes below).
+- Nurburgring's canopies are denser and darker in Xenia than ours.
+
+## 5. Values that are INFERRED (not read from the game); all can be switched off
+
+| Value | Where | Why inferred | Switch |
+|---|---|---|---|
+| Per-circuit sky gain (Tsukuba x1.55 ... ), ratio^2.2, max 2; none for New York and Road Atlanta (banners in the measuring patch) | `fh1-engine/src/main.rs`, `fm2_sky.rs` | Xenia / ours sky-patch brightness per circuit. The game's sky shader applies no per-track grade (section 3 item 8); `skyGain` correlates 0.32 with the residual, `TrackLumLimits` max 0.78 (adaptive exposure is the likely family, not modelled). The engine's frame-average estimator is the same as the game's (a mip-chain average), so the residual is the global brightness difference | `FH1_FM2_SKY_GAIN=1` |
+| Far cut-out cutoff factor 0.3 (from 15 m to 80 m) | `fh1-remaster/src/material.rs` | Stands in for the game's alpha-to-coverage; 0.12 to 0.5 looked right at about 150 m; 1.0 left distant trees sparser | `FH1_RM_CUTOUT_FAR=1` |
+| Lightmap light floor 0.06 | `main.rs` | New York banner (73,20,30) against Xenia (47,8,10), 0.12 gave (101,28,39), 0 turned it blue | `FH1_RM_LM_LIGHT_FLOOR=0.12` |
+| LED-board gain 1.3, near-figure grey 0.75 | `remaster.rs`, `crowd.rs` | Fitted to one shot each | `FH1_FM2_LED_GAIN`, `FM2_NO_LED=1` |
+| Earlier per-circuit tone-curve blend, saturation x1.5, car look, wear darkening 0.2, Test Track shadow gamma 2.2 | `main.rs` | see section 0a below | see section 0a below |
+
+Sky-patch ratios Xenia / ours: with the gain table off (game's combine on): Tsukuba 1.55, Mugello 1.40, Nurburgring 1.25, Suzuka 1.20, Sunset 1.06, Sebring 0.96, Silverstone 0.91, Maple Valley 0.85, Laguna 0.85; with the table: 0.87 to 1.17. Forcing the combine's blend `t` to 0 matches the sky better than the computed `t` on Tsukuba and Mugello but wrecks the roads (road bands 11.32), so the fix would be a better frame-luminance input, which is not available.
+
+## 6. Importer and engine changes of this pass (all uncommitted)
+
+- New: `crates/fh1setup/src/fm2_crowd.rs`; `crates/fh1-remaster/src/car_prt.rs` and the car-paint changes (earlier pass); examples `spectator_atlas`, `skin_probe`, `anim_probe`, `carbin_fm2_tail`, `stx_list`, `xpr_cube` in `fh1-formats/examples`.
+- Changed: `fm2_scenery.rs` (cut-out rules, `bake_blend`, `alpha_only_items`, LED family, debug switches), `fm2_uv.rs` (`shader_eval_at`, `dump_shaders`), `fm2.rs` (maps import also writes the crowd placement: re-importing a map deletes its folder), `remaster.rs` (LED unlit, two-sided cut-outs), `material.rs` (far cutoff), `post.rs`, `crowd.rs` / `crowd.wgsl` / `figures_gpu.rs`, `main.rs` (FM2 defaults), `fm2_sky.rs` (sky gain), `fh1-shaders/src/fm2.rs` (`disassemble` public).
+- Debug switches added (importer): `FM2_DUMP_PS=<texture hex>`, `FM2_PS_SIG=<hash>`, `FM2_DUMP_SKY_PS=1`, `FM2_ATLAS_MODEL`, `FM2_FORCE_ATLAS`, `FM2_DATA_DUMP`, `FM2_DEBUG` (rejected sprite patterns, bake failures), `FM2_NEAR=x,z,r` (draws near a point), `FM2_FIND_TEX`; (engine) `FH1_CROWD_LOG=1`, `FH1_CROWD_LOD_DIST=0`, `FH1_CROWD_FIG_CAP`, `FH1_TELEPORT=x,y,z,yaw`.
+- Old rules still available: `FM2_OLD_CUTOUT=1`, `FM2_OLD_CUTOUT_SPARSE=1`, `FM2_CUTOUT_ONE_SIDED=1`, `FM2_NO_BAKE_BLEND=1`, `FM2_ALPHA_ONLY_COLOUR=1`.
+
+## 7. How to check it (Windows)
+
+Build (without the DLSS SDK) and import once after pulling these changes:
+```powershell
+cargo build --release -p fh1-engine --no-default-features
+cargo build -p fh1setup
+.\target\debug\fh1setup.exe import-fm2 data\work_fm2\disc --only maps
+.\target\debug\fh1setup.exe data\work\disc --only remaster --force
+```
+Run a circuit (offline, no ownership check):
+```powershell
+$env:FH1_OWNERSHIP="0"; .\target\release\fh1-engine.exe --track fm2/nurburgring_00
+```
+What you should see: spectators behind the walls (New York, Sunset, Mugello, Maple Valley); an amber marquee under the NISSAN banner (New York); no curb outline round the grass patch (Silverstone); full-canopy trees and no pale frosted spruces (Nurburgring); no yellow or green rectangles along the wall (Road Atlanta).
+
+The measuring tools are in git-ignored `data/work` (not in the repository): `shoot_some.sh <prefix> <tracks...>` (writes `screenshots/<prefix>_<track>.png`, needs `FH1_OWNERSHIP=0 FH1_SHOT=... FH1_SHOT_AT=28`), `cmp12.py <prefix...>` (road-band score), `skyratio.py`, `skyratio2.py`, `mat_bisect.py <track> x0 y0 x1 y1 yellow|white` (hides groups of materials to find which draw makes a feature), `rec_bisect.py`. A fresh prefix is needed each run (`/tmp/shoot_<prefix>.done` is left behind and a reused prefix returns at once with the old pictures).
+
+## 8. Not tested
+
+A full lap or a race on the new FM2 scenery; frame cost beyond one HUD reading per circuit; Colorado's walkers close up, a long drive, and other spots on the Colorado map after the GPU-buffer change; every other circuit's grass tufts and foliage one by one; the 16 MB GPU matrix buffer's behaviour past 16 MB of clips; Linux builds; the effect of any of this on FM4 / FM3 circuits (the importer changes apply to `import-fm2` only except the shared shader code).
+
+## 9. Mistakes recorded in this pass (so they are not repeated)
+
+- Measured crowd distances from the engine's placeholder camera (0, 3, 8) instead of the real spawn: the "nearest spectator is 178 m away" finding was wrong (the real cause was a doubled z flip).
+- Mislabelled the Nurburgring pale-tree defect as Maple Valley (read the wrong row of my own comparison sheet).
+- A helper script named `bisect.py` shadowed Python's `bisect` and broke the scoring script.
+- Read Road Atlanta's boxes as a terrain-blend / atlas problem through seven failed hypotheses; they were opaque grass cards. Lesson: look at the textures of the draws at the feature before bisecting materials.
+- Called the foliage mass a haze / lighting problem before testing back-face culling. Lesson: test the cheap render-state switches (two-sided, cutoff, alpha mode) first.
+- A partial-strength contrast edit failed its assertion silently and the "0.3 / 0.6" runs were off / full strength; read the tool result before reporting a result.
+
+## 10. What to do next
+
+1. Decide whether by-eye parity with the twelve shots is the standard; if not, the one game-data lead left for the sky and the global brightness is the game's adaptive-exposure code (`TrackLumLimits`, `ToneMapeDelay`) in `default.xex` (`data/work/fm2_xex/text.asm` has the disassembly; `ppc_xref.py` finds code that references a string).
+2. A real partial-strength contrast test (mix the full map with the plain image, score road bands and percentiles).
+3. The car body's shadow term (sections 0a and 0b below).
+4. Commit in steps when asked: formats + importer (crowds, cut-outs, bake), renderer (two-sided cut-outs, far cutoff, LED), engine (crowds, sky gain, defaults), docs.
+
+---
+
+# OLDER HISTORY (written 2026-10-26 and 2026-10-27)
+
 # PROJECT SUMMARY (written 2026-10-26)
 
 This is the long-form overview of the whole project: what it is, how it is put together, what works, what does not, and where the work stands. The sections after it ("STATUS: FM2 road brightness" and the dated "Update" entries) are the detailed evidence, newest at the bottom of the file. Where this summary repeats a claim from README.md that I did not re-check in the latest sessions, it says so.
 
 Terms used once and then freely: **engine** = the game program (`fh1-engine`); **importer / setup tool** = `fh1setup`, which converts a game disc into files the engine reads; **imported map / circuit** = a track converted from another Forza game; **AI** = the computer-driven opponents; **racing line** = the path an AI car tries to follow; **lap gate** = an invisible line across the road that counts as a checkpoint; **Xenia** = the Xbox 360 emulator the user runs the original games in, used here only as a reference picture.
 
+## 0c. FM2 scenery pass (2026-10-28 / 29; MODLOG 86 to 94; nothing committed)
+Each item: what was wrong, cause (from the game's data), fix, evidence. "Evidence" is by eye against `screenshots/xenia2/x1..x12.png` plus the road-band score `data/work/cmp12.py` (6.75 before this pass, 6.46 after; run-to-run noise about 0.1); a Xenia shot is the only reference there is.
+- Spectators: 358,757 placed from each map's `.crowd` (importer `fm2_crowd.rs`); z was negated twice (fixed); GPU figure buffer re-created while growing (fixed, 16 MB up front); lod0..3 read as distances; crowds match Xenia on Sunset, Maple Valley, Tsukuba, New York, Mugello (balcony), Nurburgring.
+- New York marquee: its texture was rejected as a cut-out (alpha 21..168); rule fixed; the LED-board shader family drawn unlit (text (243,186,109) against Xenia (236,188,125)).
+- Silverstone curb outline and arc: terrain-blend pixel shaders are run on the CPU and baked per draw (`bake_blend`, 90 of 90 draws; 232 on Road Atlanta).
+- Nurburgring: spruces were coloured from the alpha-only texture (fixed); canopies and foliage mass: cut-outs were one-sided (two-sided now, `remaster.rs`), plus a distance-dependent alpha cutoff.
+- Road Atlanta wall-base boxes: sparse grass-tuft textures (98 to 99.8 % clear) were rejected as cut-outs and drew opaque; rule fixed.
+- Suzuka's red start line: also in Xenia, not a defect. Night: FM2 circuits have only a baked daytime look, nothing to check.
+INFERRED, not game data (both overridable): the per-circuit sky gain table (`main.rs`, `FH1_FM2_SKY_GAIN=1` = off; the game's own combine is already applied and does not explain the residual, MODLOG 94) and the far cut-out factor 0.3 (`FH1_RM_CUTOUT_FAR=1` = off), and LED gain 1.3, the 0.75 foliage grey, plus earlier values in section 0a.
+Not measured: frame cost beyond one HUD reading per circuit, anything not in the twelve shots.
+
+## 0a. CURRENT STATE (2026-10-27): FM2 3D scene vs the Xenia shots
+
+**Goal (set with /goal, a Stop hook keeps checking it):** the engine's FM2 circuits should be indistinguishable from the twelve Xenia screenshots in `screenshots/xenia2` (x1 Tsukuba, x2 Test Track, x3 Sunset Infield, x4 Silverstone, x5 Sebring, x6 Road Atlanta, x7 Nurburgring, x8 New York, x9 Mugello, x10 Maple Valley, x11 Laguna Seca, x12 Suzuka; x13 Tsukuba rolling start), using the game's own data first and inference only where it makes the picture more accurate. **That goal is NOT met.** The scene is much closer than at the start of the session but is plainly different in the ways listed under "Still different". Nothing from this session is committed (AGENTS.md: commit only when asked). The UI work (HUD, minimap, pause) is finished for now (section 0 below).
+
+### Where things stand, in plain terms
+- **Colour, tone and sky are close.** Skies show their real photos with clouds on most tracks; overall brightness and colourfulness are near Xenia on most tracks.
+- **Roads are the right brightness on about half the tracks** (twelve-track road-band score 8.51; 0 = perfect; 10.9 before this session's work, 8.1 at the best point after the road texture fixes).
+- **Cars are the biggest visible gap.** Xenia's Skyline is near-black navy on about nine tracks with bright sky reflections on the roof and trunk; ours is bright blue with weak, blurry reflections.
+- **Shadows are weaker than Xenia's** (Test Track: the car shadow on the road is about 3.7x too bright).
+
+### What was found in the game's own data and is now in the engine (all uncommitted)
+1. **FM2's final combine (post-process) works on gamma-coded values**, not linear ones (earlier attempts were in linear space, which is why they looked "worse"). `crates/fh1-remaster/src/post.rs` (`Fm2Post`). On by default for FM2 tracks (`FH1_FM2_POST=0` turns it off). The game picks between a dark and a light tone curve from the scene's average brightness; we cannot reproduce that input, so the per-circuit blend `t` is a fitted table (inferred, see below).
+2. **Sky:** the sky model has `shader_sky_cap` (draw 0, the zenith cap), then four sector photos (`shader_sky1..4`, alpha = sky coverage), then the sun disc and a glow card. The sectors are drawn **opaque**; the cap is draw 0 (not "the square texture": Sunset Infield and others have square sector textures, which used to be faded into a plain sky). Runtime textures (PVS flags 1) live in `.stx.bin` (Tsukuba's and Silverstone's cap is a 1x1 placeholder: nothing to draw). `crates/fh1-engine/src/fm2_sky.rs`, `crates/fh1setup/src/fm2_sky.rs`. The sun disc (untextured sphere, draw 6) is drawn additive yellow; **its look and place are not verified on screen** (it was never in frame in my shots).
+3. **Road textures:** (a) shader-derived texture coordinates that collapse one axis (Sunset Infield model 77: u span 4612, v span 0) are rejected and replaced by world-metre grain, which restored its grey grainy asphalt (`degenerate_uv`, `FM2_NO_DEGENERATE_UV=1` = old); (b) Nurburgring's road keeps its two grey grain textures per pixel instead of a flat average (`FM2_NB_GRAIN=0` = old; gain 0.78 inferred); (c) the rubber streaks already existed as a wear blend but were too faint: darkening 0.4 -> 0.2 (`FM2_WEAR_DARK`, inferred).
+4. **Scenery models found by hiding models** (`FM2_HIDE_MODELS=a,b`, `data/work/bisect.sh`): Tsukuba model 45 = the start-grid frame marks (a yellow frame texture with a transparent middle, previously drawn as a filled box; now a cut-out, `FM2_NO_BLEND_CUTOUT=1` = old; still speckled/thin because the texture alpha is noisy); model 101 = the lattice pylon (a tiny colour texture + a 512x128 lattice mask, previously a solid tower; now colour + mask-as-alpha, `FM2_NO_MASK_ALPHA=1` = old; fainter than Xenia).
+5. **Car:** tail lamps and window glass tuned (lamp level 250, minimum lamp level 0.01, glass alpha 1.5); paint darker and less milky (fill 0.1, live probe off, albedo 0.7, reflectance 0.2, clear coat 0.3); **the car paint now reflects the track's own car cube map** (`staticCarCubemap.xpr`, imported as `car_cube.bin`, 16x16 per face, Fresnel from the game's `Normal.xml`; `FH1_FM2_CAR_REFL`, strength 1; face orientation not verified, an orientation test was inconclusive).
+6. **Importer:** `fh1setup import-fm2 <disc> --only maps` also writes `car_cube.bin` per map; new examples `stx_list`, `xpr_cube`; diagnostics `FM2_HIDE_MODELS`, `FM2_SHOW_MODEL` (prints each draw and its texture coordinate spans), `FH1_SHOT_PROBE_PX=x,y;..` in the engine.
+
+### Values that are INFERRED from the Xenia shots, not read from the game (set at program start for `--track fm2/...` in `crates/fh1-engine/src/main.rs`)
+- Per-circuit tone-curve blend `t`: Tsukuba / Test Track / Laguna Seca 1 (light curve), Silverstone / Sebring / Road Atlanta / New York 0 (dark), Mugello 0.5, others computed from the frame. Fitted by trying 0 / 0.5 / 1 / computed against road bands and whole-frame brightness percentiles; `FH1_FM2_POST_T` overrides.
+- Colour saturation x1.5 about the true luminance (`FH1_FM2_SAT`): our scenes were about 0.7x as colourful as Xenia's on ten of twelve tracks.
+- Car settings listed in item 5; road wear darkening 0.2; Nurburgring grain gain 0.78; sun-disc colour; tail floor.
+
+### Tried and REJECTED (do not retry without a new idea; numbers in MODLOG 42 to 75)
+Global contrast curve; white sun colour; every sun-direction candidate (the track direction x mirrored, the game's default (1, -1, 0), the sky model's sun-disc direction, the disc for casting only) - the game's own path (`0x825220f0`) uses the XML `ShadowLightDirection`, which the engine already does, so the mismatch is in the shading; `FM2_BC4_SRGB_ALL`; road sheen off (needed for the sun glare on Silverstone / Road Atlanta); squared shadow colour (broke other tracks); car shadow decal without its elevation weight (Test Track better, four tracks too dark: 8.51 -> 10.35); car sun share and environment-light switches (no effect on the car body).
+
+### Still different from Xenia (open)
+1. **Car body:** Xenia near black on most tracks, ours bright blue; Xenia's roof/trunk shows bright sky reflections, ours are weak and blurry. Game data found: the body shader (`default.xex` effect @82066f50, techniques body / body_2 / carbon_fiber) takes per-object spherical-harmonic light coefficients (a per-object block rotated into the car's frame by `0x82733ad0`), the track light map under the car, an environment cube x `CubeMultiplier` 12, Fresnel (0.05 / 0.7 / 1.75 / power 5), Phong lobes; the source that fills the per-object block is NOT found (no SH basis constants exist in the executable, so it is loaded data). The car body measurement patch is also rough (it catches the number plate and lamp glow).
+2. **Shadows:** Xenia's car shadow on the road is dark and sharp (about 7 % of the lit road on Test Track, where the baked light is full); ours is soft and faint. The projected-shadow decal (`proj_shadow.wgsl`), the sun cascade and the road shader's `min(1-(1-ShadowColor)*S, lerp)` rule all contribute but together are weaker/shorter than Xenia's.
+3. **Tsukuba's big clouds** (Xenia x1) are not in the sector photos or any sky file I can read.
+4. **Sun glow card** (sky draw 5, texture an 8_8 two-channel format the importer cannot decode) is not drawn.
+5. **Start marker** is a speckled thin outline (Xenia: smooth faint line); **Nurburgring's road is too glossy**; **the pylon is fainter** than Xenia's.
+6. **Road brightness** outliers (ours / Xenia in linear green, left band | right band, current defaults): Test Track 0.74 | 3.73, Sunset 0.64 | 0.95, Nurburgring 1.26 | 0.22, Road Atlanta 1.48 | 0.81, New York 0.54 | 0.54, Mugello 0.96 | 1.33, Suzuka 0.40 | 0.88. Right bands are often wall / shadow, not clean road.
+7. **Contrast:** Xenia's shadows are darker and its highlights brighter than ours outside the road (luminance percentiles 5 / 25 / 50 / 75 / 95: Xenia 9 / 44 / 82 / 127 / 202, ours 22 / 70 / 97 / 127 / 172); a global curve fixes this but breaks the roads, so it needs to be selective.
+
+### How to measure and test (all of it is in git-ignored `data/work` except the engine switches)
+```
+bash data/work/shoot_some.sh <prefix> tsukuba_00 testtrackinfield_00 sunsetinfield_00 silverstone_00 sebring_00 roadatlanta_00 nurburgring_00 newyork_01 mugello_00 maplevalley_00 lagunaseca_00 suzuka_00
+python data/work/cmp12.py <baseline_prefix> <new_prefix>      # road-band sum |ln ratio|, lower is better; current defaults = 8.51
+```
+Screenshots land in `screenshots/<prefix>_<track>.png`; compare by eye against `screenshots/xenia2/x<n>.png` (crop (1,51)-(1281,771) removes the Xenia window frame). Re-import after importer changes: `./target/debug/fh1setup.exe import-fm2 data/work_fm2/disc --only maps` then `./target/debug/fh1setup.exe data/work/disc --only remaster --force`. Build the engine without the DLSS SDK: `cargo build --release -p fh1-engine --no-default-features`. Only Tsukuba, Mugello, Sunset and Silverstone were looked at closely by eye after the later car changes; the rest were measured but not viewed.
+
+### Suggested next steps
+1. (Done, opt-in, see 0b) Find what fills the car's per-object light block (search the executable for the writer of the render item's light pointer; the uploader is near `0x8255ec1c`) and rebuild the car paint's diffuse and reflection from it.
+2. (Partly done: Test Track only, see 0b) Make the road's cast shadow dark and sharp the way Xenia's is (strength and length of the sun-cascade shadow in `material.rs`, the projected decal, and the combination rule), then re-check all twelve.
+3. (Done, see 0b) Keep the car cube as a full-resolution texture (the 16x16 reduction makes reflections weak and soft).
+4. (Decoded and drawn opt-in; the sun is in no Xenia shot, see 0b) Decode the 8_8 texture for the sun glow card and verify the sun disc in a shot where it is in frame.
+5. Commit in steps when asked (formats + importer, post + sky, roads, car).
+
+Full evidence and every number: `MODLOG.md` entries 42 to 75; the saved memory note `fm2-3d-parity-findings`.
+
+## 0b. The four suggested steps of section 0a, done 2026-10-27 (later; details MODLOG 76 to 82, nothing committed)
+1. **Car light block: found, rebuilt, not adopted.** The per-object block is D3DX spherical-harmonic light (hemisphere from `SHTop` / `SHBottom`, one directional light from `SHDir`, env block from `SHEnvMapTop / Bottom`) dotted per vertex with 16 transfer numbers stored in the car file's vertex tail (the body's self-shadowing is baked in; decoded and checked on the Skyline). The engine now does the same on the CPU (`car_prt.rs`, importer `prt.bin`) and the paint uses it: **opt-in `FH1_FM2_CAR_PRT=1`**. Against Xenia (three body patches x twelve tracks, mean display difference): baseline 46.6, PRT 46.6 to 47.8: better on Road Atlanta / Nurburgring / Silverstone / New York rear panels, worse on Maple Valley and Sunset; the game's own shadow term on the car (what makes Xenia's cars near black on those) is the missing piece. Also found: the body shader's reflection is cube rgb x (1 + cube alpha x 12) (`FH1_FM2_CUBE_MUL`, with PRT only).
+2. **Road shadows: partly.** Xenia's car shadow on Test Track is the track's ShadowColor in display space (0.31 of the lit road); the engine applied it linearly. `FH1_RM_FM2_SHADOW_GAMMA=2.2` fixes Test Track (default there only) and makes the other eleven worse, so it is a per-circuit INFERRED setting. Road-band score 8.51 -> 7.15. Dark, sharp shadows on the other circuits: not solved (the game's dynamic sun direction is unknown; the sky disc's low sun fits Test Track's length but worsens the numbers).
+3. **Car cube: done.** A real 256 x 256 x 6 cube texture with mips (`car_cube_full.bin`, `import-fm2 --only cubes`).
+4. **Sun glow card and disc: decoded, drawn opt-in, not verifiable.** Xenos format 10 (8_8) now decodes (G = the flare); the card draws with `FH1_FM2_GLOW=1`; the sun is in none of the 12 Xenia shots (behind a hill, a banner, or the top edge), so its level stays INFERRED. In our own wide-angle shot the disc lands exactly on the logged pixel. Mugello's disc (sky draw 0) is not drawn.
+Still open from section 0a: the car's shadow term (see 1), long dark car shadows on eleven circuits, Tsukuba's clouds, the start marker, Nurburgring's gloss, the pylon.
+
 ## 0. FM2 UI work (2026-10-26, after this summary was written)
-FM2's HUD, minimap and pause screen are drawn from the disc's own UI scenes (details and what is guessed: MODLOG entries 35 to 39). Compared with the Xenia shots the HUD layout, tach, boost gauge and minimap match closely; the 3D scene still differs in tone / contrast, sky clouds, road surface detail and car finish. Uncommitted.
+FM2's HUD, minimap and pause screen are drawn from the disc's own UI scenes (details and what is guessed: MODLOG entries 35 to 39). Compared with the Xenia shots the HUD layout, tach, boost gauge and minimap match closely; the 3D scene is covered in section 0a above. The UI work is committed (commits 0f62149, cd619cb, 88d2a47, 3989c1c on branch `ui-elements`); the 3D work of 2026-10-27 is not.
 
 ## 1. What this project is
 
