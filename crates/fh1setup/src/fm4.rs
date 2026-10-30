@@ -127,9 +127,29 @@ pub(crate) fn strings(disc: &Path) -> Option<fh1_ui::strtable::StringTables> {
 /// Cars of an FM3 / FM4 root into `out` (`imported/<game>/cars`).
 pub(crate) fn cars(disc: &Path, private: &Path, out: &Path, game: &str) -> Result<()> {
     crate::cars::build(disc, out)?;
-    let db = Connection::open_with_flags(disc.join("media/db/gamedb.slt"), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    finish(disc, private, out, game)
+}
+
+/// The game database: `media/db/gamedb.slt`, or `media/stripped/gamedbRC.slt` (FH2 for Xbox One).
+pub(crate) fn gamedb(disc: &Path) -> PathBuf {
+    let usual = disc.join("media/db/gamedb.slt");
+    let stripped = disc.join("media/stripped/gamedbRC.slt");
+    if !usual.exists() && stripped.exists() {
+        stripped
+    } else {
+        usual
+    }
+}
+
+/// The import-contract step shared by the imported games built through `cars::build`-style folders (FM3, FM4, FM6): every
+/// `physics.json` listed in `out/index.json` gets the FH1-only `Data_Car` columns, `imported_from` and an FH1 sound donor,
+/// and `index.json` is rewritten as the contract rows. A name the string tables do not resolve (a raw `_&` key) falls back
+/// to the media name (model and maker to empty).
+pub(crate) fn finish(disc: &Path, private: &Path, out: &Path, game: &str) -> Result<()> {
+    let db = Connection::open_with_flags(gamedb(disc), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let strings = strings(disc);
     let text = |r: &str| strings.as_ref().and_then(|s| s.resolve(r)).map(fh1_ui::strtable::strip_markup).unwrap_or_else(|| r.to_owned());
+    let resolved = |r: &str| Some(text(r)).filter(|t| !t.starts_with("_&"));
     // Class letter from the badge prefix (`CLASS_R3`), and the game's PI display scale (normalised PI -> 100..999).
     let classes: Vec<(i64, String, f64, f64)> = db
         .prepare("SELECT Id, BadgeTexturePathPrefix, MaxPerformanceIndex, MaxDisplayPerformanceIndex FROM CarClasses ORDER BY Id")?
@@ -150,7 +170,7 @@ pub(crate) fn cars(disc: &Path, private: &Path, out: &Path, game: &str) -> Resul
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
-        .map(|(id, n)| (id, text(&n)))
+        .map(|(id, n)| (id, resolved(&n).unwrap_or_default()))
         .collect();
     let donors = Donors::load(private);
     let index: Vec<Value> = serde_json::from_slice(&std::fs::read(out.join("index.json"))?)?;
@@ -178,8 +198,8 @@ pub(crate) fn cars(disc: &Path, private: &Path, out: &Path, game: &str) -> Resul
             Some(3) => "AWD",
             _ => "",
         };
-        let model = car["ModelShort"].as_str().map(text).unwrap_or_default();
-        let name = car["DisplayName"].as_str().map(text).unwrap_or_else(|| media.clone());
+        let model = car["ModelShort"].as_str().and_then(resolved).unwrap_or_default();
+        let name = car["DisplayName"].as_str().and_then(resolved).unwrap_or_else(|| media.clone());
         models += usize::from(c["has_model"].as_bool() == Some(true));
         rows.push(json!({
             "id": c["id"],

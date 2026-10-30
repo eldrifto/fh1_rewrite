@@ -137,6 +137,13 @@ pub fn build(disc: &Path, out: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `physics.json` for one `Data_Car` row of any gamedb with FH1's schema (used by `import-fm6`, whose database has every
+/// table and column read here).
+#[allow(dead_code)]
+pub(crate) fn physics_for(db: &Connection, car: &Row, disc: &Path) -> Result<Value> {
+    car_physics(db, &upgrade_tables(db)?, car, disc)
+}
+
 /// Which id a `List_Upgrade*` table is keyed by.
 #[derive(Clone, Copy)]
 enum Key {
@@ -212,14 +219,33 @@ fn car_physics(
             parts.insert(table.clone(), Value::Object(row));
         }
     }
-    let part = |t: &str, c: &str| parts.get(t).and_then(|r| r.get(c)).and_then(Value::as_i64);
-
-    let one = |sql: &str, id: Option<i64>| -> Result<Value> {
+    let one =|sql: &str, id: Option<i64>| -> Result<Value> {
         Ok(match id {
             Some(id) => rows(db, sql, [id])?.into_iter().next().map(Value::Object).unwrap_or(Value::Null),
             None => Value::Null,
         })
     };
+
+    // An electric car (Xbox One family databases) has a stock `List_UpgradeMotor` row and no engine row. INFERRED: its
+    // `Data_Motor` row stands in for the engine and its curve for the camshaft's, with the petrol rows' 100 rpm sample spacing.
+    let mut motor_engine = Value::Null;
+    if engine_id.is_none() {
+        let has_motor = db.query_row("SELECT 1 FROM sqlite_master WHERE name='List_UpgradeMotor'", [], |_| Ok(())).is_ok();
+        let motor_id = if has_motor { int(&stock("List_UpgradeMotor", "Ordinal", car_id)?, "MotorID") } else { None };
+        if let Some(m) = one("SELECT * FROM Data_Motor WHERE MotorID=?1", motor_id)?.as_object() {
+            let n = m.get("NumRPMEntriesArray").and_then(Value::as_i64).unwrap_or(0);
+            parts.insert(
+                "List_UpgradeEngineCamshaft".into(),
+                json!({
+                    "RedlineRPM": m["RedlineRPM"], "StallRPM": 0.0, "StartRPM": 0.0, "RedlineWearSpeed": 0.0,
+                    "TorqueCurveMaxRPM": 100.0 * (n - 1).max(1) as f64, "NumRPMEntriesArray": n,
+                    "TorqueCurveFullThrottleID": m["TorqueCurveFullThrottleID"],
+                }),
+            );
+            motor_engine = json!({"EngineMass-kg": m["MotorMass-kg"], "MomentInertia": m["MomentInertia"]});
+        }
+    }
+    let part = |t: &str, c: &str| parts.get(t).and_then(|r| r.get(c)).and_then(Value::as_i64);
 
     // Engine torque curve: normalised samples over 0..=TorqueCurveMaxRPM.
     let cam = parts.get("List_UpgradeEngineCamshaft");
@@ -273,7 +299,7 @@ fn car_physics(
         "media_name": car["MediaName"],
         "car": car,
         "body": one("SELECT * FROM Data_CarBody WHERE Id=?1", body_id)?,
-        "engine": one("SELECT * FROM Data_Engine WHERE EngineID=?1", engine_id)?,
+        "engine": if motor_engine.is_null() { one("SELECT * FROM Data_Engine WHERE EngineID=?1", engine_id)? } else { motor_engine },
         "drivetrain": one("SELECT * FROM Data_Drivetrain WHERE DrivetrainID=?1", drivetrain_id)?,
         "torque_curve": torque_curve,
         "suspension": {

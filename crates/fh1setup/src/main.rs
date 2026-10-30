@@ -50,6 +50,8 @@ mod fm3;
 mod fm2;
 #[cfg(feature = "fm1")]
 mod fm1;
+#[cfg(feature = "fm6")]
+mod fm6;
 mod fm2_cars;
 #[cfg(feature = "fm4")]
 mod fm4_merge;
@@ -132,8 +134,14 @@ fn main() -> Result<()> {
         Some("import-fm2") => return fm2::run(),
         #[cfg(feature = "fm1")]
         Some("import-fm1") => return fm1::run(),
+        #[cfg(feature = "fm6")]
+        Some("import-fm6") => return fm6::run(),
+        #[cfg(feature = "fm6")]
+        Some("import-fm5") => return fm6::run_fm5(),
+        #[cfg(feature = "fm6")]
+        Some("import-fh2xb1") => return fm6::run_fh2xb1(),
         #[allow(unreachable_patterns)]
-        Some(c @ ("import-fh2" | "import-fm4" | "import-fm3" | "import-fm2" | "import-fm1")) => bail!("{c}: rebuild fh1setup with `--features {}`", &c[7..]),
+        Some(c @ ("import-fh2" | "import-fm4" | "import-fm3" | "import-fm2" | "import-fm1" | "import-fm6" | "import-fm5" | "import-fh2xb1")) => bail!("{c}: rebuild fh1setup with `--features {}`", if c == "import-fm5" || c == "import-fh2xb1" { "fm6" } else { &c[7..] }),
         _ => {}
     }
     let args = parse_args()?;
