@@ -331,6 +331,14 @@ pub fn parse_model(d: &[u8]) -> Result<Model> {
             }
             _ => {}
         }
+        if std::env::var_os("FM2_STREAM_TYPES").is_some() {
+            if ty == 0x2d {
+                let words: Vec<String> = (0..(len.saturating_sub(4)) / 4).map(|k| format!("{:08X}", w(k).unwrap_or(0))).collect();
+                println!("[stream] type 0x2D len {len}: {}", words.join(" "));
+            } else {
+                println!("[stream] type 0x{ty:02X} len {len} w0 {:08X} w1 {:08X}", w(0).unwrap_or(0), w(1).unwrap_or(0));
+            }
+        }
         o += len;
     }
     Ok(model)
