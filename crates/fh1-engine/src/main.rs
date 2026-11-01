@@ -985,7 +985,13 @@ fn shot_probe(time: Res<Time<Real>>, track: Res<Track>, sky: Option<Res<fm2_sky:
             if v.len() == 2 {
                 let s = Vec2::new(v[0], v[1]) * size / Vec2::new(1280.0, 720.0);
                 let hit = cam.viewport_to_world(gt, s).ok().and_then(|ray| track.ground.ray(ray.origin, *ray.direction, 800.0));
-                info!("shot probe px {},{}: {:?}", v[0], v[1], hit.map(|h| [h.point.x, h.point.y, h.point.z]));
+                // The surface decides what the pixel *is*: offroadness 0 = asphalt / kerb, 1 = dirt / grass / gravel
+                // (surfaceTypes.xml). Plan v5 P0.2 measures only the asphalt pixels.
+                match hit {
+                    Some(h) => info!("shot probe px {},{}: Some([{:.2}, {:.2}, {:.3}]) surface {} offroad {:.2}",
+                        v[0], v[1], h.point.x, h.point.y, h.point.z, h.surface, h.tyre.offroadness),
+                    None => info!("shot probe px {},{}: None", v[0], v[1]),
+                }
             }
         }
     }

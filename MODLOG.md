@@ -2131,3 +2131,23 @@ Maple is unchanged at 5.22 and Road Atlanta moved away from the reference. Suppl
 **Non-goals stated:** no per-track gains, no GPU trace, no combined changes. **Stop rule:** two attempts per step, then STATUS.md; the plan does not promise the target is reachable, it promises P2's gate will settle it with numbers.
 
 **Nothing implemented yet.** No engine, importer or data change this turn; only `docs/DESIGN.md` (git-ignored).
+
+## 2026-11-02 (225): plan v5 Phase 0 -- the acceptance number was not a measurement; the replacement is built and the diagnosis is different
+**Engine change (committed):** `FH1_SHOT_PROBE_PX` now logs each probe pixel's world point **and its surface id + OffRoadness** (`main.rs` shot_probe). Logging only, no behaviour change; the release engine rebuilt.
+
+**P0.1 -- the old mask fails a robustness test** (`data/work/p0_audit_rev.txt`). It reproduces 5.08, then:
+- moves up to 3.3x when one threshold is nudged (Road Atlanta 0.35..1.43, Maple 0.38..1.40, Tsukuba 1.25..2.82, Suzuka 0.34..1.46);
+- 25/51/54 % of its pixels sit inside the car box on Tsukuba/Laguna/Maple;
+- the intersection is the biased subset (Tsukuba: 26,079 ours-only vs 2,028 ref-only);
+- New York yields 24 common pixels and no number.
+**5.08 is retired.**
+
+**P0.2/P0.6 -- replacement:** `data/work/acceptance.py` keeps a pixel only if the engine's collision ray under it hits **asphalt** (OffRoadness 0) and both pictures are **neutral** there (absolute chroma < 0.12, a hue test, never brightness); ratios are binned by the reference's own brightness into dark/mid/bright thirds. Baseline `data/work/acceptance_acc.json`: **5.38** sum |ln(median)|, 6.77 sum of bin errors, all twelve tracks reporting. Seven tracks are stable to +-0.03 over a chroma sweep and reproduce to 0.02-0.04 between runs; five swing because our road's hue differs (ours is 11-29 levels bluer in R-B on most tracks, `p0_color.py`) -- reported, not hidden.
+
+**The diagnosis the old number could not show:** 11 of 12 tracks are **too bright in shadow and too dark in highlight** (Silverstone: dark third 52 vs Xenia 29, bright third 83 vs 116, 8-bit). Our road is compressed toward mid-grey; Mugello is the only near-parity track (bins 1.04/0.86/0.76, error 0.16). So the dominant error is the **contrast / transfer function**, not per-draw albedo -- which cannot make shadows 2-4x too bright on eleven tracks while Mugello is right. **Lead closed by test:** removing the invented lightmap light floor (`FH1_RM_LM_LIGHT_FLOOR=0`, absent from the game's shader) moves 5.38 -> 5.36 and does not move the dark bins.
+
+**P0.4:** gradient NCC peaks at shift (0,0) on eight tracks, (0,-2)/(0,-4) on four; run-to-run spread up to 4 px is the metric's noise floor. **P0.5:** `data/work/reference_hashes.txt` fixes the twelve reference sha256s plus the scored commit; `acceptance.py` refuses to compare if one changes.
+
+**Consequence for the plan:** P1 still reads the game's own inputs at the road draw, but the value to recover is the **scene-to-display transfer at the road** (the game's `ToneMappingLevels` and shadow rule), not only the albedo. P3 starts with the tone/contrast chain and re-measures the bins; per-draw albedo only for what remains.
+
+**Not tested:** nothing here changes the rendered image except the probe logging; no claim is made that any track now matches.
