@@ -2151,3 +2151,27 @@ Maple is unchanged at 5.22 and Road Atlanta moved away from the reference. Suppl
 **Consequence for the plan:** P1 still reads the game's own inputs at the road draw, but the value to recover is the **scene-to-display transfer at the road** (the game's `ToneMappingLevels` and shadow rule), not only the albedo. P3 starts with the tone/contrast chain and re-measures the bins; per-draw albedo only for what remains.
 
 **Not tested:** nothing here changes the rendered image except the probe logging; no claim is made that any track now matches.
+
+## 2026-11-02 (226): plan v5 P1.1 done (12/12 road draws named); the tone curve is the lever; P1.2 blocked on emulator input
+**P1.1 (`data/work/p1_draws.py` -> `data/work/p1_draws_acc.txt`).** The engine's probe points fed to the importer's `FM2_UNDER=x,z,y` name the draw under the car on **12 of 12** tracks (model / signature / material):
+Tsukuba 50 `19026bd2593921ac` / 192; Laguna 168 `8b9b73e9195be7b9` / 465; Road Atlanta 349 `20bef97d1cbb7c0d` / 893; Silverstone 41 `5cd0e87d36cd8908` / 482; Nordschleife 118 `4aa0eec057a0743d` / 745; Sebring 75 `2a54adf90a64d02a` / 617 (+ material 1021 on the same point); Mugello 40 `4319799a24a8f18f` / 246 (+ 631); Suzuka 160 `52ff81cbba901906` / 12; Sunset 77 `534d74061a777a9a` / 190; Maple 111 `b57319ed5f943822` / 535; New York 220 `a5e94f008e60ab00` / 1092; TT 122 `8cf9a84f7ce4bd5b` / 5.
+- The four tracks STATUS called "no triangle under the spawn" are solved: the engine's own probe, not the spawn file, is the right source.
+- Every road is the same **family** (`h_blnd2_ao_lm.fx`, `h_diff_1.fx` on Sebring) but a **different compiled signature** per track -- so a per-track shading difference can be real game data, not a fit.
+- Maple's draw is **model 111** as STATUS section 5 states, signature confirmed.
+- Sebring and Mugello have **two materials over the same point**: the "one road draw per track" assumption in earlier notes is wrong.
+
+**Harness (`data/work/`):** the acceptance harness is now A/B-safe: `anchor_pixels.json` freezes the compared pixels and their illumination bin per track (baseline reproduces to the digit: 5.38 / 6.77). Also fixed a real flake: the shot was 0 bytes because the process was killed the moment the file appeared -- it now waits for a stable size.
+
+**A/B -- the game's own LIGHT tone curve (`FH1_FM2_POST_T=1`, 4 tracks, frozen pixels):**
+```
+track         baseline dark/mid/bright    light curve dark/mid/bright
+Tsukuba       2.21 / 1.33 / 1.00           1.00 / 0.70 / 0.53
+Silverstone   3.64 / 0.62 / 0.46           5.68 / 0.75 / 0.55
+Sunset        0.77 / 0.54 / 0.37           0.53 / 0.40 / 0.28
+Maple         3.21 / 2.15 / 0.45           0.78 / 0.56 / 0.13
+```
+The light curve fixes the lifted shadows exactly (Tsukuba 2.21 -> 1.00) and over-darkens the rest. Reading: the dark curve is doing its job on a scene that is **already too dark**; the fix is to find why the pre-post frame average lands below every track's `TrackLumLimits`, not to force the curve. That measurement needs no emulator (`FH1_FM2_CONTRAST=2` paints the average into the frame).
+
+**P1.2 is BLOCKED on the user:** the runtime state (sampler state, mip, engine-filled registers) needs the instrumented Xenia driven to a grid. **ViGEmBus is not installed** (no service, no driver) and the focused loop needs the machine left idle; STATUS 2026-11-01 (144/145) records that background input then failed outright.
+
+**Not tested:** nothing rendered was changed this turn except the shot-probe logging; the tone finding is a measurement, not a fix.
