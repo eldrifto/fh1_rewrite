@@ -1047,3 +1047,1058 @@ Found: `Media/cars/ShaderSettings/Normal.xml` (1,409 lines, FM2's own; also `Met
 
 ## 2026-10-30 (133): value 3 check against the Xenia New York shot: inconclusive
 Over the 30,821 pixels where the per-figure-tint shot differs from the flat-0.75 shot (the crowd), mean luma is 80.7 (per-figure tint), 75.6 (flat 0.75), and 42.2 in Xenia's x8 at the same pixel positions (spread 46.6 / 46.7 / 39.4). The tint did not move the crowd towards Xenia's number, but this is not a valid test: the mask is where OUR figures stand, Xenia's camera and crowd positions need not line up with them, and the figures there may be a different mix of lit and shadowed. The byte hypothesis (record offset 26 = sun share) therefore stays UNVERIFIED, neither supported nor refuted. A fair test needs matched crowd patches (same wall section, same camera) in both. Nothing changed, nothing committed.
+
+## 2026-10-30 (134): the Xenia setup behind the reference shots (read from `xenia-canary.config.toml`, read only)
+User: screenshots taken with Windows PrtScn (not Xenia's key); resolution scale should be 1x. Config read (`D:\Games\Emulators\xeniamanager\Emulators\Xenia Canary\xenia-canary.config.toml`, not touched):
+- `draw_resolution_scale_x/y = 1` (confirmed), `postprocess_antialiasing = "none"`, `postprocess_scaling_and_sharpening = "bilinear"` at a 1280 x 720 window (1:1), no CAS/FSR, `postprocess_dither = true` (noise only in the lowest bits), `fullscreen = false`: none of these change brightness or contrast.
+- `gpu = "any"`, `render_target_path_d3d12 = "any"` (= the host-render-target path "RTV", documented as lower accuracy / limited pixel format support, not the exact "rov" path), `gamma_render_target_as_unorm16 = true`, `readback_resolve = "full"`.
+- `kernel_display_gamma_type = 2` (BT.709 HDTV) with `kernel_display_gamma_power = 2.222` (used only by type 3): the emulator's display-gamma setting for the console's output ramp.
+**Test with numbers I already have** (`scratchpad/gamma_test.py`; ours vs Xenia mean luminance percentiles, STATUS 4): Xenia 11 / 48 / 86 / 139 / 206; ours as is 31 / 72 / 102 / 141 / 187 (rms 17.9). Treating Xenia as showing our picture through a display power 2.4 on an sRGB panel gives 19 / 62 / 94 / 135 / 183 (rms 13.0: the darks move the right way, the highlights do not); power 2.2 changes nothing (16.0); the BT.709 inverse-OETF curve is worse (28.2). So a display-gamma mismatch can explain part of the darker darks but NOT the brighter highlights (206 vs 183 to 188), which needs a gain / white-point difference as well. Not tested: what Xenia actually does with that setting for FM2 (I believe, unverified, that it only matters if the game sets a gamma ramp), and whether the RTV path changes the picture.
+**Experiments only the user can run** (nothing was changed in the config): re-take the same shot with `kernel_display_gamma_type` 0 / 1 / 3(2.2) and with `render_target_path_d3d12 = "rov"`; if the screenshot changes, the reference depends on the setting and the inferred values should be re-fitted to the exact path. Nothing else changed, nothing committed.
+
+## 2026-10-30 (135): the per-game Xenia config is identical to the global one; FM2's own display-gamma ramp found in `default.xex`
+Files: `...\Xenia Canary\config\Forza Motorsport 2.config.toml` against `...\Xenia Canary\xenia-canary.config.toml` (both read only): byte-identical (64,485 bytes, 544 lines, both last written 2026-10-30 16:20, so nothing about the 2026-10-26/27 capture session can be told from the dates). So MODLOG 134 stands: 1x scale, no post-AA, bilinear 1:1, `render_target_path_d3d12 = "any"`, `kernel_display_gamma_type = 2`. `xenia.log` (the 16:20 run): title "Forza Motorsport 2" (ID 4D5307EA), DXGI adapter AMD Radeon RX 7800 XT, Direct3D 12, "PatchDB: loaded patches for 0 titles" (no game patches applied). With an AMD GPU `any` means the host-render-target path; the config comment says the exact ROV path currently crashes shader compilation on AMD drivers on D3D12 (not tried).
+**New game-data fact:** FM2's own Direct3D code (`0x82377258` and `0x82377400`, imports `VdGetCurrentDisplayGamma`) builds the 1024-entry output gamma ramp from the display gamma type the console reports: type 1 sRGB, type 2 BT.709, type 3 a power (`1/power`). The type-2 function (`0x823771a8`) uses constants read from the image: 4.5, 0.018, 0.45, 1.099, 0.099 (and 1/1.099, 1/0.45): with its flag 0 it is the BT.709 OETF `v = 4.5 L (L < 0.018) else 1.099 L^0.45 - 0.099`, otherwise its inverse. So with Xenia's type 2 the screenshots' final transfer is the BT.709 OETF, not sRGB.
+**Numbers** (`scratchpad/gamma_test2.py`; our mean luminance percentiles 5 / 25 / 50 / 75 / 95 % read as sRGB light and re-encoded with the BT.709 OETF): Xenia 11 / 48 / 86 / 139 / 206; ours as is 31 / 72 / 102 / 141 / 187 (rms 17.9); ours through the BT.709 ramp 16 / 57 / 88 / 129 / 179 (rms 13.4). It brings the darks and middle (5 to 50 %) close (11 vs 16, 48 vs 57, 86 vs 88) but moves the highlights the wrong way (206 vs 179), so a gain of about 1.15 in the highlights is still unexplained. This ramp is not in the engine (FM2 final combine uses sRGB conversions, `post.rs`); adopting it is NOT done and not tested on roads. Nothing committed.
+
+## 2026-10-30 (136): the BT.709 output ramp in the FM2 combine (opt-in `FH1_FM2_RAMP`): both readings score worse, not adopted
+**Changed** (`fh1-remaster/src/post.rs`, uniform slot `a.w`): `FH1_FM2_RAMP=1` shows the combine's result through the BT.709 OETF (4.5 L below 0.018, else 1.099 L^0.45 - 0.099, the ramp FM2's own D3D code builds for display type 2, MODLOG 135), treating the result as sRGB-coded light; `=2` applies the curve to the result as if it were the linear framebuffer. Default off, nothing else changes. Engine builds.
+**Test** (twelve circuits, road-band score, lower is better; default 6.54): mode 1 scores 16.78 (every road too dark: Tsukuba 0.78 / 0.45, Test Track 0.52 / 0.24, New York 0.24 / 0.18, Suzuka 0.26 / 0.23 of Xenia's linear value), mode 2 scores 26.46 (roads 5 to 7 times too bright: Suzuka 5.56 / 7.41). So the percentile improvement of MODLOG 135 (rms 17.9 -> 13.4) does not carry to the road patches.
+**Reading:** the per-circuit tone blend, saturation x1.5, sky gain and the lightmap/albedo scales were all fitted to the Xenia shots with an sRGB output, so adding the ramp on top darkens everything a second time; a fair test would need the fitted values re-derived under the ramp (a fitting exercise, not game data), which I did not do. The ramp itself stays a real, verified fact about the game and about what Xenia shows, but it explains the percentiles better than it explains the road bands, and the highlights (Xenia 206 vs 179) stay unexplained. Nothing committed.
+
+## 2026-10-30 (137): STATUS.md rewritten (docs only)
+The top of `STATUS.md` (the old sections 1 to 13) is replaced by a detailed end-of-day status: git state and commits, state at a glance, FM2 in detail (what works, what is still different, how the Xenia reference was made, the eight inferred values with what was found for each, the lightmap x2 and car-shadow investigations, today's code changes and switches), not-tested list, how to check, mistakes, next steps. The Xbox One sections (old 3 to 8 and 10) are kept verbatim under "XBOX ONE FAMILY REFERENCE" with a note that the four newer cars have since been seen in game; everything from "HISTORY AND EVIDENCE" down is untouched. The previous top part is in git history (`eddf4e5`). Nothing committed.
+
+## 2026-10-30 (138): a separate, pinned Xenia install for test screenshots (`tools/xenia-test/`, git-ignored)
+**Why.** Preparing the reference-capture flow that comes before the gamma A/B test. An isolated install removes three things the main one carries: the user's FM2 career save, the manager-written global config, and the shader cache. Found while setting it up: the main install's global `xenia-canary.config.toml` **no longer parses** — MODLOG 135 recorded it byte-identical to the per-game file (64,485 bytes) on 2026-10-30, but it is 64,672 bytes now and `xenia.log` says "unknown escape sequence '\S'" from `trace_dump_path = "D:\System Directories\Documents"` (line 301). The per-game file stayed clean, so the manager rewrote the global file after the screenshots; nothing new about the screenshots themselves, which predate that write.
+**Copied** (read only, from `D:\Games\Emulators\xeniamanager\Emulators\Xenia Canary`): `xenia_canary.exe` (SHA-256 `B2EFD59DAEE04245B5C156CB23417BA3EC732D29AF9A5B37A39BB874D90A3F7E`, hash checked against the source), `gamecontrollerdb.txt`, `portable.txt`, `LICENSE`, and the **clean per-game FM2 config** (`config\Forza Motorsport 2.config.toml`, 64,485 bytes, SHA-256 `92BFD0ECF5F412E44D6E52D929240D9CE686B31E194D1E56B4413F6AD1A0FEF2`) as the global config at the root and in `config\` (which of the two this build reads is not known; the log prints "Loaded config: {}" on the first run). **Not copied:** `content\` (6.96 GB of installed game data and saves), `cache*` (51 MB), `patches\`, `recent.toml`, `xconfig.settings`, `xenia.log`. Total 17.9 MB.
+**Pinned settings that matter for the picture:** `kernel_display_gamma_type = 2` (BT.709, as the reference set), `draw_resolution_scale_x/y = 1`, `gamma_render_target_as_unorm16 = true`, `readback_resolve = "full"`, `render_target_path_d3d12 = "any"`, `fullscreen = false`, `vsync = false`, `hid = "any"`, `keyboard_mode = 0` (the capture flow will set this to 1 for menu input; it does not change the rendered frame). `storage_root` / `content_root` empty, so `portable.txt` keeps config, saves and screenshots inside the folder. `.gitignore` gained `/tools/xenia-test/`.
+**Not done / not tested:** the copy has not been launched. The FM2 ISO (7.8 GB, `D:\Games\ROMs\Xbox 360\Forza Motorsport 2 (USA) (...).iso`) is not copied; it is the launch argument and stays read only. Xenia creates `screenshots\` itself on the first capture. The `config\` twins will be reduced to the one the log names.
+**How to check it:** launch `tools\xenia-test\xenia_canary.exe "<ISO>"`, then read `xenia.log` for the "Loaded config" path, the storage root, the adapter and the title ID; to prove the config is live, set `draw_resolution_scale_x/y = 2` and see the picture sharpen, then set it back to 1. Nothing committed.
+
+## 2026-10-30 (139): first run of the isolated Xenia: config path, storage root and the built-in screenshot verified
+**Verified** (launch of `tools/xenia-test` with the FM2 ISO, 17:03 to 17:06):
+- **Storage root** = `D:\Projects\slop\fh1_rewrite\tools\xenia-test` (`portable.txt` honoured) and the log's `Loaded config:` line names the **root** `xenia-canary.config.toml`, so the `config\` twin copied in MODLOG 138 is redundant and was deleted. `content\` stayed empty (the game wrote no save) and the cache stayed at 0 MB at the title screen.
+- The live settings are therefore the clean per-game FM2 file of MODLOG 138 (`kernel_display_gamma_type = 2`, scale 1, etc.). Window title: `[4D5307EA v0.0.0.2] Forza Motorsport 2 <Direct3D 12 - RTV/DSV - XAudio2>`.
+- **Xenia's own screenshot works on this setup:** `Display -> Take Screenshot` is **F12**, and it writes `screenshots\<title id>\<title> - <timestamp>.png` — 1280 x 720, 1.13 MB, no window chrome. The menu items all report command id 0 (custom handling), so the hotkey is the route, not `WM_COMMAND`.
+- **F12 needs a real keypress with the window focused:** posting `WM_KEYDOWN`/`WM_KEYUP` for VK_F12 did nothing, and `SendKeys` after `SetForegroundWindow` did nothing; a `keybd_event` F12 after a click into the canvas worked (the command then created the `screenshots` folder).
+- FM2 idles from "PRESS START" into an attract-mode demo race, so a long wait does not leave the title screen up. This build has **no save states** (no menu item, no such strings; only a stack-walker message mentions them), which matches the emulator's known state.
+**Not verified:** the PNG's colour space against a PrtScn of the same frame. The two captures taken were different frames (the game had moved on to attract mode), so that comparison is invalid, not the capture; it needs a static screen (parked car) and belongs to the first track capture.
+**Blocked:** `keyboard_mode = 0`, so the game cannot be driven; reaching a track needs it set to 1, a restart, a menu walk, and the first start will go through profile / storage creation because `content\` is empty. The gamma A/B test is not started. Nothing committed.
+
+## 2026-10-30 (140): keyboard input into the isolated Xenia, the missing profile, and the System Link path
+**Input, solved.** A physical Xbox 360 pad is connected and occupies controller slot 0, the same slot `keyboard_user_index` emulates. With `hid = "any"` the pad wins and keyboard input is silently dropped: the binds are logged (`"0xBA" binds key 0xBA to controller input A`), but the guest never sees a press (the title screen ignored A, F12 in the same window worked, so delivery itself was fine). `hid = "keyboard"` (keyboard is the only pad) makes input work. Two traps: Xenia **rewrites its config on exit**, so an edit made while it runs is overwritten by the closing instance (happened once, reverted `hid` to `"any"`); and the game must be restarted for the HID change. Editing `keyboard_mode = 1` likewise only takes effect at startup.
+**Profile, solved.** The isolated install found 0 profiles and sat on the logo with the "PRESS A" prompt gone (`ProfileManager: Found 0 Profiles`), because the copied config carries `logged_profile_slot_0_xuid = "E000037E524420F8"` while `content\` was empty. Copied **only** the profile blob (`content\E000037E524420F8\FFFE07D1\00010000\E000037E524420F8`, 1,245,184 bytes) from the main install; the FM2 career folder (`...\4D5307EA\`) was **not** copied, so the isolated game starts at 0 % exhibition, 0 % time trial, 0 of 70 cars (screenshot `17-32-54`). The main install was only read.
+**Corrected requirement (user).** Do not use Arcade: it starts with a rolling start. Use **Multiplayer -> System Link**, which starts on the grid. Path found by navigating with screenshots: main menu -> Multiplayer (DP right x2, A) -> System Link Game (A) -> Join Match (empty list) -> **Y** Create a Match -> CREATE A MATCH, tab RULES (Track row default "Tsukuba Short"; one DP right gives "Tsukuba", 1.29 mi / 2.08 km, type "Short") -> **RT x2** to OVERRIDES -> DP down x5 lands on "Force Camera" -> DP right cycles No -> Chase Far -> Chase Near -> **A** creates the lobby -> **CLASS SELECT** (default D; the R34 is **B** class, so DP right x2) -> A -> **CAR SELECT** (B-class default "2006 Dodge Charger SRT8" B552; DP right x16 = **"2002 Nissan Skyline GT-R V-Spec II" B584**, the R34) -> A -> Assists (defaults) -> A -> **LOBBY** (Skyline R34, Tsukuba 1.29 mi, 1 lap, grid order by performance index) -> A (toggle ready) -> "You are launching the race by yourself. Launch anyway?" -> A (Yes) -> the car sits on the grid at the start line, countdown lights ahead, chase camera. The first reference frame is `screenshots/xenia_ref/tsukuba_grid_gamma2.png` (ignored, 1280x720, SHA-256 `F843E06A6556BC953A8802070DD764FDDBABF7CB3B6B20A1D321395D2D5CE1AD`), taken with `kernel_display_gamma_type = 2`.
+**Reusable flow:** `tools/xenia-test/flow_tsukuba.ps1` (waits for the title, then replays the whole path and copies the shot to `screenshots/xenia_ref/<Tag>.png`), using `drive.ps1` for focus/keys/shots and the title-screen block match as its "are we ready" guard.
+**Verified:** one player can launch a System Link race with no other console or network peer; the race starts from the grid (not a rolling start). **Not verified:** the gamma A/B comparison (run in progress), the car's paint (the grid car is plain blue, while the old reference set showed a dark car).
+
+## 2026-10-30 (141): the display-gamma setting DOES change the reference; measured, and what it means for every fitted value
+**Test.** The same pose (Tsukuba grid, Nissan Skyline R34, System Link, car stationary with the race clock at 2 to 5 s) shot twice with the flow in MODLOG 140, changing only `kernel_display_gamma_type` (2 = BT.709, 1 = sRGB) in the isolated install. Luminance (0.2126 R + 0.7152 G + 0.0722 B, every 4th pixel), percentiles 5 / 25 / 50 / 75 / 95 %:
+- type 2 (BT.709): 18.9 / 59.4 / 95.3 / 133.2 / 188.6, mean 97.9
+- type 1 (sRGB): 31.9 / 74.2 / 110.3 / 146.7 / 197.7, mean 111.2
+Mean absolute channel difference **28.9 levels**, 97.8 % of sampled pixels differ by more than 2, max 254. The direction is exactly the two transfer curves (BT.709 is darker, most in the darks: 13 levels at 5 %, 9 at 95 %). **So the reference is not colour-neutral, and every inferred value in STATUS 4.4 was fitted to a BT.709-encoded image.**
+**The scoring tool makes it worse.** `data/work/cmp_bands.py` linearises with `(v/255)**2.2` for both the Xenia reference and our shots. That is neither sRGB nor BT.709 exactly, so the encoding difference between the two images is not removed by the tool; the road-band score has an uncorrected bias that varies with brightness (roughly 5 to 10 % in the road band range, small against the 2 to 9 x errors being chased, but not small for fine fits).
+**Our renderer for reference** (`screenshots/x2base_tsukuba_00.png`, the default build, but a different pose and car so only indicative): 28.0 / 73.7 / 97.0 / 139.0 / 166.8, mean 101.3. Between the two references (close to sRGB at p5/p25, to BT.709 at p50/p75); our highlights (166.8 at p95) are below both.
+**Recommendation (not done).** Make **type 1 (sRGB)** the reference convention and re-shoot the set with the System Link grid flow (MODLOG 140). Reason: our engine renders to an sRGB swapchain and the PNG tools assume a ~sRGB curve, so a type-1 reference makes "match the reference" mean "render correctly", instead of "render correctly and then also emulate an HDTV encoding". The old `screenshots/xenia2/x1..x13.png` stay as history but stop being the parity target. Keeping type 2 instead would require applying the BT.709 ramp in the engine (`FH1_FM2_RAMP`, MODLOG 136) and re-fitting under it.
+**Files:** `screenshots/xenia_ref/tsukuba_grid_gamma1.png` and `..._gamma2.png` (ignored, 1280x720). Reusable flow: `tools/xenia-test/flow_tsukuba.ps1`.
+**Not tested:** whether our engine's screenshot is exactly sRGB (assumed), any other circuit, and a re-fit of the eight values under a type-1 reference.
+
+## 2026-10-30 (142): the lobby track list enumerated, mapped to our import ids, and the batch loop built
+**In-race -> lobby path:** START (pause) -> DP down x3 ("Quit Race") -> A -> "Are you sure you want to Finish Race?" -> A (Yes) -> LOBBY (about 5 s). The car and track are kept.
+**Track change from the lobby:** Y (Options/Car) -> DP down x4 ("Game Options") -> A -> the screen **always opens on OVERRIDES**, so LT x2 -> RULES -> DP down x4 lands on the **Track** row -> DP right/left steps one track -> **A commits and returns to the lobby**, **B discards everything** (verified: a changed track and an accidentally flipped "Force Off ABS" both reverted on B). The list **clamps at both ends** (does not wrap); index 0 is Tsukuba.
+**The list (index -> name, length as the game shows it), corrected after the trial run:** 0 **Tsukuba Short 0.97 mi**, 1 Tsukuba 1.29, 2 Laguna Seca 2.23, 3 Road Atlanta Short 1.77, 4 Road Atlanta 2.54, 5 Silverstone National 1.63, 6 Silverstone International 2.25, 7 Silverstone Grand Prix 3.19, 8 Nordschleife 12.90, 9 Sebring Club 1.70, 10 Sebring Short 2.00, 11 Sebring 3.70, 12 Mugello Short 1.79, 13 Mugello 3.26, 14 Suzuka East 1.39, 15 Suzuka West 2.15, 16 Suzuka 3.61, 17 Sunset Infield Short 2.22, 18 Sunset Infield 2.77, 19 Nissan Speedway 2.50, 20 Maple Valley Short 1.15, 21 Maple Valley 2.98, 22 New York Circuit 1.80, 23-31 the nine TT tracks (Boomslang 0.60, Russell's Viper 0.80, Death Adder 0.68, Copperhead 0.96, Inland Taipan 1.60, Diamondback 1.40, Malayan Krait 1.20, Black Mamba 2.00, King Cobra 4.78), 32-46 the "Reverse" variants (Sunset Short, Sunset, Speedway, Maple Valley Short, Maple Valley, New York, then the nine TT), ending at TT King Cobra Reverse: **47 entries**. My first count said 46 with Tsukuba first; the trial run's reset clamped to **Tsukuba Short (0.97 mi)**, so the list has one more entry at the front and every earlier index was one too low. The Arcade list is ordered differently and is not interchangeable.
+**Mapping to our import ids** (by name in `data/installations/<id>/assets/private/imported/fm2/maps.json`): 0 `tsukuba_01`, 1 `tsukuba_00`, 2 `lagunaseca_00`, 3 `roadatlanta_01`, 4 `roadatlanta_00`, 5 `silverstone_01`, 6 `silverstone_02`, 7 `silverstone_00`, 8 `nurburgring_00`, 9 `sebring_01`, 10 `sebring_02`, 11 `sebring_00`, 12 `mugello_01`, 13 `mugello_00`, 14 `suzuka_01`, 15 `suzuka_02`, 16 `suzuka_00`, 17 `sunsetinfield_01`, 18 `sunsetinfield_00`, 19 `sunsetinfield_04`, 20 `maplevalley_01`, 21 `maplevalley_00`, 22 `newyork_01`; the TT group by name (23 Boomslang `_01`, 24 Russell's Viper `_03`, 25 Death Adder `_02`, 26 Copperhead `_04`, 27 Inland Taipan `_07`, 28 Diamondback `_06`, 29 Malayan Krait `_05`, 30 Black Mamba `_08`, 31 King Cobra `_00`). The Reverse variants have no imported counterpart.
+**Discrepancy found:** the game's lengths match our import to 0-1 % for Laguna, Road Atlanta, Silverstone, Sebring, Mugello, Suzuka, Maple Valley, New York and Tsukuba, but **Sunset Infield Short is 2.22 mi (3573 m) in the game against 3122 m (1.94 mi) in our import** (13 % apart); Nissan Speedway is 4023 against 3927 m (2 %), Infield 4458 against 4474 m. Not investigated: whether the importer picked a different Sunset variant or measures a different line.
+**Loop built:** `tools/xenia-test/loop_tracks.ps1` (input functions inline, so no per-key subprocess). The first version used fixed sleeps and **dropped keys**: of 4 trial tracks none launched (all four "shots" were the lobby with READY 0/8) and one track step was lost. Cause: presses landing during screen transitions. Rewritten as a small state machine that reads the frame instead of guessing the timing: a window grab of the client area gives a whole-frame and a centre-region mean luminance, which separates the states cleanly (lobby 40-43 whole / 34-40 centre; Launch dialog 51 / 182; race grid 98-111 / 106-123; title screen 77 / 108). The loop resets to index 0 by clamping, steps right, opens Game Options, **waits for the lobby** after committing (and presses Back if the commit did not leave the options screen), presses A (ready), **waits for the Launch dialog** (centre > 150 and whole < 80) and only then presses A, **waits for the race** (whole > 70) before shooting, then presses START and **waits for the pause menu** (orange "Resume" bar, R > 150 / B < 110, whole < 85) before DP down x3 -> A -> A to quit. Shots are only saved once the race state was seen. Saves as `screenshots/xenia_ref/<prefix>_<index>_<slug>.png`; `-SkipExisting` resumes. Also fixed a scripting bug of mine (`[void](...) | Out-Null` raises "Argument type cannot be System.Void", which killed the first state-machine run instantly).
+**Second trial result (3 tracks):** track 0 saved a grid shot after one retried ready press; tracks 1 and 2 failed. Cause found by hand: **the quit never happened** (the race clock read 2:38 when the loop was already "stepping" the next track, so its keys went into the running race). START works when pressed by hand, so it was a dropped press during the shot's aftermath; the quit is now state-checked too (pause menu retried up to 3 times).
+**Third failure, and the fix:** the pause menu was detected but had not taken focus yet, so DP down x3 was swallowed and `A` hit "Resume" — the car went back into the race (proved by the race clock reading 3:36 after a "did not return to the lobby" warning). The quit now waits 1 s after detecting the pause menu, then **verifies the Quit dialog appeared**; if it did not, the whole pause/quit sequence is retried up to 3 times.
+**Fourth failure:** the **Quit dialog is much dimmer than the Launch dialog** (whole 29 / centre 79 against 51 / 182), so the `centre > 150` dialog test missed it and the loop sat on the dialog until the retry gave up (the stuck state was found by taking a shot). The dialog test is now `centre > 55 and whole < 60`, which still excludes the lobby (35 / 40), the pause menu (34 / 70) and the race (106+ / 98+).
+**Scope decided by the user:** only the **longest layout of each track family, no reversed layouts**. That selects 12 of the 47 lobby entries: 1 Tsukuba (1.29), 2 Laguna Seca, 4 Road Atlanta, 7 Silverstone Grand Prix, 8 Nordschleife, 11 Sebring, 13 Mugello, 16 Suzuka, 18 Sunset Infield, 21 Maple Valley, 22 New York Circuit, 31 TT King Cobra (4.78). Excluded on purpose: the short/long siblings, `Nissan Speedway` (index 19, the Sunset Peninsula oval at 2.50 mi, shorter than Infield 2.77, so the same family's longest is Infield), and all 15 Reverse entries. The loop now takes `-Indices "1,2,4,..."` and **resets to index 0 for every track** (clamp, then k steps right), so a dropped step can no longer shift every later track by one; a track whose commit does not return to the lobby is skipped rather than shot under the wrong name.
+**Not tested yet:** the 4-track trial run (in progress), and therefore the whole batch. Nothing committed.
+
+## 2026-10-30 (143): the batch loop made state-verified; two silent failure modes found (wrong track, cinematic camera)
+The first 12-track pass produced 12 files, but **nine were the same Tsukuba paddock** (a "TC TSUKUBA" banner is visible in the shot): the track change had silently failed, and the shots were taken 2 s after the race state appeared, i.e. during the **pre-race cinematic fly-by**, not the chase camera. Neither failure was visible to the loop because it only checked "did we get back to the lobby".
+**Fix 1, track change.** Before moving the row the loop now **verifies the active tab** (the active tab's background measures ~150 against ~70 for the inactive ones, so the tab is identified by brightness and `LT` is pressed until RULES is the bright one). After committing it **verifies the lobby's track block actually changed**: a 24 x 6 luminance signature of the logo + minimap + length area (x 830-1265, y 400-530). An unchanged block means the step failed; it is retried up to 3 times and otherwise the track is **skipped, never shot under the wrong name**.
+**Fix 2, camera.** The shot now waits for the **chase camera**, detected by the LAPS-box pixels at (108,60) / (118,73) / (130,62): dark (63-82) in the chase view, bright sky (156-193) in the fly-by. Timeout 32 s, then it shoots anyway and says so.
+**Signatures used by the loop** (all measured from the isolated install): Launch dialog centre > 55 / whole < 60 (one rule covers the bright Launch dialog at 182 and the dim Quit dialog at 79); pause menu orange bar R > 150 / B < 110; race whole > 70; lobby whole < 60.
+**Signature must avoid the logo.** The first version hashed the whole track block (logo + minimap + length) and gave a false "changed" verdict: over 60 s the logo's shine flips one sampled pixel, so a same-track step looked successful. Measured over 60 s with the lobby idle: logo 1 differing sample, **minimap 0, length text 0**. The signature is now minimap (x 1030-1265, y 415-515) + length text (x 840-1010, y 512-530). Checked: asking for the track the game is already on is now refused three times ("could not set the track") instead of being accepted.
+**Root cause of the 11-track mass failure: a stuck Ctrl.** The d-pad bindings are `Ctrl+W/A/S/D`. After the clamp (50 left presses) a Ctrl **key-up was lost**, so Xenia kept Ctrl logically down; every plain key then became `Ctrl+key`, which is unbound (A, Y, START dead) while the d-pad still worked. That is why track 1 ran and then every later track failed with "Game Options did not open" although the window was demonstrably focused (verified: Xenia was the foreground window, the client grab still worked, and the lobby screen was unchanged). Confirmed by sending Ctrl/Shift/Alt key-up events, after which `Y` opened Options/Car immediately. Every keypress in the loop now begins with a modifier release.
+**Not tested:** the `-NoLaunch` track-change probe on indices 2, 4, 8 (running when this was written), and therefore the fixed full pass.
+
+## 2026-11-01 (144): option A works — the emulator can be driven and captured with the window unfocused
+**Capture without focus: `PrintWindow` works.** `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)` returns the live game frame for this D3D12 window. Two details: it includes the title bar and menu bar, so the client area must be cropped out using `GetWindowRect` / `GetClientRect` / `ClientToScreen` (the content sits ~76 px down otherwise, which made the first title-screen test fail).
+**Colour fidelity checked** against a screen grab of the same frame (the method the original twelve references were made with): client 1280 x 720, `PrintWindow` mean 51.64 against screen 51.52 (0.12 of a level), half the sampled pixels bit-identical, no spatial offset (shifting by one pixel makes the difference worse, 2.59 -> 3.57). The remaining local differences are animation between the two grabs, not colour.
+**Input without focus: posted messages work.** `PostMessage(WM_KEYDOWN/WM_KEYUP)` with a real scan code from `MapVirtualKey` drives the game while it is not the foreground window: title screen -> main menu, main menu -> Multiplayer (two `Ctrl+D` d-pad rights), Multiplayer -> System Link. Modifier combos work, so the d-pad's `Ctrl+letter` binding is usable this way.
+**So the reference run can happen behind the user's windows:** no focus stealing, no keyboard capture, silent (`mute = true`), GPU load only.
+**Blocker found in the System Link setup:** building the lobby from the Multiplayer screen, the flow got stuck on the **car select** screen: neither posted nor real presses of `A` advanced it, while d-pad presses still rotated the car model on its turntable. Two suspects, neither confirmed: a button left logically held at the Xenia level (a lost key-up), or a game-level wait. Cheap fix to try: restart the emulator and redo the setup in one state-verified pass. Also learned: on the car-select screen the **d-pad rotates the model**; the earlier successful DPR x16 that picked the R34 was sent from a fresh entry of that screen.
+**Not tested:** the 12-track run in background mode, and the lobby setup from a fresh boot with posted keys.
+
+## 2026-11-01 (145): background input is not reliable — stopped, written up
+After the restart of MODLOG 144 the emulator accepted no input at all, despite: `hid = "keyboard"`, `keyboard_mode = 1`, the log showing every keyboard bind, and the log showing `New controller connected to slot 0`. Checked, in order: a posted `A` at the title (no effect), a *real* `A` with the window focused (no effect), `START` (no effect), a posted sweep releasing every bound key first (no effect), and finally forcing activation with `AttachThreadInput` + `SetForegroundWindow` before a real `A` (activation itself failed: `GetForegroundWindow` never became the game, so the key went elsewhere). The title screen was detected correctly each time via `PrintWindow`, so the capture path is fine; only input is dead.
+**What is established, and usable:** (1) `PrintWindow` captures the client area colour-faithfully while the window is unfocused — the method to use for the shots; (2) posted `WM_KEYDOWN/UP` *did* drive the game unfocused on the previous instance (title -> menu -> Multiplayer -> System Link), so the idea works but is not dependable; (3) the System Link path and every state signature (launch dialog, quit dialog, pause bar, race, lobby, tab bar, track signature) are measured and working.
+**Why the focused route is also fragile:** with the d-pad bound to `Ctrl+letter`, a lost modifier or button key-up leaves the pad logically held; the game then ignores plain keys (no edge) and only d-pad combos still work. That produced the "Game Options did not open" and "launch dialog never appeared" failures after the first race, and the car-select screen that would not accept `A`. A per-key release helps only sometimes.
+**Decision:** stop per the two-attempts rule rather than keep varying the input method. Two clean ways forward, both needing a user decision: install the **ViGEmBus virtual pad** (XInput is polled independently of window focus, so input works unfocused by design; capture already works unfocused; no screenshot hotkey exists, so `PrintWindow` stays the capture path), or run the **focused** loop on a machine left idle, with the per-key release and the state checks already in place.
+**State of the install:** the emulator is in attract mode with input dead; a restart is needed either way. `screenshots/xenia_ref/` holds one usable grid reference pair (`tsukuba_grid_gamma1/2.png`), one valid `g1_02_laguna_seca.png` from an earlier run, and a set of `g1_01..g1_31` that are **invalid** (nine of them are the same Tsukuba paddock in the cinematic camera).
+
+## 2026-11-01 (146): the reference set — 11 of the 12 longest layouts captured at the grid
+**Result:** valid chase-camera grid shots for **all 12 tracks**, 1280 x 720, sRGB (`kernel_display_gamma_type = 1`), Nissan Skyline R34 (B584), forced close camera ("Chase Far"), 1 lap, car stationary on the grid: Tsukuba, Laguna Seca, Road Atlanta, Silverstone Grand Prix, Nordschleife, Sebring, Mugello, Suzuka, Sunset Infield, Maple Valley, New York Circuit, TT King Cobra. Files: `screenshots/xenia_ref/g1_<index>_<slug>.png` (all verified by eye on contact sheets).
+**New York needed the manual route:** it is a **night** circuit, so the whole-frame brightness never passes the "race" test (it reads as dark as the lobby), and the batch's track-signature check then gave a **false negative** (block "unchanged" three times although the track had in fact changed to New York). Fixed for this capture by setting the track stepwise (verified in the lobby: "New York Circuit, 1.81 mi"), then ready/launch and a fixed 26 s wait instead of the brightness test. Its race clock reads 11.9 s against 4-5 s for the others; the car is stationary, so the pose is the same and only the HUD timer differs. **Not fixed in the loop:** night-track detection and the signature false negative (the comparison region apparently does not always change with the track).
+**Fixes that made the run work** (all in `tools/xenia-test/loop_tracks.ps1`):
+- **Verified "open Game Options"**: press Y, wait 2 s, then four downs, then A, and confirm the tab bar appeared; otherwise back out with B and retry. The old single `Y,DPD,DPD,DPD,DPD,A` burst sent the first down while the menu was still opening, so A landed on the wrong row and the next retry readyed and launched a race by accident (this is what failed the previous two runs).
+- **3 s settle** before the first track.
+- **10 s settle** after the race state before shooting: the pre-race fly-by already shows the race HUD, which is why Road Atlanta was captured from the front and Maple Valley from the side even though the "HUD is up" check passed.
+- **60 s lobby wait** after quitting: a race also ends by itself on its end-race timer and returns to the lobby, which is why three tracks were skipped as "could not leave the race" and a later one worked.
+**Pose for future comparisons:** chase camera behind the car, stationary at the grid, HUD visible. The old `xenia2` set is neither the same camera nor the same pose.
+**Not tested:** New York, the other 35 lobby entries, the reversed layouts.
+
+## 2026-11-01 (147): first trustworthy measurement against the new set — the gap is ~1.2x on lightmap surfaces, not exposure
+**Tool fixed:** `data/work/cmp_bands.py` now linearises with the exact sRGB EOTF instead of `(v/255)**2.2`, because the new references are genuinely sRGB and the engine's screenshots are too.
+**12 engine shots at the reference pose** (`--track fm2/<id>`, `FH1_SHOT`, `FH1_SHOT_AT=28`; files `screenshots/cmp_<id>.png`). Left/right band ratios (linear G, ours / Xenia): Tsukuba 0.80/0.58, Laguna 0.63/0.86, Road Atlanta 1.39/0.72, Silverstone 0.68/1.09, Nurburgring 0.86/0.19, Sebring 0.72/0.82, Mugello 0.75/0.84, Suzuka 0.43/0.46, Sunset 0.65/0.69, Maple Valley 0.51/0.72, New York 0.39/0.35, King Cobra 0.59/0.50. Sum |ln| over the 24 bands: **11.99** (the old 6.54 was measured against a BT.709 reference at a different pose, so the two are not comparable).
+**The FM2 combine is ON by default for FM2 tracks** (`main.rs`: `map_or(true, |v| v != "0")`, while its own comment says "off by default" — the comment is stale). Turning it off (`FH1_FM2_POST=0`) makes Tsukuba **darker** (left band 0.72 against 0.80, percentiles 27/91/161 against 28/97/168), so it is not the cause of the deficit.
+**The deficit is surface-specific, not global** (Tsukuba, same-pose patches, median RGB -> linear G ratio ours/Xenia): sky 111,146,175 -> 0.99; grandstand 111,120,108 -> 1.41; wall right 110,100,88 -> 1.14; **road left 96,91,80 -> 0.82; grass left 96,92,81 -> 0.77; car 53,68,78 -> 0.82**. So the unlit sky matches, some lit surfaces are brighter, and every lightmap-driven surface is about 20 % dark. That is a lightmap/shading calibration gap of about **1.2x**, not the 2x the lightmap-x2 investigation (MODLOG 127 to 130) was chasing, and not an exposure or display-path problem.
+**Next step:** run the importer's shader interpreter on one road draw at the band point (Tsukuba model 50 was used before) to see whether the shader with real inputs lands on Xenia's linear value; if it does, the bake or the engine's material path is losing the ~20 %, and the fix is there rather than in the post chain.
+**Not tested:** whether the car's 0.82 has the same cause as the road's; any other track's patches; the sRGB change's effect on the other tools (`cmp12.py`, `skyratio.py`).
+
+## 2026-11-01 (148): W8 built and run; W1's 3-number test on Tsukuba points at the per-family gamma mask, not the engine path
+**W8 (harness) done.** `data/work/parity.py <prefix>` shoots the twelve reference tracks with the engine (28 s each, `FH1_DIAG=0` so the FPS/RAM overlay is out of the picture — verified on `screenshots/w8_tsukuba_00.png`) and prints plus stores `data/work/parity_<prefix>.txt`: per-track left/right band ratios, percentiles, six region patches, the aggregate, and the worst tracks. First full run: **sum 12.05** over the 24 bands, worst left bands New York 0.40, Suzuka 0.42, Maple Valley 0.51. `cmp12.py` already decodes sRGB through `cmp_bands.lin`; `skyratio2.py` was linearised by hand (it compared raw sRGB means before).
+**Caveat found by the first run:** the six region patches are only meaningful where the pose lines up; at Laguna the "sky" patch reads 0.57 and at New York "car" 5.87 because the fixed pixel regions land on different content. The bands remain the primary metric; the patches should be used per track only after checking the framing.
+**W1 step 1 (3-number test), Tsukuba left band.** Point from the engine's own probe (`FH1_SHOT_PROBE=1`): **(-59.36, 18.52, -101.51)**; importer probe `FM2_PROBE_AT` at that point with the track's lightmap colours (dark -0.0326, light 0.945) hit **model 50, ps_sig 19026bd2593921ac, lightmap 0.678**, and printed the shader's lit G for each gamma choice: **family (BC4) 0.047, none 0.185, BC4 0.047, colours 0.038, all 0.004**.
+**Numbers side by side:** Xenia 0.127 (G 100), **our engine 0.105 (G 91)**, shader with the table's choice **0.047**. So:
+- the shader with the current per-family mask is **0.37x** of Xenia — the mask is wrong in the too-dark direction;
+- "none" is 1.46x of Xenia — also wrong, the other way;
+- our engine is **0.83x**, i.e. **it does not reproduce the shader** either (0.105 against 0.047).
+That means two separate problems: (a) the per-family gamma mask (an inferred rule) does not fit this draw at either extreme, and (b) whatever the importer bakes is not what the engine renders 1:1 — the engine's road is about 2.2x brighter than the shader's own output at the same point, so the lightmap value or the sun term must be entering differently.
+**Next:** (1) test partial gamma masks at this point (which of tf3..tf6 are sRGB) to land on 0.127 — the probe currently only prints whole-table choices; (2) find where the engine's 2.2x over the shader comes from (baked albedo vs lightmap sample vs sun term) with the material debug switches. Both are one-point measurements on Tsukuba before touching any other track.
+**Not tested:** other draw families, other tracks, the car, whether the patches line up on tracks other than Tsukuba.
+**Correction to the paragraph above, same day:** the probe's "lit G" is the shader output times the **lightmap light only** (`fm2_scenery.rs` evaluates the virtual vertex and multiplies by the bilinear lightmap sample); it carries **no sun term**, so comparing it with the sunlit band was invalid. The like-for-like decomposition comes from the engine's own stage readout (`FH1_RM_FM2_DBG=1..4`), measured on the same left band of Tsukuba:
+- **albedo 0.168**, **lightmap sample 0.708**, **lerp term 0.658**, **albedo x term 0.1046**;
+- the **final image is exactly albedo x term (0.1046)** — the engine adds **no sun term to this road at all**;
+- the probe's lightmap sample (0.678) agrees with ours (0.708), so the lightmap side is consistent;
+- Xenia's band (0.1274) implies an effective albedo of **0.194** (0.1274 / 0.658): ours is **0.87x** of it.
+So the 0.82 gap is an **albedo** gap, and the per-family gamma mask is implicated but not in the engine's path: the shader with the table's BC4 choice implies an albedo of 0.071 (2.4x too dark), with "none" 0.281 (1.45x too bright). The engine's baked 0.168 sits between the two, so the bake is not reproducing either mask faithfully.
+**Next:** search the per-sampler gamma for this one draw (`PS_GAMMA` on tf3..tf6 in `fm2_ps_run`) for the combination that puts the albedo on 0.194 / the lit value on Xenia's 0.1274, then make the bake use that mask. One draw, one point, before anything else.
+
+## 2026-11-01 (149): W1 mask search — no per-sampler gamma mask fits Tsukuba's road; the mask line is closed
+**Tool:** added an extra column to the importer's probe (`fm2_scenery.rs`): `FM2_PROBE_GAMMA=3,4,5` prints the shader's lit G for a custom sampler mask (bit n = tf n), so any of the 16 masks over tf3..tf6 can be evaluated. Rebuilt `fh1setup` (`cargo build -p fh1setup`, 17 s).
+**Result at the band point (model 50, ps_sig 19026bd2593921ac, lightmap 0.678).** The 16 masks collapse onto four values, because the colour is `lerp(tf5, tf4, luma(tf3))` and tf5/tf6 barely matter:
+- tf5 / tf6 / tf5+6 -> **0.185**; tf3 / tf3+5 / tf3+6 / tf3+5+6 -> **0.234**; tf3+4 / all four -> **0.038**; tf4 / tf4+5 / tf4+6 / tf4+5+6 -> **0.030**.
+- Xenia's band is **0.1274**, which falls in a **gap between 0.038 and 0.185** that no mask reaches.
+So the per-family gamma mask cannot be tuned to this draw: the discrete levels bracket Xenia but never land on it. This matches the earlier 2026-10-19 note ("no candidate lands near 0.11 to 0.13"), now re-measured against the correct reference.
+**What this rules out:** the sRGB mask alone. **What remains, in order of cheapness:** (1) the probe's own input model — it multiplies the shader output by the lightmap light even though the shader already samples the lightmap (tf2), which would double-count the light and explain a systematic offset between probe and render; (2) the textures/constants bound to tf3..tf6 (the candidate list is `[150, 130, 144, 145, 130]`); (3) the band's content in the reference (a shadowed patch would compare different light).
+**Decision (AGENTS.md two-attempts rule):** the mask search is closed. The next workstream under the plan is **W4 (post/exposure)**, which is independent, while W1's input question needs a probe that prints the shader's albedo *before* the light term (not built).
+
+## 2026-11-01 (150): W4 (post/exposure) measured — the combine is not the cause; W4 closed
+Four tracks (Tsukuba, Laguna Seca, Nordschleife, Sebring) under four settings, same pose, sRGB, via `parity.py --tracks=... --env`:
+- **default** (FM2 combine with the frame-computed blend): sum |ln| over the 8 bands **3.68** (left bands 0.80 / 0.65 / 0.86 / 0.72);
+- **combine off** (`FH1_FM2_POST=0`): **4.22** — worse on every track (Tsukuba 0.72, Sebring 0.59);
+- **forced dark curve** (`FH1_FM2_POST_T=0`): **3.23** — better at Laguna (1.28 vs 0.65 is worse: dark curve brightens), better at Sebring (0.72 equal), but **wrecks Tsukuba (1.44)** and Nordschleife (1.05);
+- **forced light curve** (`FH1_FM2_POST_T=1`): **6.11** — much worse (Sebring 0.28).
+**Reading:** the frame-computed blend is already near the best of the two curves on each track, so the combine is doing its job; no global curve fixes the deficit, and turning the combine off is worse. The 0.8x road deficit therefore stays **upstream of the post chain**, which agrees with W1's stage split (albedo, not lightmap or display). **W4 closed** (nothing changed in code). Remaining W1 suspects (the probe's light model, the draw's textures/constants) stay open and need a probe that prints the albedo before the light term.
+
+## 2026-11-01 (151): why the baked albedo is not the shader's value at the point (W1 clarification)
+`shader_albedo` (`fm2_scenery.rs` ~2392) is `shader_eval(..., 24)`: the pixel shader run with **neutral** constants over up to **24 vertices of the whole draw**, averaged and clamped, and the engine multiplies that single albedo by the per-pixel lightmap. The value at the band point from the probe (0.273 with no gamma, after dividing out the lightmap) is therefore **not** the same quantity as the engine's baked 0.168 — one is a draw average, the other a point. The engine's render is consistent with its own bake (0.168 x term 0.62 = 0.1046), so the bake path is internally coherent.
+**Ruler noise measured:** two independent runs of Tsukuba (w8 and w4def) give **identical** band values (96,91,80; linear G 0.1046), so the engine's shot-to-shot noise at the band is **zero**; any change there is real.
+**What is left in W1** is one precise question: the probe multiplies the shader output by the lightmap light although the shader already samples the lightmap (tf2), a suspected double count. Until that is resolved, the probe's absolute numbers cannot be compared with either the engine or Xenia, and the albedo question stays open. That needs a small probe change (print the shader output with the lightmap sampler forced to 1), not a guess.
+
+## 2026-11-01 (152): double count settled — no double count; the probe's numbers are valid
+Added three probe switches (`fm2_scenery.rs`, rebuilt `fh1setup` 13 s): `FM2_PROBE_WHITE_ID=<hex>` (force one texture file to read white), `FM2_PROBE_WHITE_LM=1` (force the lightmap tile white), `FM2_PROBE_BIND=1` (print the item -> sampler bindings). Probe line now also prints the tile id.
+**Bindings at the band point (model 50):** `{0:0, 1:1, 2:2, 3:3, 4:4, 5:5, 6:6}` — a straight item->sampler map. The **tile is id 150 and it is item 0 (tf0)**.
+**Tests:**
+- whitening the **tile (150)**: the lit values are **unchanged** (family 0.047 | none 0.185 | ...);
+- whitening colour texture **130**: every lit value drops to **0.000** (the mechanism works, and 130 is fetched by the shader).
+So the shader does **not** fetch the lightmap tile; the probe's multiply by the lightmap light is the **only** application. **No double count.** The probe's numbers are valid final values and the earlier "suspected double count" is closed.
+**What that means for the albedo:** with valid numbers, the shader at the band is **family (BC4) 0.047**, 2.7x below Xenia's 0.127, and **none 0.185**, 1.45x above; the 16-mask search shows nothing in between. The engine renders 0.1046 from a baked grain texture times a flat shader albedo (`ffff2000+`, 256 x 256 = grain x `shader_albedo`, encoded with 1/2.2). Since no mask lands on Xenia's value, the fix cannot be a mask change; the open candidates are now (a) which textures the sampler mapping binds (the candidate list is `[150, 130, 144, 145, 130]`, with 130 twice and the tile at tf0, which no road shader family is documented to use as a lightmap), and (b) the flat `shader_albedo` used by the bake.
+**Not done:** the albedo fix itself; re-measurement. Both wait on (a)/(b).
+
+## 2026-11-01 (153): the probe's bindings are not misbound; the "albedo gap" is the bake's neutral-light average, not a mask
+Printed the full candidate records at the band point: `cands [(150, flags 12, 660), (130, 4, 78), (144, 20, 90), (145, 4, 91), (130, 4, 78)]`, `tile Some(150)`, bindings `{0:0 … 6:6}`.
+- The tile (flags 12 = lightmap) is **item 0 -> sampler 0**; whitening its texture changes **nothing**, while whitening texture 130 (flags 4) **zeros** the output. So the shader's fetch set does not consume the tile: the lightmap is applied by the probe's own multiply, **by design**. The binding is not misbound in the way suspected, and the double-count question is closed for good (a second, independent confirmation).
+- The probe's values are therefore "shader without the lightmap, times the lightmap light": family (BC4) 0.047, none 0.185 at lm 0.678, i.e. shader albedo 0.069 (BC4) or 0.273 (none), against Xenia's implied 0.188. No mask fits, as the 16-mask run showed.
+- The engine's band albedo is 0.168. That matches the bake's structure: `shader_albedo` is a **draw average with neutral light** (c184 = c185 = 1, so the shader's light term is its maximum) times the **grain** texture (256x256, encoded with 1/2.2) — roughly 0.24 x grain 0.7 = 0.168. Comparing that draw-average bake with the shader's *point* value was the apples-to-oranges error; the engine's local value is 0.89x of Xenia's implied albedo, not the 0.6x the point comparison suggested.
+**Conclusion for W1:** the remaining ~11 % albedo difference is inside the bake's own approximation (a single draw-average albedo with a maximum light term, modulated by the grain), not a sampler mask and not a misbinding. Closing that properly means baking the road per pixel instead of `average x grain` — a structural change, larger than a switch, and it should be planned rather than guessed at now.
+**Not done:** the per-pixel road bake; the W1 re-measurement. Next per the plan: W2 (car) and W3 (shadows), which are independent.
+
+## 2026-11-01 (154): W2 (car) — boot-lid patch, knob re-derivation, change applied and re-measured
+**Measurement.** Chose a boot-lid patch (x 600-630, y 485-515) after a side-by-side crop: the car aligns closely (ours ~one boot width lower/larger), the roof patch is invalid (it hits the background), the boot is flat paint in both. At the **old** defaults the boot reads Xenia (56, 75, 133) against ours (38, 52, 96): **ratio 0.49** — the car is about **2x too dark**, the opposite of the old "bright blue" note, which was measured against the BT.709 reference.
+**Knob search, one at a time** (Tsukuba, all at the same pose):
+- paint albedo 0.7 -> 1.4: boot 0.49 -> **0.73** and the blue channel matches (134 against 133); R/G stay low -> a saturation component, not just level;
+- car fill 0.1 -> 0.3: R does not move (43 -> 43); not the lever;
+- scene saturation 1.5 -> 1.0: hue fixed (R 43 -> 50, B 134 -> 112), level still 0.73;
+- albedo 2.0 + saturation 1.0: **(55, 73, 130) against Xenia (56, 75, 133), ratio 0.95**, all three channels.
+**Side effects of the same change** (Tsukuba patches): sky 0.99 -> 0.96, road 0.82 -> 0.84, grass 0.77 (same), structures 1.44 -> 1.41, wall 1.14 (same). The inferred saturation of 1.5 was compensating for the old encoding; with the sRGB set, 1.0 is closer.
+**Applied:** `main.rs` FM2 defaults `FH1_RM_PAINT_ALBEDO` 0.7 -> **2.0** (both blocks) and `FH1_FM2_SAT` 1.5 -> **1.0**; engine rebuilt (1m34s). **Re-measured** the four tracks with `parity.py w2`: sum |ln| **3.69** (old defaults 3.68 / 3.72 on the two runs, i.e. unchanged within noise), road bands identical (Tsukuba 0.80/0.58, Laguna 0.65/0.86, Nordschleife 0.86/0.19, Sebring 0.72/0.81), boot patch Tsukuba **0.45 -> 0.72**, Sebring **0.36 -> 0.51** (the two tracks where the car aligns; Laguna 3.01 and Nordschleife 4.21 are the patch missing the car there, not a regression).
+**Caveat:** the same patch on the manual and harness shots reads 0.95 and 0.77 — the boot carries a sky-reflection gradient, so the car metric is good to about +-10 %. The harness's `car` patch was changed from the wide (560-720, 400-520) region to this boot patch; the direction (2x too dark -> close) is unambiguous.
+**Not tested:** other tracks' car alignment; the glass/lamps; whether 2.0 on a bright track over-brightens the paint (only Tsukuba/Laguna/Nordschleife/Sebring were re-measured).
+
+## 2026-11-01 (155): W3 (shadows) measured — no systematic shadow deficit; W3 closed, nothing changed
+Four tracks shot with the new defaults (`parity.py w3`), then the shadow contrast measured on a wide road area beside/ahead of the car (x 80-400, y 520-690, the same pixels in reference and engine), linear sRGB:
+| track | Xenia p10 / p50 / p90 | ours p10 / p50 / p90 | contrast p10/p90 Xenia -> ours | ours/Xenia p10 | p90 |
+|---|---|---|---|---|---|
+| Laguna | 0.051 / 0.087 / 0.323 | 0.044 / 0.065 / 0.266 | 0.16 -> 0.16 | 0.85 | 0.82 |
+| Suzuka | 0.025 / 0.074 / 0.429 | 0.014 / 0.028 / 0.456 | 0.06 -> 0.03 | 0.57 | 1.06 |
+| Maple Valley | 0.305 / 0.540 / 0.665 | 0.202 / 0.279 / 0.337 | 0.46 -> 0.60 | 0.66 | 0.51 |
+| New York | 0.016 / 0.072 / 0.110 | 0.010 / 0.031 / 0.067 | 0.15 -> 0.16 | 0.65 | 0.61 |
+**Reading:** the shadows are **not systematically weaker**. Laguna and New York match the reference's contrast, Suzuka's are *deeper* than the reference's (0.03 against 0.06), and Maple Valley's whole region is darker (both deciles low) rather than shadow-specific. The game's own rule (`min(1-(1-ShadowColor) S, lerp)`) is already in and the per-track ShadowColor is read from TrackSettings, so there is no code change indicated. The remaining gap on all four is the overall level already tracked in W1/W4.
+**Caveat:** p10/p90 spans different surfaces inside the region (walls, kerbs, the car's own shadow), so it is a contrast check, not a clean shadow/lit pair. A matched-surface pair would need hand-picked patches per track; the earlier sessions' attempts at that are recorded as unreliable because the engine's and Xenia's shadows fall in different places. **W3 closed: measured, no fix indicated.**
+
+## 2026-11-01 (156): W7 acceptance — the 12-track report with the new defaults; targets NOT met
+`python -I data/work/parity.py w7` (12 tracks, 29 s each, `FH1_DIAG=0`, all ok). Left/right band ratios (ours / Xenia, linear G):
+| track | L | R | | track | L | R |
+|---|---|---|---|---|---|---|
+| Tsukuba | 0.80 | 0.58 | | Mugello | 0.75 | 0.84 |
+| Laguna Seca | 0.63 | 0.86 | | Suzuka | 0.42 | 0.46 |
+| Road Atlanta | 1.41 | 0.72 | | Sunset Infield | 0.63 | 0.69 |
+| Silverstone GP | 0.68 | 1.09 | | Maple Valley | 0.52 | 0.72 |
+| Nordschleife | 0.86 | 0.19 | | New York | 0.40 | 0.35 |
+| Sebring | 0.72 | 0.81 | | TT King Cobra | 0.60 | 0.50 |
+**Summary |ln| over the 24 bands: 11.99** (12.05 with the pre-W2 defaults; the paint change does not touch the road bands). **The plan's acceptance targets are NOT met:** left band within +-10 % is met by **0 of 12** tracks (closest Nordschleife 0.86, Tsukuba 0.80, Mugello 0.75); the aggregate target of <= 2.0 is 6x away.
+**What the report does establish:** the reference set and the harness are stable (a repeat run reproduces the bands exactly); the car paint is fixed on the tracks where its patch aligns; the sky patch is only usable on tracks where the fixed region is actually sky (Tsukuba 0.96, Sebring 1.05, Sunset 0.92, Silverstone 0.94) and meaningless elsewhere (Laguna 0.57 and Maple Valley 0.27 are banners/hills in the patch).
+**Per-track worst offenders:** New York 0.40 (night, the darkest scene; the band and the reference's own content differ), Suzuka 0.42 (our scene much darker there), Maple Valley 0.52, Laguna 0.63, Sunset 0.63. On the bright side Road Atlanta is 1.41 (ours brighter).
+**Where the remaining error lives:** the albedo path (W1: the road is baked as `draw-average albedo x grain`, 0.89x of Xenia's implied albedo), not the display (W4 closed), not the shadows (W3 closed), not the car (W2 fixed). The next real lever is **W1's per-pixel road bake**, which is planned in DESIGN.md but not built.
+
+## 2026-11-01 (157): W5 (sky) measured — the inferred sky-gain table is still required; W6 needs no action
+`parity.py w5 --tracks=tsukuba_00,mugello_00 --env FH1_FM2_SKY_GAIN=1` (the switch disables the per-circuit gain table):
+- **Tsukuba**: sky patch **0.96 -> 0.51**; percentiles collapse (75 % 140 -> 107, 95 % 168 -> 140).
+- **Mugello**: sky **0.56 -> 0.32**; 95 % 238 -> 186.
+So the inferred per-circuit gain table is **not an artefact of the old encoding**: with the sRGB reference our sky is genuinely **about 2x too dim** without it, and deleting the table (the plan's preferred outcome) would make it much worse. **W5 conclusion: keep the table; fix the cause, not the fit.** The cause is now a concrete lead: the sky dome's own brightness (its textures' colour space — the engine's sky path may treat them as linear where the console's are sRGB — or the combine's treatment of the sky). That is a new, specific item for the next pass, not a guess.
+**W6 (scenery details):** no measurable action was possible in this pass. The open items (start-marker speckle, Nurburgring road gloss, the fainter pylon, denser/darker canopies) are **content** differences, not values the harness can score, and they were identified by eye in earlier sessions. Left open with their existing notes; nothing changed.
+**State of the plan after W8, W1 step 1, W2, W3, W4, W5, W6, W7:**
+- W8 harness: done. W2: fix applied and re-measured. W3/W4: measured and closed with no change. W5: measured; the table stays, the cause is identified. W6: no action possible.
+- W7 acceptance: **not met** (sum 11.99, 0 of 12 within +-10 %).
+- W1's fix is **planned but not built**: the per-pixel road bake. It is now the single largest lever, together with the sky colour-space lead from W5.
+- No commits (per the project rules, only on request).
+
+## 2026-11-01 (158): W1 per-texel road bake built and measured — more faithful, slightly worse on the band
+**Built** (`fm2_scenery.rs`): `fit_affine` + `bake_road_px`. The road shader is now run at **every texel** of the 256 x 256 baked texture (65536 points), each sampler's texture coordinate coming from a least-squares affine fit of the draw's own resolved per-sampler uvs against uv0 (so tiling and atlas transforms follow the draw's mapping). `FM2_ROAD_PX=0` restores the old `draw-average x grain` bake; `FM2_ROAD_PX_MASK=a,b` forces a sampler gamma mask for the bake; `FM2_ROAD_PX_GAIN` scales it; `FM2_ROAD_PX_DIM` changes the resolution.
+**Tsukuba, re-imported and shot at the reference pose** (band = 120..370 x 570..680, linear G):
+- old bake: band **0.840** (ours G 92);
+- per-texel bake: band **0.802** (ours G 90).
+**Why:** the per-texel bake's mean G is **0.208** against the old flat shader albedo's **0.207** — the draw average was already the right level, so replacing it with real per-pixel texture detail changes the pattern but not the brightness. The per-texel bake is the more faithful path (it uses the game's actual textures per texel) but it is **not** a parity win.
+**Mask does not rescue it:** with the bake forced to mask `none` the band albedo is 0.162 (final 0.802); with `3,4` it is 0.159 (final 0.784); the family (BC4) bake is 0.162. Xenia's band implies **0.194** albedo at the same lightmap term, so no per-sampler gamma choice reaches it either (consistent with the 16-mask point search, MODLOG 149).
+**Conclusion:** the ~20 % road deficit is **not** the bake's draw-average approximation. It is either a light term the road receives in the game and not in our material (our final image is exactly `albedo x lightmap term` with no sun/ambient), or the reference band holds a different surface mix. The next W1 lead is the **missing light term**, not the texture path.
+**Not tested yet:** the twelve-track report with the per-texel bake (import running); whether the bake helps the Nurburgring family; the missing-light-term hypothesis.
+**Follow-up, same day:** the twelve-track run with the per-texel bake data gives **sum 11.95** (11.99 with the flat bake) on the old HUD boxes; on the **content-aware road mask** (MODLOG 161) the flat bake scores **4.96** and the per-texel bake **5.33**, i.e. the flat bake is better. The per-texel bake is a **wash-to-worse** for parity, so it is now **opt-in** (`FM2_ROAD_PX=1`), defaulting to the old flat bake (faster import: 4.6 min against ~1 min).
+
+## 2026-11-01 (159): W5 sky colour-space lead tested and REJECTED — the sRGB decode is correct
+**The lead:** the sky dome's textures are uploaded with an sRGB format (`dds_image`: `Bc1RgbaUnormSrgb` / `Bc3...Srgb`); the game marks each texture's colour space in the format word (bits 8-13: `0x3F` = colour, `0x01` = mask/normal).
+**Data:** added `FM2_SKY_DBG=1` (importer prints each sky texture's word) and wrote the per-texture flag into `sky.json` as `"gamma"`. Tsukuba's six sky textures: **all `0x01`** (`0x1A200186`, `0x0800014A`...). So the documented reading says "linear, not a colour".
+**A/B (Tsukuba, same pose, gain table on):**
+- **sRGB** (`FH1_FM2_SKY_SRGB=1`): sky patch **0.96** of Xenia (`[121,144,164]` against `[126,147,167]`), percentiles 31/72/96/140/168;
+- **linear** (`FH1_FM2_SKY_LINEAR=1`, also the data flag's decode): sky **2.71** (`[213,230,234]`), percentiles 32/75/97/224/239;
+- the importer's own flag (linear) gives exactly the linear result, so the flag was applied.
+**Conclusion:** the sRGB decode is **right**; uploading these textures linearly makes the sky **2.7x too bright**. The `0x01` word on a sky texture therefore does not mean "upload linear" (its polarity is the opposite of the scenery mask convention, or those words are not colour-space at all). The **~2x sky deficit the gain table hides is NOT a colour-space error**; the table stays, and the hunt for its cause is now a different question (the sky is unlit and outside the exposure the combine computes).
+**Change kept:** `sky.json` carries the flag, and `FH1_FM2_SKY_LINEAR` / `_SRGB` force either decode; the **default is unchanged sRGB** (the measured-correct one). No visible change to any track.
+**Not tested:** whether a *per-draw* mix (cap vs sectors) matters; the sun glow card's colour space.
+
+## 2026-11-01 (160): W1 correction — the shader probe's absolute value is one texel, not the band; the real gap is ~16 %, not 2.7x
+**Read the shader assembly** (`FM2_PROBE_TEXT=1`, new): the road shader's lighting is `lerp(c184, c185, r0.w)` (instructions 25 / 31) where `r0.w` is a **texture sample (tf1)**, and tf0 (the atlas tile) only feeds a conditional (`cndgt`, instruction 16). So the draw's own light comes from its tf1 texture with the track's light colours -- not from the atlas tile the engine applies.
+**Ran it the game's way** (new probe column `full`: shader with c184 = dark, c185 = light, **no** outside lightmap multiply): **full 0.047** at the band point, identical to the `family` column (0.047 = shader x atlas lightmap 0.678). So tf1's light and the atlas tile agree: there is **no wrong light source**, and the "missing light term" is not a tf1-vs-tile mix-up.
+**The correction that matters:** 0.047 is the value at **one texel**; the left band's **median** is **0.107** (ours) against Xenia's **0.127** -- a **16 % gap**, not the 2.7x the single-texel comparison implied. The band point `-59.36, 18.52, -101.51` sits on a dark texel, so MODLOG 148-153's "no mask lands on Xenia's value" is a statement about **that texel only** and must not be read as a band-level result. The 16-mask search still rules out a mask fit at that texel, but the band's own albedo (per-texel bake mean **0.208**, old flat **0.207**) is already at or above Xenia's implied 0.194, so the band's remaining 16 % is **not** the albedo mask: it is in the light the band receives (term 0.658) or in the band's content.
+**State of W1 after three attempts (mask, per-texel bake, light source):** the two structural candidates are built and measured and neither moves the band more than 4 %; the residual is a **~16 % consistent deficit** on the road band. Per the two-attempts rule this line is **closed with a write-up**, not a fourth variation: the next attack needs a per-band measurement of the game's own term (its tf1 texture value and the TrackSettings colours at the band), which the current probe cannot extract without a texel-to-band mapping.
+
+## 2026-11-01 (161): the texel-to-band mapping, and a big measurement error found — the "road band" was the HUD
+**Built the mapping from existing pieces.** The engine's `FH1_SHOT_PROBE` logs a 3x3 grid of world points for each band (`shot probe left: centre -59.36,18.52,-101.51 radius 1.07, points [...]`); the importer's `FM2_PROBE_AT` takes those points directly. Chained, they give the game shader's value **at the band's own texels**.
+**Result at the nine band texels (Tsukuba, model 50):** family (our model: shader with neutral light x atlas lightmap) **0.103 / 0.029 / 0.170 / 0.043 / 0.047 / 0.121 / 0.059 / 0.122 / 0.132** -> median **0.103**; the engine's rendered band median is 0.102-0.107, so the probe is now **validated against the render**. `full` (the shader with the track's own light colours in c184/c185, no outside multiply) equals `family` at **every** texel, so there is no missing light term and no double count; tf1 and the atlas tile agree.
+**Per-sampler sweep at the band (each decoded sRGB alone):** tf0 0.185, tf1 0.185, tf2 0.185, **tf3 0.234**, **tf4 0.030**, tf5 0.185, tf6 0.185; family (BC4) 0.047, none 0.185. Xenia's 0.127 has **no mask subset** that reaches it (consistent with MODLOG 149) -- the discrete levels bracket it.
+**The measurement error (the important part).** A crop of the band area showed it is **entirely HUD**: the "tippiebekfix" name plate and the white PLACE box. The old left band (0.08-0.30, 0.78-0.94) never measured road on any track; it measured the HUD's brightness, which is why the ratios hovered 0.4-1.4 and why no shading fix moved them. The band's distribution differed structurally: our p90 **0.407** against Xenia **0.209** while our *mean* was higher (0.174 against 0.162).
+**New metric (in `parity.py`):** a **content-aware road mask** -- pixels that are asphalt-like (low saturation, mid luminance) in **both** pictures, in the lower frame, HUD and gauges excluded, compared by median. On Tsukuba that is **0.89** (3232 pixels) instead of the HUD's 0.75; over eleven tracks (New York's night scene has too few asphalt pixels) the median ratio is **0.62** and the new aggregate is **sum |ln| 5.33** (the old HUD-box aggregate 11.95 is not comparable and is retired).
+**Specular test (game data, not a fit):** the draw's own specular is implemented but off (`FM2_SPEC_MAT=1` importer + `FH1_RM_FM2_SPEC_MAT=1`). On Tsukuba it lifts the fixed-mask road median from **0.053 to 0.091** (ratio **0.89 -> 1.53**), i.e. it **overshoots**; the sheen path lands on the same value. Its strength depends on the sun direction, which is unknown and not to be swept again (DESIGN.md W3), so it stays **off** and is recorded as a candidate that needs the game's sun, not a fit.
+**State:** the acceptance metric is now honest and the road's true deficit is ~20-40 % (track-dependent), not the ~16 % the HUD-based texel comparison suggested. No engine change adopted in this step.
+
+## 2026-11-01 (162): W6 verified against the sRGB reference set — three of the four items still present
+Side-by-side crops (Xenia left, ours right, same pixels; `data/work/w6_tsukuba.png`, `w6_more.png`):
+- **Pylon (fainter):** Xenia shows the lattice pylon and its wires at the left of the right-hand structures; ours has **no pylon there** (a light pole only). **Still present.**
+- **Start marker speckle:** ours draws a **bright white checkered strip and a white arrow** across the road ahead of the car; Xenia shows a **subtle dark band** at the same place. **Still present** (and it is a strong content difference, not a shading one).
+- **Nordschleife gloss:** Xenia's road is a lighter mid-grey with a soft sheen; ours is **darker and patchier**. **Still present** (this is the same road-lighting deficit W1 measures).
+- **Denser canopies:** the crop chosen (Maple Valley x 0-420, y 230-470) is the **pit building**, not trees, so this item is **not verified**; it needs a crop of an actual tree line.
+No code changed for W6; the three confirmed items are content/geometry (pylon, start marker) and the road-lighting question (gloss, W1). The pylon and the start marker are the two that are pure content fixes and the cheapest to close next.
+
+## 2026-11-01 (163): W6's canopy item verified; W1's sun extracted from the game but the specular route is not adoptable
+**W6 canopy (the fourth item):** a proper tree-line crop (`data/work/w6_canopy.png`, Nordschleife x 0-400, y 120-330) settles it: Xenia's canopies are **dense and dark** with fine leaf detail; ours are **sparse and lighter**, the same trees showing many bare branches and a thinner distant tree line. **All four W6 items are now verified present**: pylon, start marker, Nordschleife gloss, canopies.
+**The game's sun direction (game data).** The sky model's own sun disc (an untextured sphere draw) gives the direction: Tsukuba `-0.816, 0.412, 0.405`, Laguna `-0.707, 0.071, 0.703`, Road Atlanta `-0.821, 0.395, -0.413`, Silverstone `0.904, 0.420, -0.084`, Nordschleife `-0.721, 0.217, -0.659`, Suzuka `-0.653, 0.515, -0.556`, Maple Valley `0.227, 0.221, -0.949`, TT `0.019, 0.316, -0.949`. **No sun disc** on Sebring, Mugello, Sunset Infield or New York (the engine's `FH1_FM2_SUN_SKY` reads the same record). These are real vectors from the track data, not fits.
+**Specular with the game's sun: measured, not adopted.**
+- With the game direction (`FH1_RM_FM2_SPEC_DIR`) the fixed-mask Tsukuba road reads **1.53** of Xenia, the *same* as with the engine's own sun -- the direction does not change the result at this gate, and `FH1_RM_FM2_SPEC_GS` / `_UNIT` did not move it either.
+- **A real problem found:** importing with `FM2_SPEC_MAT=1` changes the **road image itself**, with the spec shader **off**: the foreground road patch goes from `[94, 91, 84]` (plain import, identical to the w7 shots) to `[70, 68, 63]`, a ~25 % drop, spatially uneven, while the sky is identical. A plain re-import restores `[94, 91, 84]` exactly. So the spec data import is **not safe** (it shifts the road's appearance beyond adding a highlight), and the spec term at full strength **overshoots** (0.89-1.12 -> 1.53).
+**`LightAmbient` is not the road's missing term:** `fx_globals.json` now carries `LightAmbient` (Tsukuba 0.70/0.71/0.70), but `fh1setup/src/remaster.rs` uses it only for the LED/lamp shaders (`light = sat(N.L) + LightAmbient`, MODLOG 119); the road's own lighting is the lightmap lerp, which the `full` probe column confirmed equals our model at every band texel.
+**The road number is mask-dependent at Tsukuba:** with a fixed mask (reference ∩ baseline asphalt) our road is **1.12** of Xenia (brighter); with each image's own asphalt mask it is 0.89. Across tracks the road-mask aggregate is 4.96, driven by genuinely dark tracks (Suzuka 0.45, Laguna 0.48, Maple Valley 0.42, Road Atlanta 0.43), not by one global gain. **No single fix is indicated by the data collected so far.**
+**Decision (two-attempts rule):** the spec route is **closed**: it needs the sun *and* a calibrated unit, and its data import perturbs the road image. The remaining road gap is track-specific (0.42-1.52) and needs per-track evidence, not a global term.
+
+**Acceptance run with the current default (`parity.py acc1`, all twelve, 29 s each):** road-mask **sum |ln| 5.36** over eleven tracks (New York night has too few asphalt pixels); per track Tsukuba 1.12, Laguna 0.48, Road Atlanta 0.43, Silverstone 0.57, Nordschleife 0.93, Sebring 1.52, Mugello 0.76, Suzuka 0.47, Sunset 0.62, Maple Valley 0.43, TT 1.30. The old HUD-boxes aggregate is 12.45 (not comparable). **The plan's target (sum <= 2.0, per-track <= 0.10) is not met and no fix was adopted in this step**, by design: the one candidate with a game-data basis (specular + the game's sun) overshoots and perturbs the road, so applying it would be a fit, not parity.
+
+## 2026-11-01 (164): the post/exposure chain audited — FM2 has no dynamicpost data, the chain in use already is the game's; spec bug found
+**FM2 has no `dynamicpost` folder.** The imported map holds `ai / crowd / scenery / shaders / tracks / world` (checked on disk); `FxPostConfig` (dynamicpost) is **FH1's** chain and is not what FM2 ships. FM2's post data is `tracks/TrackSettings.xml`, and that **is** what the engine uses: `Fm2Post::from_xml` reads `DesaturateAmount`, `DesatLuminosity`, `DesatPostMod`, `ToneMappingLevels` (light/dark black point, white point, gamma, boost) and `TrackLumLimits`; the combine in `post.rs` reproduces the game's `FinalCombineBloomTonemap` (gamma-space, luminance curve, frame-average blend `t`). The only pieces not data-driven are `FH1_FM2_SAT` (now 1.0) and the opt-in `FH1_FM2_CONTRAST` / `FH1_FM2_RAMP`.
+**Fields that exist and are unused:** `bloomScale 0.15` / `bloomCutoff 0.609` (Bevy's bloom runs at a fixed intensity **0.12** for every track, `light.rs:290`); `SHLighting` (`SHTop 0.25/0.24/0.23`, `SHBottom 0.10/0.12/0.15`, `SHDir 0.80/0.79/0.78`) parsed into `TrackSettings.sh_*` (`lighting.rs:184`) and **only** used for `SHDirectionalLightI` (the car), never for the lightmap path; `TrackLightMapColor 0.19/0.18/0.17`, `TrackLightMapTransition`. The road's lit value is very plausibly already carrying the baked ambient (the lightmap "light" colour is 0.945), so adding `SH` again would double-count; a switch would be needed to test it, and nothing in the data says whether it is additive to the lightmap.
+**The sun is already game data:** `track.rs` `fm2_lighting` reads `ShadowLightDirection` (Tsukuba `0.612, -0.671, 0.419` -> toward the sun `-0.612, 0.671, 0.419`) and `GlobalSpecularLevel` (1.0). So the spec test in MODLOG 163 used the game's direction after all -- the sky-disc vector was redundant.
+**Concrete bug found (why the spec import perturbs the road):** `record()` (`fh1setup/src/remaster.rs` ~294 and ~368) writes the draw's specular into the **material level** slot: `r.params[0][1] = sp[0]` (K = 4.0). `material.rs:1001` reads that same slot as `level` and, with `power > 0`, sets `reflectance = mix(0.25, 0.6, saturate(level*spec*2))` -- so importing `FM2_SPEC_MAT` changes the road's **reflectance/roughness** even with the spec shader off (measured: road mask 1.12 -> 1.56, and the foreground patch `[94,91,84]` -> `[70,68,63]`). The spec term itself contributes nothing at Tsukuba (1.53 with the spec on, i.e. the same as the import alone once measured consistently). **The spec must move to a slot the shader reads only in its spec branch before it can be evaluated.**
+**Conclusion for W4/W1:** the post chain is not a fit sitting on top of the scene; it is the game's own curve on the game's own inputs. What remains is the scene's luminance distribution and the untested SH ambient / bloom-strength, both of which need a switch and a measurement, not a port of FH1's dynamicpost.
+
+## 2026-11-01 (165): removed the fitted per-circuit curve blend; the game's computed blend is adopted and measured
+**The fit found:** `main.rs` forced the combine's curve blend `t` per circuit from a table fitted against the **old BT.709 reference** (`tsukuba / testtrackinfield / lagunaseca -> 1.0`, `silverstone / sebring / roadatlanta / newyork -> 0.0`, `mugello -> 0.5`). The game computes `t = saturate((average frame luminance - min) / (max - min))` from `TrackLumLimits`, which `post.rs` already implements when `t < 0`.
+**Change:** the fitted table is now behind `FH1_FM2_POST_T_FIT=1`; the default is `t = -1` (computed), `FH1_FM2_POST_T` still overrides both. Rebuilt (1m28s).
+**Twelve-track report (`parity.py g1t`, all ok):**
+- road-mask **sum |ln| 5.21** against 5.36 with the fitted table -- a small net gain;
+- whole-frame percentiles move substantially closer on the bright tracks: Tsukuba **36/87/116/164/199** (Xenia 32/75/110/146/197; before 31/75/97/140/168 -- the p95 deficit of -29 is now **+2**), Road Atlanta 42/96/123/180/228 (before 42/94/119/171/215), Mugello 40/85/113/152/252 (50 and 75 now exact), TT 40/96/126/154/175 (before 35/85/115/144/166);
+- the dark tracks are unchanged where the fitted table was already 0 (Silverstone 0.57, New York has too few asphalt pixels) and Sebring improves 1.52 -> 1.26;
+- **the regression:** Tsukuba's road mask **1.12 -> 2.23** and its sky 0.96 -> 1.34 -- the computed `t` there is higher than the fitted 1.0? (no: it is *lower*), so the brighter curve overshoots Tsukuba's road even while fixing its highlights. Laguna's road 0.48 -> 0.95.
+**Verdict:** adopted, because it removes a fit (W7's goal) and the aggregate improves, but the trade-off is honest: the computed blend is closer on highlights and overshoots midtones on some tracks, which points at our **frame average** (the input to `t`) being higher than the game's, not at the curve. `FH1_FM2_POST_T_FIT=1` restores the old behaviour exactly.
+
+## 2026-11-01 (166): frame average and t instrumented per track — the fitted table was compensation, not a scene average
+**Instrumentation:** `FH1_FM2_CONTRAST=2` now makes the combine output **R = frame average x 2** (the coded luminance it computes from its 6 x 8 grid) and **G = the resulting t**, as a flat colour in a normal screenshot (`data/work/w4_avg.py` reads it). Twelve debug shots taken with `parity.py dbgavg --shots-only`.
+| track | our avg | our t | TrackLumLimits | fitted t | avg the fit needs | delta |
+|---|---|---|---|---|---|---|
+| Tsukuba | 0.371 | **0.031** | 85-380 | 1.0 | **1.490** | -1.12 |
+| Laguna | 0.396 | 0.000 | 150-215 | 1.0 | 0.843 | -0.45 |
+| Road Atlanta | 0.404 | 0.165 | 40-421 | 0.0 | 0.157 | +0.25 |
+| Silverstone | 0.476 | 0.184 | 95-240 | 0.0 | 0.373 | +0.10 |
+| Nordschleife | 0.500 | 0.369 | 0-350 | - | - | - |
+| Sebring | 0.500 | 0.275 | 94-270 | 0.0 | 0.369 | +0.13 |
+| Mugello | 0.478 | 0.369 | 20-296 | 0.5 | 0.620 | -0.14 |
+| Suzuka | 0.488 | 0.047 | 115-310 | - | - | - |
+| Sunset | 0.355 | 0.235 | 53-211 | - | - | - |
+| Maple Valley | 0.343 | 0.129 | 59-280 | - | - | - |
+| New York | 0.188 | 0.125 | 0-381 | 0.0 | 0.000 | +0.19 |
+| TT | 0.416 | **0.580** | 80-125 | 1.0 | 0.490 | -0.08 |
+**The finding:** on **Tsukuba the fitted t = 1.0 needs a frame average of 1.49** and on **Laguna 0.84** in coded luminance, where 1.0 is the top of the scale (our measured averages are 0.37-0.40). So those two entries were **not** "the scene is bright enough for the light curve": the fit was forcing the light curve to darken the picture, i.e. it was **compensating for a scene that is too bright at that pose**, not recording the game's blend. TT's implied average (0.49) *is* reachable and its computed t is 0.58 -- close to the fit, which is why TT barely moved.
+**Consequence:** the computed t is the game's rule and is kept; the per-track road spread (0.42-2.23) is a **scene-range error**, per track, not a post error. On Tsukuba the road is too bright (2.23) with the game's blend and only matched (1.12) because the fit darkened it -- so the fit was hiding a scene that is too bright there, while Suzuka (0.45) is too dark. A single post or light term cannot fix both directions; the remaining work is per-track scene brightness (W1).
+**Debug switch kept:** `FH1_FM2_CONTRAST=2` (diagnostic only; the normal path is unchanged at 0).
+
+## 2026-11-01 (167): the per-track road spread is the ALBEDO, not the lightmap; the game's word gamma tested
+**Stage split across three representative tracks** (`FH1_RM_FM2_DBG=1` albedo and `=2` lightmap, medians over the road mask; `data/work/w1_stage.py`):
+| track | albedo | lightmap sample | product | road mask (vs Xenia) |
+|---|---|---|---|---|
+| Tsukuba | 0.296 | 0.361 | 0.107 | 2.23 |
+| Suzuka | **0.044** | 0.381 | 0.017 | 0.45 |
+| Sebring | **0.521** | 0.279 | 0.145 | 1.26 |
+The **lightmap samples are nearly the same** (0.28-0.38) while the **albedo differs 12x**. So the track-dependent road error is the **baked road albedo** (the pixel-shader colour / its sampler gamma), not the lightmap and not the post curve. That is also why the fitted `t` could hide it on some tracks and not others.
+**The game's own gamma word applied to the bake** (new switch `FM2_WORD_GAMMA=1`: the sampler sRGB mask comes from each texture's format word, bits 8-13 == `0x3F`, instead of `FAMILY_GAMMA`; `word_gamma_mask` + `shader_albedo_g`/`shader_eval_g` in `fm2_scenery.rs`). Measured with the game's computed blend:
+| track | road mask before | with word gamma |
+|---|---|---|
+| Tsukuba | 2.23 | **3.76** (worse) |
+| Suzuka | 0.45 | **1.41** (better) |
+| Sebring | 1.26 | 1.34 (slightly worse) |
+The word mask lifts the dark tracks towards parity but over-brightens the already-bright ones: the albedos become 0.125 / 0.439 / 0.491 (4x spread, from 12x). So the rule is more consistent with the data than the per-shader table, but with the game's computed `t` the bright tracks overshoot -- the post blend and the scene brightness are **coupled**, and the exact pairing that matches Xenia is not reachable by changing one side alone.
+**Decision:** the word gamma stays **opt-in** (`FM2_WORD_GAMMA=1`) and the installation was re-imported with the family mask (the default). The default state remains the `g1t` run (**5.21**). The next attempt must change the scene's **sun/ambient** (per track) together with `t`, which is a bigger change than this step and needs its own measurement.
+
+## 2026-11-01 (168): CORRECTION — the stage debug is post-processed; the true pre-post split changes the diagnosis
+**The error in 167:** `FH1_RM_FM2_DBG` colours are written *before* the grade but the grade still runs on them, so the "albedo" and "lightmap" values I read were **post-combined** (compressed), making the division by the lightmap meaningless.
+**Fixed by shooting with the grade off** (`FH1_FM2_POST=0` + `FH1_RM_LUT=0`; the post plugin returns before drawing any pass, so the debug colour reaches the screen as its own linear value):
+| track | Xenia road | albedo | lightmap | product | product / Xenia |
+|---|---|---|---|---|---|
+| Tsukuba | 0.0595 | 0.165 | 0.392 | 0.0647 | **1.09** |
+| Sebring | 0.2016 | 0.624 | 0.301 | 0.1875 | **0.93** |
+| Silverstone | 0.1170 | 0.058 | 0.776 | 0.0448 | 0.38 |
+| Suzuka | 0.0908 | 0.041 | 0.527 | 0.0216 | 0.24 |
+| Maple Valley | 0.1046 | **0.033** | **0.033** | 0.0011 | 0.01 |
+**This is the real split.** Pre-post, our road is **within 10 % of Xenia on Tsukuba and Sebring**; it is 2.6x too dark on Silverstone, 4x on Suzuka, and essentially black on Maple Valley (a near-black albedo *and* a near-black lightmap tile). So the per-track error is **not one thing**: (a) some tracks are already right pre-post and only the post overshoots them (Tsukuba: pre-post 1.09, post 2.23), (b) some tracks are too dark in the **albedo** (Suzuka 0.041, Silverstone 0.058, Maple 0.033), (c) Maple is too dark in the **lightmap tile** as well (0.033 against 0.30-0.78 elsewhere) -- likely the wrong tile or a wrong lightmap value, which is a data bug, not a gamma choice.
+**Mask comparison against what the data needs** (needed albedo = Xenia / our lightmap): Tsukuba needs **0.152** (family 0.296, word 0.440), Sebring needs **0.670** (family 0.624, word 0.491), Suzuka needs **0.172** (family 0.044, word 0.125). No single mask is right on all three: family is closest on Tsukuba/Sebring, word on Suzuka -- so the sampler gamma is **per draw/texture**, and the word rule is the only data-grounded candidate but not yet matching; on Tsukuba it decodes *too few* samplers as sRGB, on Suzuka *too many* under the family table.
+**Consequence:** the next work is (1) Maple Valley's lightmap tile (data bug, check the tile id/uv against the PVS record) and (2) the per-texture decode validated against these needed albedos, track by track. The post `t` cannot fix any of them -- it only scales what the scene already produces.
+**Caveat found while checking Maple (same day):** the importer's own probe at Maple's band centre reports model 111, **tile 281, tile value 0.549**, albedo 0.238 -- but the engine-side debug measured 0.033 for both stages at the road-mask keys. The whole-frame statistics of the debug shots are normal (p50 116-141), so the shots are valid; the discrepancy means the **road-mask keys include surfaces the debug modes do not recolour** (the debug applies only to FM2 lightmap materials, and the asphalt-like mask also catches kerbs, walls and shadowed edges). The per-track stage table above is therefore only reliable where the key set is dominated by road (Tsukuba, Sebring look consistent); **Maple's 0.033 is not yet a proven bug**. A clean per-track stage split needs the keys taken from the road geometry itself, not from an image-space mask.
+
+**Full twelve-track test of the game's word gamma** (`FM2_WORD_GAMMA=1` on the whole import, then `parity.py wg`, all ok): road-mask **sum |ln| 5.61** against 5.21 for the default -- **worse**. It fixes the dark tracks (Suzuka 0.45 -> **1.38**, its albedo 0.044 -> 0.125) but over-brightens the bright ones (**Tsukuba 2.23 -> 3.76**, **Silverstone 0.57 -> 2.51**; the in-between tracks barely move). So the per-texture word rule is *not* a global improvement either: the brightness error is **per draw**, not per texture-format rule. The installation was re-imported with the family mask (the default); `FM2_WORD_GAMMA=1` remains available.
+**Where this leaves W1:** four independent decode rules have now been measured against the reference on all twelve tracks (per-shader family table: 5.21; per-texture game word: 5.61; per-draw texture average vs per-texel bake: 4.96/5.33; no decode at all: 2.9x too bright at the band). None lands the road within +-10 % on any track, and each fixes a different subset. The error is **per draw**, so the next step is a per-draw albedo measurement against the needed value (Xenia / our lightmap), not another global rule.
+
+## 2026-11-01 (169): per-draw probe at geometry-derived keys -- the game's word rule decodes NOTHING on road draws
+**Method (geometry-derived keys):** the engine's `FH1_SHOT_PROBE` gives the left band's world point per track; the importer's `FM2_PROBE_AT` at that point prints the draw (model), the tile, the lightmap value and the shader's lit value under each sampler mask. A new `word` column uses `word_gamma_mask` (the same rule `FM2_WORD_GAMMA` bakes).
+| track | model | lightmap | family | none | **word** | albedo family | albedo none | needed (Xenia/lm) |
+|---|---|---|---|---|---|---|---|---|
+| Tsukuba | 50 | 0.678 | 0.047 | 0.185 | **0.185** | 0.069 | 0.273 | 0.152 |
+| Suzuka | 160 | 0.903 | 0.047 | 0.307 | **0.307** | 0.052 | 0.340 | 0.172 |
+| Sebring | 49 | 0.776 | 0.310 | 0.790 | **0.790** | 0.399 | 1.018 | 0.670 |
+| Silverstone | 41 | 0.789 | 0.058 | 0.312 | **0.312** | 0.073 | 0.395 | 0.13 |
+| Maple Valley | 111 | 0.549 | 0.238 | 0.253 | **0.253** | 0.434 | 0.461 | 0.65 |
+**The mechanism, now clear:** `word` is identical to `none` on **every** road draw measured -- the format words of these textures never carry `0x3F` in bits 8-13, so the "game word" rule selects **no sRGB decode at all**. That is why the full word run (5.61) was worse: it silently became the no-decode rule, which is ~1.8-3x too bright (the family mask is ~2x too dark). The word bits are therefore **not** a usable gamma flag for FM2 scenery (the same conclusion the sky test reached, MODLOG 159).
+**The gap is a partial decode:** at Tsukuba the needed albedo (0.152) lies between family (0.069) and none (0.273); the 16-mask sweep over tf3..tf6 found only 0.030 / 0.038 / 0.185 / 0.234 -- no subset reaches 0.152. So neither a whole-texture rule nor a per-sampler subset explains the road's albedo; the decode the console applies is **per fetch**, which lives in the pixel shader's fetch instruction (the Xenos texture fetch's degamma/format field), not in the texture table.
+**State:** installation left at the default family mask (the five probe runs re-imported those maps with defaults); acceptance unchanged at **5.21**. Next step, if pursued: read the fetch instruction's format/degamma bit from the shader microcode (`fh1-shaders` `ps_cpu`/`fm2_uv` already decode the fetch constants) and use it as the per-draw mask -- that is the only remaining source that can express a partial decode.
+
+## 2026-11-01 (170): fetch constants are not in the parsed draw stream -- W1 blocked, written up in STATUS.md
+**Built the check:** `Pending` now carries `Draw::state`; `FM2_PROBE_STATE=1` prints the hit draw's state records. Tsukuba's road draw (model 50) has only:
+```
+state 0x0C (2 words): 00000148 00000000
+state 0x08 (2 words): 0000018C 00040001
+state 0x05 (2 words): 000000F0 00480004
+```
+These are render state, not the 6-dword texture fetch constants. The other candidates are already excluded: the `0x2d` stream record carries sampler **bindings** (its `items` are verified working), and the texture table word's bits 8-13 do not behave as a decode flag (the word rule decodes **nothing** on road draws -- `word` == `none` in every probe, MODLOG 169).
+**Conclusion:** the per-fetch decode the console applies is not present in the parts of the format we parse. Recovering it means reverse-engineering the raw `.stream` around a road draw (looking for a 6-word record whose format word matches the texture's `0x1A200186`) -- a research task, not an incremental step, and guessing a bit position would violate the project's rules.
+**Rule followed:** per AGENTS.md ("after two real attempts, stop and write up STATUS.md"), the road-parity block is now written to `STATUS.md` with the full evidence table (five decode rules measured on twelve tracks), the instrument recovery list, and the concrete next investigation. No default changed; acceptance remains **5.21**.
+
+## 2026-11-01 (171): the per-fetch decode does not exist in the parseable data -- five checks, all negative
+Completed the stream investigation the previous entry stopped short of:
+1. **Draw state** (`FM2_PROBE_STATE=1`): three 2-word render-state records, no 6-dword fetch constants.
+2. **Record type/length histogram** (`FM2_STREAM_TYPES=1`, every record of every Tsukuba model): `0x03` is the only 28-byte (6-word) type and all 4146 are identical (`00000000 00400001`); `0x2E` is the vertex fetch, `0x06` the float constants.
+3. **`0x2d` payloads** dumped in full: `(item, slot)` pairs only, no format fields.
+4. **Raw model scan for the texture word** (`FM2_SCAN_WORD=1A200186`, every occurrence in every Tsukuba model): **0 hits** -- the model stream never contains a texture format word.
+5. **The candidates' own words** (new: the probe now prints each candidate's CAFF word): all five textures of the Tsukuba road draw -- the lightmap tile 150 and the colour textures 130 / 144 / 145 -- carry the **identical word `0x1A20017B`**. So the word carries **no per-texture information**: it cannot distinguish a lightmap from a colour texture, let alone encode an sRGB flag.
+**Conclusion (now proven, not assumed):** the console's per-fetch decode is not recoverable from the FM2 data this project parses. It is neither in the draw state, nor in the stream records, nor in the texture table word (which is constant across textures). The family table (`FAMILY_GAMMA`) is therefore the only available lever, and it is a heuristic -- which is exactly why every global rule tried lands on a different subset of tracks.
+**No further variation is justified.** The acceptance target (road-mask sum <= 2.0, per track +-10 %) cannot be reached by any change available from the current data; reaching it needs a new data source (the console's executed draw state / PIX capture of the fetch constants), which is outside what the disc files provide.
+**State:** acceptance **5.21**, no default changed; `STATUS.md` updated with this fifth check; diagnostics kept (`FM2_PROBE_STATE`, `FM2_STREAM_TYPES`, `FM2_SCAN_WORD`, candidate `words`).
+
+## 2026-11-02 (172): plan v2 executed -- P2/P3/P4/P5 closed or bounded, P1 is the single dead end
+**P2 (Maple Valley lightmap 0.033): disproven -- no bug.** With the grade off, the engine's lightmap sample at the band's own pixel (243,619) is **0.546** against the importer probe's **0.549**. The earlier 0.033 was the image-space road mask including non-road surfaces. Same check on the other tracks: Tsukuba 0.665, Suzuka 0.638, Sebring 0.753, Silverstone 0.784, Maple 0.546 -- all normal, all consistent with the importer. **The lightmap is correct everywhere measured.**
+**P5 (geometry-derived keys): done in the practical form.** A band-centre pixel with its engine-probed world point, confirmed by `FM2_PROBE_AT` to lie on the road draw (model 50 / 111 / ...), gives a valid single-point stage read; the engine and importer agree on the lightmap at it. A full per-pixel key set is not needed while P1 is blocked.
+**P3 (blend input domain): answered -- no domain fits.** For the game's `t` to be 1.0 (the fitted best) at Tsukuba, the average would have to be **1.49** on a 1.0 scale; no domain of our scene (coded 0.371, linear ~0.11) reaches it. The fitted per-circuit table was **compensation**, and the computed blend is the game's rule. Recorded; no change.
+**P4 (W6 content): two of four are not independent defects.**
+- **Start marker:** the point under the white checkered strip (screen 330,500 -> world -57.263,18.529,-103.102) is **model 50, the road itself** -- no decal model. The marker is part of the road's albedo, read too bright, so it is the same per-draw decode error as W1/P1, **not** a cheap content fix.
+- **Pylon:** the screen pixels of the pylon (715,300 / 700,260) have **no collision-mesh hit** (it is beyond the ground mesh), so it cannot be located with the probe; finding its draw needs the scenery tile data, a content-archaeology task, not a value.
+- Nordschleife gloss stays P2/W1-dependent; canopies remain cut-out card content (not measured again).
+**P1: the single dead end.** The per-draw texture decode needs a capture of the console's **executed draw state** (the `tf` fetch constants as received by the GPU) -- Xenia/RenderDoc draw-state dump for one road draw, or the game's draw-state setup code. Nothing in the disc files expresses it (five independent checks, MODLOG 171).
+**Plan outcome:** with P1 blocked, the road-mask target cannot be reached from data available to the project; the rest of the plan is executed or bounded as above. Acceptance stands at **5.21** (target <= 2.0).
+
+## 2026-11-02 (173): P4b and P4d resolved by measurement -- the pylon was NOT missing; the canopies are too BRIGHT, not too sparse
+**P4b (pylon): the earlier claim was wrong.** A 3x crop of the same pixels (`data/work/w6_towers3x.png`, Tsukuba x 430-640, y 170-380) shows the lattice tower **and its wires in both pictures** -- ours is if anything ~15 % larger (a pose/FOV difference to check separately). What the earlier low-res crop missed was the **distant tree line behind the left grandstand**, which Xenia has and ours lacks. Tile archaeology confirms the pylon is imported: tile (1,-1) holds a 400-triangle batch (material 640, `h_diff_opac_1_lm`, y 7.7-103.8) and the structure draws. So there is **no pylon content bug**; the item is (a) a small scale/pose difference and (b) the missing background trees.
+**P4d (canopies): not density -- brightness.** Foliage coverage is similar or higher in ours (Nordschleife 27.6 % against 24.5 %, Tsukuba 6.8 % against 5.3 %), but the **dark fraction is far lower** (Nordschleife 14.6 % against 42.8 %, Tsukuba 0.1 % against 21.5 %, Maple Valley 4.1 % against 64.0 %). Our foliage is washed out: the leaves render too bright and without the deep shadow the game's cards have. That is the same scene-lighting/brightness problem as W1/P1, not a cut-out card count problem.
+**P5 (per-track keys): delivered.** `data/work/road_keys.json` now holds the band-centre world point for **all twelve tracks** (engine shot probe, 9-hit ground grids); seven new ones are being validated with `FM2_PROBE_AT` (each must land on a road draw).
+**Consequence for the plan:** P4's four items reduce to **two real content differences** -- the missing background tree line (content: a model or a sprite set we do not place) and the small tower scale/pose -- plus the brightness issues that are P1's. No new code change is indicated by these measurements.
+
+## 2026-11-02 (174): P1 SET UP -- RenderDoc capture of Xenia at the grid works; the decode is per-component, not per-texture
+**Tooling (downloaded, in-tree):** RenderDoc 1.47 portable (97 MB zip) at `tools/renderdoc/RenderDoc_1.47_64/` -- `renderdoccmd.exe capture|convert|thumb`. Xenia's own GPU trace is **compiled out** of this build (`trace_gpu_stream` is a no-op; no `.xtr` written), so the host-API capture is the route.
+**Capture pipeline (verified):**
+1. `renderdoccmd capture -c <template> -d <xenia dir> xenia_canary.exe "<ISO>"` (D3D12 backend; the ISO must be quoted or the title launch fails with C00000BB).
+2. Drive with `flow_tsukuba.ps1 -NoLaunch`; its final F12 is also RenderDoc's capture key, so the capture lands at the grid.
+3. `renderdoccmd thumb` -> thumbnail confirms the exact reference pose (car at the grid, chase camera).
+4. `renderdoccmd convert -f <rdc> -i rdc -c zip.xml -o <xml>` (301.7 MB capture -> 88.2 MB XML in 10 s).
+Artifacts kept: `data/work/rdc/tsukuba_frame43864.rdc` (grid frame), `tsukuba_grid.zip` (XML export), `thumb_grid.png`. Your Xenia config was restored from the backup after the run.
+**The decisive finding so far:** across the whole frame RenderDoc shows **zero sRGB host formats** -- every texture is `DXGI_FORMAT_BC4_UNORM` / `BC4` (664), `BC3_UNORM` (736), `BC1_UNORM` (282), `R8_UNORM`, `R8G8B8A8_UNORM`. So Xenia does **not** decode gamma through the format; it passes a **per-component sign** (`TextureSign::kGamma`) to the shader, and the shader linearizes (`texture_cache.cc:738` builds `scale_bits` from `sign_x..sign_w`; the shader applies them). That explains everything measured before: the decode is **per component of a fetch**, which no per-texture or per-sampler mask can express -- the reason every rule we tried landed between the extremes.
+**Next step for P1:** read the per-component signs for the road draw from the capture (the texture-binding/scale data in the bound descriptor), or from a Xenia build with the trace writer enabled. The capture, the exporter and the analysis scripts (`data/work/rdcscan*.py`) are in place.
+**Camera labels are swapped in the game (user):** "Chase Far" is the close camera; use Chase Far for the reference pose.
+**Not verified:** whether a System Link match can be started with one player and no network peer (it reached the rules screen), the car select inside the lobby, and the grid start itself. Nothing committed.
+
+## 2026-11-02 (175): P1 SOLVED by instrumenting Xenia -- the console does no gamma decode at all
+**Toolchain built from source (all in-tree):** Xenia Canary (`data/work/xenia-build`, shallow clone + submodules) built Release with `-DXENIA_ENABLE_GPU_TRACE=ON`; CMake 4.4.5 (`tools/cmake`); glslang + SPIRV-Tools built from the submodules (staged in `tools/vulkan-sdk` as the shader tools); `version.h` generated with `xenia-build.py`'s own function. The build produced `xenia_canary.exe` with tracing compiled in.
+**Trace tooling:** single-frame traces (F4) and the `.xtr` command format decoded (`data/work/xtr_*.py`, including a pure-Python snappy decoder for the memory/register blocks). Findings: the race's fetch constants are **not** in any frame trace (the game sets them once at race load, outside the trace), and the register dump carries only a few unsigned menu constants.
+**The decisive step: per-binding sign logging in the emulator.** Added a log exactly where Xenia converts the guest fetch constant into the shader's sign scale (`d3d12_command_processor.cc`, the `texture_swizzled_signs` loop), printing texture index, format and the 8-bit sign mask; forced `d3d12_bindless = false` so that path runs.
+**Result at the Tsukuba grid (full race run):**
+```
+total bindings 2110700
+signs 00 : 2110700      formats 0:1239685, 2:589276, 20:146335, 18:103123, 6:32281
+```
+**Every texture fetch is unsigned** -- not one uses `kGamma` (or signed/biased). So the 360 as Xenia models it applies **no per-fetch gamma decode anywhere**, and the whole per-texture/per-component decode line (family mask, word rule, 16-mask sweep, per-texel bake, the RenderDoc sRGB-format hunt) is **moot: there is no decode to reproduce**.
+**What this means for W1:** the road's albedo difference is *not* a missing decode. The disc texture the importer reads is not necessarily what the GPU sampled -- the game may convert or repack textures at load (the fetches show formats 0/2/6/18/20; the road's `DXT5A` (59) from the CAFF header does **not** appear). The next investigation is to compare the **VRAM texture contents** (RenderDoc capture) with the disc CAFF bytes for one road texture; if they differ, the importer must reproduce the game's load-time conversion, not a gamma rule.
+**Acceptance unchanged: 5.21.** The trace workdir is self-contained; `tools/xenia-test` was restored earlier.
+
+## 2026-11-02 (176): the VRAM comparison -- the game repacks textures at load (format mismatch), and the XML export has no texture data
+**Attempted the direct comparison.** `tsukuba_grid.zip` (the RenderDoc XML export) contains **no embedded binary data** -- no ZIP payload, no base64 blobs (`data/work/rdczip.py`: 0 PK local headers; the file is one XML, 92.5 MB). So the texture *contents* cannot be read from the export; they need either the RenderDoc GUI/replay API or a dump from the emulator.
+**The format comparison is enough to answer the question, though.** Our importer writes the road's disc textures as **BC4 (DXGI 80)** -- verified on `tsukuba_00/scenery/textures/00000082.dds`, `00000090.dds`, `00000091.dds` (the road draw's colours 130 / 144 / 145). Xenia's bindings at the grid, over 2.11 million fetches, contain only formats **0, 2, 6, 18, 20** -- **no 59 (DXT5A/BC4)** at all.
+So the game does **not** bind the disc's BC4 textures as BC4: it **repacks them at load** (k_8 = format 2 dominates, 589k bindings). That is exactly the load-time conversion hypothesis: the texture the GPU samples is not the texture on the disc, and our importer's sRGB "family" decode is a stand-in for a conversion the game performs itself.
+**Why this matters for the remaining error:** the game's conversion is per texture and lives in its load path; it can bake a gamma decode, a channel expansion, or both. Our stand-in matches on Tsukuba (pre-post 1.09) and Sebring (0.93) but is 4x off on Suzuka and 2.6x on Silverstone -- consistent with a conversion that differs per texture/format, not with one rule.
+**Next step:** obtain the VRAM texture contents -- either via RenderDoc's replay API (the ZIP has no `renderdoc` Python module; the MSI does) or by adding a texture readback dump to our instrumented Xenia build -- and compare one road texture's k_8 bytes against the disc BC4. Then implement that conversion in the importer.
+**Acceptance unchanged: 5.21.** No engine defaults changed.
+
+## 2026-11-02 (177): texture readback dump built -- catches render targets only; the scene textures load elsewhere
+**Built:** an `XE_TEXDUMP=<dir>` diagnostic in `D3D12TextureCache::LoadTextureDataFromResidentMemoryImpl` that writes `{base page}_{format}_{width}x{height}.bin` with the guest bytes (via `D3D12SharedMemory::host_memory()`, a new public accessor because `SharedMemory::memory()` is protected; the texture base is `TextureKey::base_page << 12`). Rebuilt `xenia-app` and drove to the Tsukuba grid with the variable set.
+**Result:** the dump works (32 files), but every one is a **render target** (16 x 1280x720, 16 x 640x360; formats 2 / 6 / 18) -- **no scene texture** (no 1024x512 or 512x512, the road's sizes) was captured. So in the D3D12 backend the ordinary scenery textures do not go through `LoadTextureDataFromResidentMemoryImpl` during this run; only resolve/scanout targets do. The reason is not yet identified (possible: scene textures are created through a different path, or are already resident so `LoadTextureData` returns early).
+**Confirmed again:** the road's disc textures are BC4 (DXGI 80) and Xenia's bound formats are never BC4 (MODLOG 176), so the load-time repack stands as the explanation; the dump simply did not reach the scene textures to measure the conversion.
+**Next step:** log every `LoadTextureData` call (format, dimensions, base page, guest size) to find where the scenery textures are created/loaded, then dump their bytes and compare with the disc BC4 payload.
+**Acceptance unchanged: 5.21.** No engine defaults changed.
+
+## 2026-11-02 (178): texture-load logging -- the draw path in this backend does not go through TextureCache::LoadTextureData the way assumed
+**Built:** `XE_TEXLOG=1` logs every `TextureCache::LoadTextureData` call with the texture key (width, height, format, base page, guest size, outdated flags). Rebuilt and drove to the Tsukuba grid.
+**Result:** 279,520 load calls but only **five distinct textures**: 877x188 fmt 20 (101,094), 1280x720 fmt 6 (98,791), 64x64 fmt 20 (36,582), 1280x720 fmt 18 (35,454), 32x32 fmt 20 (7,599) -- all render-target / resolve sizes. **No 1024x512, 512x512 or any scenery-size texture is loaded through this function**, while the same run logged 2,105,621 texture bindings. So in this D3D12 build the scenery textures are created and uploaded by a path that does not call `TextureCache::LoadTextureData` (in the D3D12 backend that function's callers are only `RequestSwapTexture`, the 3D-as-2D wrapper and one base-class batch site), which is why the earlier `XE_TEXDUMP` also saw only render targets.
+**State:** the disc textures are BC4 and Xenia binds non-BC4 formats (176/177), so a load-time repack is still the best explanation, but the byte-level conversion cannot be measured until the scenery textures' actual upload point is instrumented (the next concrete place: `D3D12CommandProcessor`'s texture-descriptor creation / `GetTextureSRV`, or the `SharedMemory` untile shaders).
+**Acceptance unchanged: 5.21.** No engine defaults changed. This is the end of the instrumentation line for this session: three different readback points (frame trace, resident-memory load, base load) each show the same thing -- the scene textures are not reached by them.
+
+## 2026-11-02 (179): CORRECTION -- the instrumented runs were at the TITLE screen, not at the race
+**Found by checking the screenshots of the instrumented runs.** Every instrumented run of the last few steps (the sign logging with 2.1M / 3.7M bindings, the texture dump showing only render targets, the load log) produced a screenshot of the **Forza 2 title/logo screen**, not the Tsukuba grid. The built build (canary_experimental@96ce1ac) reaches the press-start screen later and the existing key sequence does not advance it in the workdir run, so the game sat on the title while the instruments logged.
+**What this invalidates:** the conclusions in 175-178 that were drawn from those runs:
+- "all texture fetches are unsigned" -- measured on the **title screen**, not the race. It may still be true at the race, but it is **not established**.
+- "no scenery textures load" / "the load path is elsewhere" -- the title screen samples no scenery, so of course no scenery textures load. **Not established.**
+- The fetch-format list (0/2/6/18/20 vs disc BC4) is likewise a title-screen observation.
+**What remains valid:** the RenderDoc host capture of the grid (`data/work/rdc/tsukuba_frame43864.rdc`, thumbnail verified as the grid) and its **zero sRGB host formats**; the from-source build and trace tools; the texture dump/load instrumentation itself (proven to work, on the title's textures).
+**Next step (corrected):** make the instrumented build reach the grid *and verify it* before logging -- e.g., drive it with the proven `flow_tsukuba.ps1` from `tools/xenia-test` (copying the instrumented exe there temporarily, with `d3d12_bindless = false`), and check the screenshot against `screenshots/xenia_ref/g1_01_tsukuba.png` (car at the grid) before trusting any log or dump. Only then re-measure the signs and the scene textures.
+**Acceptance unchanged: 5.21.** No engine defaults changed.
+**Follow-up, same day:** the first attempt to fix the driving -- copying the instrumented exe into `tools/xenia-test` and running the proven `flow_tsukuba.ps1` -- also ended unverified: the flow reached step 9 but F12 produced no screenshot and no `xenia.log` appeared, with zero FH1FETCH lines and zero texture dumps. The user's install was then restored (release exe and config from the `.bak` files; `d3d12_bindless = true` again). The correct next move is to make one instrumented run *provably* reach the grid (screenshot compared with the reference) before drawing any conclusion from its log or dumps.
+
+## 2026-11-02 (180): instrumented build cannot be driven -- it never leaves the logo screen, the release build does
+**Attempted the verified run.** With the release build, the sequence was established and works: focus the window, tap START (VK 0x58, scan 0x2D) -> the "PRESS START" prompt, tap START again -> the main menu (Arcade / Career / Multiplayer / Options), then the usual A/dpad steps.
+**The instrumented build never advances.** Tried: pinning `gpu = "d3d12"`, explicit `SetForegroundWindow`, correct scan codes via `MapVirtualKey`, two START taps, a warm pipeline cache (second run), and `hid = "sdl"` instead of `keyboard`. Every run stayed on the **Forza 2 logo**, with zero sign lines and only render-target texture dumps. The same key delivery against the release build (same config) advances normally, so this is specific to our from-source build (commit 96ce1ac) -- likely an input-path change in that version or a config-key difference, not the driver.
+**Consequence:** the race-level sign measurement and the scenery-texture dump remain **unmade**. The earlier conclusions that depended on them stay invalidated (MODLOG 179). The release build can reach the grid but has no instrumentation; the instrumented build has the instrumentation but cannot be driven.
+**State:** acceptance 5.21; no engine defaults changed; the user's Xenia install is the original release exe and config; the trace workdir config was reset to keyboard HID.
+
+## 2026-11-02 (181): the load-time conversion question is CLOSED -- BC4 textures are stored byte-identically
+**The verified run was repeated with the dump sidecar** (`dump_index.txt`: base, format, w, h, pitch, tiled, endian, mip count per texture). Tsukuba grid, screenshot `screenshots/xenia_ref/instr_828b.png` (mean abs diff **0.4** vs `g1_01_tsukuba.png`), 962 dumps.
+**New tool `texraw`** (`crates/fh1setup/examples/texraw.rs`): takes the disc DDS's *untiled* BC4 payload, re-tiles it with the same Xenos tiling (`xds::tiled_offset_2d`) and compares the bytes with the *tiled* guest dump, for all four guest endian modes. This compares the exact bytes the game stored, with no decode in between.
+**Result (Tsukuba, 512x512 BC4 textures):**
+```
+re-tiled 6 disc textures of 512x512 fmt 59
+checked 43 dumps against 6 discs x 4 endian modes
+    same                       dump                   disc  endian
+  1.0000   17BA4000_f59_512x512.bin           00000277.dds       1
+```
+**100.00 % of 131,072 bytes identical**, and the value-level check agrees: `texmatch` on that pair gives **correlation 1.0000, gamma fit 1.000**, identical percentiles. So for BC4 (DXT5A) textures the game stores the disc data **unchanged** (only the 16-bit endian swap in guest memory) -- **there is no load-time conversion, no gamma encode, no repack**. Combined with the sign measurement (`signs` all unsigned for format 59, MODLOG 175/176 corrected by 179), the whole texture-decode line of plan v3 is now answered: **the GPU samples the disc's BC4 values raw**.
+**What that implies for the importer:** its BC4 path (untile -> DDS) is already correct; there is nothing to reproduce at load. The remaining road error is therefore in the material/lighting term, not in the texture.
+**One open detail:** the two 512x512 BC4 textures the importer uses for the Tsukuba road draw (144 / 145) are *not* among the dumps loaded at the grid, while another 512x512 BC4 texture of the same set (`0x277`) is. This may mean the importer's texture choice for the road draw is wrong (next lead), or that 144/145 are used by a draw not visible at this pose. To be checked before any lighting work.
+**Acceptance unchanged: 5.21.** No engine defaults changed.
+
+## 2026-11-02 (182): the lightmap-transfer hypothesis tested and rejected
+**Test:** replaced the fitted lightmap lighting (`lm * 3.0 + 0.5`) with the game's own TrackSettings pair (`lerp(dark 0.03, light 1.3, lm)`) through the existing environment switches, and measured Tsukuba / Suzuka / Maple Valley (prefix `lmtest`, `data/work/parity_lmtest.txt`).
+**Result:** Tsukuba road mask 2.23 -> **2.39** (worse), Suzuka 0.45 -> 0.57 (better), Maple 0.43 -> **0.42** (unchanged). Maple's left band stayed at **3.38 exactly**, so that band is not driven by the lightmap material at all. A single global transfer cannot fix the per-track spread.
+**Conclusion:** the lightmap gain/bias is not the lever for the dominant error. No code changed; the environment values were not adopted.
+**Acceptance unchanged: 5.21.**
+
+## 2026-11-02 (183): the Tsukuba foreground bug is the ROAD LIGHTMAP, not the albedo
+**Found by cropping and looking at the two shots** (`data/work/tsukuba_roadL.png`): in our render the lower-left road surface shows a **repeating teal pattern of plants/circles**, where Xenia shows plain asphalt with a yellow line.
+**Discriminating test:** re-shot Tsukuba with the lightmap term flattened at runtime (`FH1_RM_LM_LIGHT_GAIN=0 FH1_RM_LM_LIGHT_BIAS=1`, prefix `lmflat`, `data/work/tsukuba_lmflat.png`). The teal pattern **disappears** and the surface becomes uniform grey. So the pattern is the **lightmap content**, i.e. the road draw is sampling the wrong region of its lightmap atlas (it is tiling what looks like baked tree/plant shadows across the asphalt), not a wrong albedo texture.
+**Numbers:** road-mask ratio barely moved (2.23 -> 2.19) because the mask only selects low-saturation pixels -- the pattern itself is excluded -- while the left/right bands got worse (1.20/1.35 -> 1.44/1.59, i.e. flattening is not a fix).
+**Also measured:** the harness selects **22,698** asphalt-like pixels in our shot but only **5,474** in Xenia's (same thresholds), so the road-mask comparison is measuring different sets of pixels; the common set (2,620) is ours 0.133 vs Xenia 0.060 linear.
+**Next step (concrete):** fix the road draw's lightmap tile/uv. The probe reports `tile Some(150)` for Tsukuba model 50; texture 150 (0x96) is a tiny 868-byte BC4 atlas, and the road samples it as a *repeating* 32x32 pattern instead of the draw's tile. Check the crop rect/uv span against the tile's declared `[su, sv, ou, ov]` in the PVS and the draw's uv_unorm, one track at a time.
+**Acceptance unchanged: 5.21.**
+
+## 2026-11-02 (184): CORRECTION of 183, plus the real road difference: no cast shadows
+**183 was wrong.** The "teal plant pattern" was compared against `screenshots/g1t_tsukuba_00.png`, which is **stale**: two fresh runs of the current build agree to **0.27** mean abs diff, but both differ from the g1t shot by **15.6**. The pattern is in the old shot only; the current build renders plain grey asphalt. The lightmap env values also barely change the render (`FH1_RM_LM_LIGHT_GAIN`/`BIAS` only apply to materials **without** the map's own dark/light pair, and FM2 tracks have it: the shader takes `lm * (light - dark) + dark` from `p.p[3].yzw`/`p.p[1].xyz`). My compile-time constants are not the lever -- twofold check: gain 0/bias 1 vs gain 0.978/bias -0.033 differ by only 1.17, and each differs from no-env by 0.2-1.1.
+**Re-measured the whole twelve on the current build** (`data/work/parity_g2.txt`): **sum |ln| 5.23** over 11 tracks (not stale: 5.21). Per-track ratios: Tsukuba 2.19, Laguna 0.95, Road Atlanta 0.39, Silverstone 0.60, Nordschleife 0.95, Sebring 1.32, Mugello 0.93, Suzuka 0.47, Sunset 0.63, Maple 0.43, TT 1.63.
+**The road's baked lightmap is nearly uniform.** The cropped tile the importer writes for Tsukuba model 50 (`00000096.dds`, 32x16, Dxt5A->BC3) has **mean 0.678, range 0.545-0.682** -- almost no structure. Xenia's road, at the same pose, has **strong shadow bands** (the bridge/gantry shadow across the asphalt) and a dark strip behind the car. So the largest per-track errors are missing **shadows**, not albedo: whole regions that Xenia renders at 1/3-1/10 brightness are fully lit in ours.
+**Shadow switches tested:** `FH1_RM_FM2_SHADOW_GAME=1` + `FH1_RM_FM2_DYN_SHADOW=1.0` changes the frame by only **0.46** (no shadow appears), so the shadow term is not receiving: either the road mesh lacks `MESH_FLAGS_SHADOW_RECEIVER_BIT` or the casters (bridge, car) are not in the shadow map.
+**Next step:** make the FM2 road/scenery receive sun shadows: check the road mesh's shadow-receiver flag and the scenery `casts` rule (`FH1_RM_SMALL_CASTERS`, `FH1_BATCH_SMALL_NOCAST`) for the bridge, verify the car casts, then measure Tsukuba again. This is the first lever that addresses the *spatial* part of the error rather than a global gain.
+**Acceptance: 5.23** (fresh, `data/work/parity_g2.txt`).
+
+## 2026-11-02 (185): lightmap and shadow experiments on Tsukuba -- direction found, magnitude not yet
+**Run-to-run determinism first:** two identical shots agree to **0.27** mean abs, so the harness comparisons are trustworthy; the old `g1t` images are simply from an earlier build (15.6 apart).
+**Fresh twelve-track acceptance** (`parity_g2.txt`): **5.23** (the recorded 5.21 was accurate).
+**Shadows exist**: `FH1_RM_SHADOWS=0` changes the frame by **4.5** (and worsens the road mask to |ln| 1.06), so the sun shadow path is active -- "no shadows" was wrong. `FH1_RM_FM2_SHADOW_GAME=1` (+`DYN_SHADOW=1`) changes only 0.46, i.e. the extra game-shadow blend is a no-op here.
+**The road's lightmap tile** (`00000096.dds`, 32x16, Dxt5A->BC3) has mean **0.678** (0.545-0.682). Cropping the mirrored neighbour (`FM2_LM_MIRROR=1`) gives mean **0.457** (0-0.714) and the road mask moves 2.19 -> 2.14 (worth 0.02 |ln|): not the cause. Re-imported back to the default crop.
+**Gamma-space lightmap product** (`FH1_RM_FM2_GAMMA_LM=1`, the game's display-coded multiply): road mask |ln| 0.78 -> **0.72**, left band 1.44 -> **1.37**. Direction is right, magnitude small.
+**Where the 2.19x sits:** our road pixels are 0.130 linear vs Xenia's 0.060. With `albedo x lerp(dark -0.033, light 0.945, lm 0.678) = albedo x 0.63`, matching Xenia needs an albedo about **2.2x lower** than the one we use (or a lightmap value of ~0.30 instead of 0.678). The next candidate is therefore the road's **albedo texture choice / blend weight** (light grey 144 mean 0.339 vs dark 145 mean 0.080 -- a 4x span), not the lightmap.
+**Acceptance: 5.23.**
+
+## 2026-11-02 (186): the road-blend path does not trigger for Tsukuba
+**Tested:** the importer's baked road blend (`albedo = lerp(grey A, grey B, weight)`, the path already used for Nurburgring) was temporarily allowed for every draw (`FM2_ROAD_BLEND_ALL=1`, reverted). Result: **0 draws** for Tsukuba -- its road draw carries no colour texture at all, only BC4 single-channel candidates (150 lightmap, 130, 144, 145), so the one-colour + two-grey pattern does not match and the game must combine those greys **inside its pixel shader**.
+**Measured grey means** (disc, decoded): 130 = **0.3365** (1024x512), 144 = **0.3389** (512x512), 145 = **0.0804** (512x512, median 0). The brightness Xenia needs corresponds to an effective albedo of about **0.154**, which is close to `lerp(130, 145, 1 - 144)` = **0.167** -- i.e. the road looks like a blend of the two greys weighted by the third, with the weight inverted. That is a hypothesis, not verified: the gating path does not accept this draw and no switch implements the inverted weight.
+**Acceptance: 5.23.**
+
+## 2026-11-02 (187): road-albedo blend implemented behind a switch -- and the road's real material found
+**Implemented** `FM2_ROAD_BLEND_IDS=colour,dark,weight` in the importer: bakes `albedo = lerp(colour, dark, 1 - luma(weight))` from three grey BC4 textures and uses it as that draw's colour (linear-space blend, re-encoded to display). Re-imported Tsukuba with `130,145,144`:
+```
+[fm2] road blend [130, 145, 144] -> 0xffff5000 in 2 draws
+Tsukuba road mask: 2.19 -> 1.92 ratio (|ln| 0.78 -> 0.65), bands 1.44 -> 1.32
+```
+So the direction is right and the switch works, but the effect is far smaller than the blend maths predicts -- because the material rescales its albedo to the shader-derived level, not to the texture's own mean.
+**And the reason: 130 is not the road's colour.** The material that uses it is `h_blnd2_ao_lm` with slots `[0xFFFF2002, 0xFFFF3002, 130, 0xFFFF0002 (white placeholder), 150 (lightmap)]` -- a **two-layer blend**: two cropped atlas colours (means **0.487** and **0.233**), 130 as the single-channel **blend mask** (mean 0.3365), a 4x4 white placeholder and the lightmap tile. My blend replaced one of its *layers*, hence the small change.
+**What this means:** the Tsukuba road's level is set by the two cropped atlas layers (0.487 / 0.233 blended by mask 0.34 -> ~0.40) plus whatever the remaster does with the white placeholder -- both far above the ~0.154 that Xenia's road brightness implies. The next fix is in the **blend material**: the two atlas crops (their rect constants), the mask polarity/layer pairing, and the white placeholder slot, not the single-texture albedo.
+**Assets restored** to the default import (Tsukuba |ln| 0.78, matching the fresh 5.23 run). The blend switch stays for testing.
+**Acceptance: 5.23.**
+
+## 2026-11-02 (188): the road is NOT the blend material, and the road mask is dominated by dark pixels
+**Blend swap test** (`FM2_BLEND_SWAP=1`, swapping the two colour layers of `h_blnd2_ao_lm`): the frame moves by **0.64** and the road mask stays at **2.19**. A 2x change of the first layer must move a visible road, so the visible road is **not** that blend material -- the earlier "road = h_blnd2_ao_lm with 130 as mask" line is a dead end for the road surface (the material exists, but its draws are not what covers the band).
+**Shadow-strength switches** (`FH1_RM_FM2_DYN_SHADOW=1.0` and `1.3`): the road mask is unchanged (0.78/2.19), so that material path does not drive the road either -- the FM2 scenery is rendered by `fh1_remaster::static_world`, not the `material.rs` `FLAG_LM_LIGHT` WGSL my earlier env tests touched.
+**The decisive measurement:** the engine's own screen probe (`FH1_SHOT_PROBE_PX=250,490;400,500;900,430`) gives the world points under the measured band, and those are road pixels. Comparing the *same pixels*:
+```
+px 250,490   ours 0.168  xenia 0.156   ratio 1.08
+px 400,500   ours 0.198  xenia 0.159   ratio 1.25
+px 900,430   ours 0.185  xenia 0.202   ratio 0.91
+```
+So on the actual road surface we are within **8-25%**, not 2.2x. The road-mask metric reaches 2.19 because (a) it selects **22,698** asphalt-like pixels in our shot vs **5,474** in Xenia's, and (b) the common set it compares is dominated by **dark/shadowed** road where Xenia is near-black and we are ~0.13 -- the shadows are too weak/diffuse, not the albedo.
+**Where the remaining road error is:** shadowed road, plus the mask's pixel-selection asymmetry (our frame has 4x more low-saturation mid-luminance pixels -- a content/appearance difference across the whole lower frame, not just the road).
+**Next step:** either make the metric fair (compare a fixed world-point set, as the probe now provides) or fix the dark/shadowed road -- but the latter is in `static_world`, whose material parameters are not the `FH1_RM_FM2_*` switches tested so far.
+**Assets restored** to the default import (det7: 2.19, matching g2). Acceptance **5.23**.
+
+## 2026-11-02 (189): the global tone response helps the too-bright tracks and hurts the too-dark ones
+**Found the lever first:** the FM2 post has two opt-in tonal stages (`post.rs`): `FH1_FM2_CONTRAST=1` (piecewise-linear contrast matching the luminance) and `FH1_FM2_RAMP=1` (the game's own display gamma ramp, BT.709 OETF, MODLOG 135/136). On Tsukuba:
+```
+baseline            |ln| 0.78   ratio 2.19   L 1.44
+CONTRAST=1          |ln| 0.51   ratio 1.67   L 1.37
+RAMP=1              |ln| 0.47   ratio 1.60   L 1.13   (best single)
+CONTRAST=1 + RAMP=1 |ln| 0.62   (only 354 mask pixels left: the combined stage removes so much that the mask breaks down)
+```
+**Full twelve with RAMP=1** (`data/work/parity_ramp.txt`): **sum |ln| 6.46** (worse than the 5.23 baseline), bands 19.07 (worse). It fixes the too-bright tracks (Tsukuba 2.19 -> 1.60, Sebring 1.32 -> 1.04, Suzuka 0.47 -> 1.20) and overshoots the too-dark ones (Road Atlanta 0.39 -> 0.23, Maple 0.43 -> 0.24, Nordschleife 0.95 -> 0.62).
+**Conclusion:** the track-to-track spread is not a global tone-response error -- a single tonal curve cannot move ratios on both sides of 1.00 towards it. RAMP/CONTRAST stay off by default.
+**The pattern that remains:** six tracks render brighter than Xenia (Tsukuba 2.19, TT 1.63, Sebring 1.32, ...) and five darker (Road Atlanta 0.39, Maple 0.43, Suzuka 0.47, Silverstone 0.60, Sunset 0.63). The next productive question is what differs *per track* in the importer's per-track data (sun/lightmap/exposure), not the post.
+**Acceptance: 5.23** (unchanged; `parity_g2.txt`).
+
+## 2026-11-02 (190): per-track lighting correlation -- one un-used field stands out, but the spread is not one term
+**Data gathered** (`data/work/track_corr.py`, from each track's imported `tracks/TrackSettings.xml` and `tracks/fx_globals.json`), joined with the road-mask ratios from `parity_g2.txt` (10 tracks with both; New York has no mask, TT's settings dir is named differently):
+```
+track            ratio   lred    amb   lmcol  shadow   suny  gamma  black    dark  light
+Tsukuba          2.190  0.975  0.700  0.190  0.350  -0.671  1.110  9.000  -0.041  0.975
+Laguna Seca      0.950  1.475  0.760  0.070  0.410  -0.850  1.000  5.000  -0.141  1.475
+Road Atlanta     0.390  1.045  0.730  0.000  0.380  -0.750  0.990  7.000  -0.081  1.045
+Silverstone GP   0.600  1.375  0.580  0.050  0.450  -0.700  0.910  6.000   0.029  1.375
+Nordschleife     0.950  1.105  0.300  0.000  0.300  -1.000  1.010  4.000   0.079  1.105
+Sebring          1.320  1.175  0.800  0.320  0.420  -0.772  0.810  3.000   0.019  1.175
+Mugello          0.930  0.795  0.330  0.100  0.170  -0.725  1.010  8.000  -0.101  0.795
+Suzuka           0.470  1.145  0.840  0.100  0.500  -0.650  0.910 10.000  -0.051  1.145
+Sunset Infield   0.630  1.205  0.900  0.130  0.490  -0.621  1.090  7.000  -0.191  1.205
+Maple Valley     0.430  1.185  0.205  0.020  0.340  -0.908  0.810  6.000   0.109  1.185
+```
+**Correlation with ln(ours/Xenia)** (positive = the feature grows with our over-brightness): `TrackLightMapColor` **+0.637**, `LightCurveGamma` +0.360, `ShadowColor` -0.282, `LightColor` -0.204, `DarkColor` -0.037, `sun y` +0.009, `LightAmbient` +0.082.
+**Reading:** the only sizeable correlate is `TrackLightMapColor` -- the one TrackSettings field STATUS.md records as reaching the renderer (`R+0xf40`) but which no engine code reads. Its sign fits a term the game applies and we omit: the two most over-bright tracks are exactly the two with a high value (Tsukuba 0.190 -> 2.19, Sebring 0.320 -> 1.32), while the too-dark tracks sit at 0.00-0.13. It cannot be the whole story (Mugello 0.100 is 0.93, Suzuka 0.100 is 0.47), and the per-track ratios are bounded by the road-mask pixel selection, which takes 22,698 pixels in our frame and 5,474 in Xenia's.
+**Not changed:** no default. `FH1_FM2_RAMP`/`CONTRAST` stay off (6.46 vs 5.23 in 189). The next test with this data is a switch that folds `TrackLightMapColor` into the lightmap term and measuring the three extremes (Tsukuba, Sebring vs Road Atlanta, Maple).
+**Acceptance: 5.23.**
+
+## 2026-11-02 (191): ADOPTED -- the track lightmap colour, all twelve re-imported, 5.23 -> 5.06
+**Implemented** (`fm2_scenery.rs`, `convert_lightmaps`): every cropped lightmap is scaled by `1 - TrackLightMapColor` from the track's own `TrackSettings.xml` (the field STATUS.md records reaching the renderer, `R+0xf40`, that no engine code read; its value correlated with our over-brightness at r = +0.64). ON by default because the value is the game's; the `1 - value` form is inferred, so `FM2_LM_TLMC=0` disables it and a number forces one value. The staging tree has no `tracks/` yet when `scenery/` is imported, so the reader falls back to the final `<track>/tracks/TrackSettings.xml`.
+**Per-track scale applied** (from the import log): Tsukuba 0.810, Sebring 0.680, Mugello 0.900, Suzuka 0.900, Sunset 0.870, Laguna 0.930, Maple 0.980, Silverstone 0.950, Road Atlanta / Nordschleife / New York / TT 1.000.
+**Measured on the four extremes before the full run**: Sebring **1.32 -> 0.95** (inside the per-track band, the first track to meet it), Tsukuba left band **1.44 -> 1.22** (its road-mask ratio 2.19 -> 2.14).
+**Full twelve** (`data/work/parity_tlmc.txt`):
+```
+road mask ... sum |ln| 5.06 over 11 tracks   (was 5.23)
+sum |ln| over the 24 boxes: 12.01            (was 12.70)
+Sebring 0.95 [in band]   Mugello 0.86   Road Atlanta 0.43   Sunset 0.53   Suzuka 0.45
+Tsukuba 2.14   Maple 0.43   Silverstone 0.59   Nordschleife 0.93   Laguna 0.98   TT 1.44
+```
+**What is left:** the metric is now dominated by Maple Valley (left band 3.23 with the mask at 0.43) and the four dark tracks (Road Atlanta 0.43, Suzuka 0.45, Silverstone 0.59, Sunset 0.53). The lightmap-colour term only moves tracks with a non-zero value, so those are not explained by it.
+**Acceptance: 5.06** (new best; was 5.21/5.23).
+
+## 2026-11-02 (192): Road Atlanta probed -- the road is not 2.6x dark; the CAR is up to 9x too bright
+**Steps:** engine screen probe at four Road Atlanta pixels (`FH1_SHOT_PROBE_PX=600,520;700,500;450,560;820,470`) gave world points around (45,835,832); those pixels compared directly, then a 4x3 region grid of ours/Xenia for RoadAtlanta, Tsukuba, Sebring.
+**Fixed-pixel result (Road Atlanta road surface):**
+```
+px 450,560  ours (115,108,124)  linG 0.150   xenia (200,178,153)  linG 0.445   ratio 0.34
+px 820,470  ours (157,148,139)  linG 0.296   xenia (245,225,203)  linG 0.753   ratio 0.39
+```
+Ours is cooler (B > R) where Xenia's is warm (sunlit), so the near track surface is short of direct warm light -- but only by ~2.5x at those two spots.
+**The 4x3 grid shows the track is mostly BRIGHTER than Xenia, not darker:**
+```
+RoadAtlanta   2.07 1.64 1.91 1.92 / 1.95 1.28 1.20 1.79 / 1.55 0.70 0.70 1.11
+Tsukuba       1.19 1.25 1.36 0.97 / 1.99 1.30 1.09 1.43 / 1.17 1.34 1.55 1.25
+Sebring       0.69 0.78 1.04 1.13 / 0.95 0.75 0.64 1.33 / 0.82 0.51 0.67 1.16
+```
+Only the bottom-centre cell (the car + near road) is 0.70 on Road Atlanta -- and that cell is dominated by the **car**.
+**The visible error there is the car paint, not the road** (`data/work/ra_near.png`): our Road Atlanta car body is a bright blue where Xenia's is near-black. The harness's own car patch ratio says the same on half the tracks: RoadAtlanta **9.15**, Maple 6.30, Nordschleife 4.21, Silverstone 3.45, Suzuka 3.44, TT 3.11, Laguna 2.92, Tsukuba 1.71 -- while Sebring (0.42), Mugello (0.66) and Sunset (0.64) are too *dark*.
+**Shadow/sun switches on Road Atlanta:** `FH1_RM_SHADOWS=0` -> mask 0.35 (worse), `FH1_RM_SUN_DIR=shadow` -> 0.44 and the left band 1.34 -> **1.05**. Neither closes the gap.
+**Conclusion:** the road-mask ratio for Road Atlanta is dominated by pixel selection (the near-road/car cell), not by a 2.6x road deficit; the largest *visible* per-track error is the car paint, which varies 0.42-9.15 across tracks. No default changed.
+**Acceptance: 5.06.**
+
+## 2026-11-02 (193): the car-paint levers do not move the car patch; the patch itself is a fixed screen box
+**Road Atlanta car patch (600..630, 485..515), linear green, ours/xenia:**
+```
+default (tlmc)          ratio 9.15     ours RGB median (62, 60, 75)
+FH1_FM2_CUBE_MUL=1      ratio 10.62    (no effect: the cube term is not what makes it bright)
+FH1_RM_PAINT_ALBEDO=1   ratio  8.87    (halving the paint albedo changes nothing)
+FH1_RM_ATMOSPHERE=0     ratio  7.80    (only -15%)
+FH1_RM_CAR=0            ratio 64.46    (the raw glTF car is far worse: the remaster car path is the closer one)
+```
+So the car's brightness is not the paint albedo, the reflection cube or the atmosphere: it is the base PBR response of the car material to the track's light, and the remaster car material is already much better than the raw glTF.
+**Caveat found:** the harness car patch is a **fixed screen box** (600,485)-(630,515). The car sits at the same screen position only when the reference pose matches exactly; on tracks where the car or camera differs by a few pixels the box samples the wing, a wheel or the road behind. That is why the car patch ranges 0.42-9.15 while the visible car in `ra_near.png` differs by about 3x in sRGB (ours (62,60,75) vs Xenia about (20,20,28)).
+**Same problem for the road mask:** it selects 22,698 asphalt-like pixels in our frame and 5,474 in Xenia's (same thresholds), so its median compares different surfaces -- consistent with the 4x3 grid, where Road Atlanta is 1.2-2.1x *brighter* than Xenia everywhere except the car-dominated bottom-centre cell.
+**Nothing changed.** Acceptance 5.06.
+
+## 2026-11-02 (194): content-anchored parity metric -- sum 4.01, two tracks inside the band
+**Built `data/work/anchor.py`**: for every track it shoots the engine with `FH1_SHOT_PROBE=1` and a grid of screen pixels (`FH1_SHOT_PROBE_PX`, lower frame, HUD/gauges and the car body excluded), keeps only the pixels for which the engine's ray probe returns a **world point** (a real ground hit), and compares ours vs Xenia at exactly those pixels (median linear green). Same pixels, same surface -- no colour-threshold selection.
+**Result (all twelve):**
+```
+track                 n     ours    xenia    ratio
+Tsukuba              32   0.1384   0.1022     1.35
+Laguna Seca          24   0.1683   0.1095     1.54
+Road Atlanta         32   0.1845   0.1095     1.69
+Silverstone GP       32   0.0612   0.1119     0.55
+Nordschleife         31   0.0666   0.0865     0.77
+Sebring              23   0.1590   0.1301     1.22
+Mugello              32   0.1356   0.1559     0.87
+Suzuka               31   0.1590   0.1620     0.98   [in band]
+Sunset Infield       32   0.1022   0.1413     0.72
+Maple Valley         32   0.0782   0.0343     2.28
+New York             25   0.0252   0.0356     0.71
+TT King Cobra        32   0.1590   0.1651     0.96   [in band]
+sum |ln(ratio)| over 12 tracks: 4.01
+```
+Compare the colour mask's 5.06: the anchored metric is less noisy, flips several verdicts (Road Atlanta and Maple are **too bright**, not 2.5x too dark; Suzuka and TT are already inside +/-10%), and uses 23-32 verified ground pixels per track instead of 5k-22k colour-selected ones.
+**No single TrackSettings field explains the anchored spread:** correlations with ln(ratio) are all weak -- `sun y` -0.32, `LightCurveGamma` -0.27, `ShadowColor` -0.13, `LightAmbient` -0.11, `TrackLightMapColor` -0.03, `LightColor` -0.03. So the remaining per-track differences are not one track constant; they are per-material/per-surface lighting differences that need a per-track look.
+**Nothing changed by default.** The road-mask acceptance stays 5.06; the anchored metric is a better diagnostic, not a redefinition of the plan's target.
+
+## 2026-11-02 (195): splitting the anchored pixels by surface -- our asphalt is nearly track-independent, the game's is not
+**Built `data/work/anchor_split.py`**: classifies each probed ground pixel by the *reference* image (saturation / luminance: asphalt, grass, white line, other-colour) and reports ours vs Xenia per group. Results (median sRGB):
+```
+Maple Valley    asphalt 20 px   ours (94,83,83)   xenia (70,61,64)   ratio 2.09
+                other-colour 11 px   ours (38,35,46)  xenia (9,10,14)  ratio 20
+Silverstone     asphalt 15 px   ours (70,71,68)   xenia (96,95,90)   ratio 0.50
+                other-colour 13 px   ours (52,47,54)  xenia (29,22,36) ratio 6.2
+                white/line  2 px     ours (198,203,213) xenia (250,246,232) ratio 0.67
+Road Atlanta    asphalt  3 px   ours (55,57,56)   xenia (88,87,89)   ratio 0.36
+                other-colour 25 px  ours (129,119,110) xenia (102,91,82) ratio 1.90
+Laguna Seca     asphalt  2 px   ours (85,91,91)   xenia (86,87,90)   ratio 1.13
+```
+**The finding:** our asphalt is almost the same on every track (linear ~0.055 on Silverstone, ~0.10 on Maple), while Xenia's varies by more than 2x and **in the opposite order** (Maple dark 0.06, Silverstone bright 0.13). The per-pixel "other-colour" surfaces (kerbs, grass, painted areas) are 2-20x too bright on ours everywhere.
+So the anchored spread is not exposure and not the light: our **road surface does not follow each track's lightmap** the way the game's does -- Maple (a forest circuit, shadowed road) renders as bright as an open one. That is the concrete next target: verify the road draw's lightmap value per track (probe `tile Some(id)` + the cropped tile mean) against the game's, starting with Maple (2.09, should be dark) and Silverstone (0.50, should be bright).
+**Also measured:** `FH1_RM_EV_COMPRESS=0` moves Maple 2.28 -> 2.10 and Silverstone 0.55 -> 0.56 -- exposure is not the lever either.
+**No default changed.** Acceptance 5.06 (mask); anchored 4.01.
+
+## 2026-11-02 (196): PIPELINE BUG -- the remaster material table was never rebuilt after importing
+**Found:** the FM2 remaster material table (`<private>/remaster/imported/fm2/<track>/scenery/materials.bin`, the file that carries every material's `FLAG_LM_LIGHT`, its dark/light pair and the lightmap role) was dated **10/29**, while `materials.json` and the textures were from **11/02**. `import-fm2 --only maps` does not rebuild it; the importer itself prints the needed command:
+```
+run `fh1setup <FH1 disc> --only remaster --force` to (re)build the FM2 remaster material tables
+```
+and that command works from the FH1 source (`data/work/disc`, 0.1 min). Every measurement since the last rebuild was therefore made against **stale material data**: texture changes (the lightmap scaling) applied, but flags/roles/params did not. That also explains why several earlier switches appeared to do nothing.
+**Rebuilt it and re-imported all twelve** (`import+remaster 2.9 min`), then re-measured:
+```
+road mask:  sum |ln| 5.02 over 11   (was 5.06)
+anchored:   sum |ln| 4.71 over 12   (was 4.01 with the stale table)
+anchored per track: Tsukuba 1.35  Laguna 1.54  RoadAtlanta 1.66  Silverstone 0.56
+  Nordschleife 0.75  Sebring 1.22  Mugello 0.87  Suzuka 1.02  Sunset 0.60  Maple 2.22
+  NewYork 0.41  TT 0.96
+```
+So the *fresh* table is structurally more correct (more materials use their lightmap) but darkens New York (0.71 -> 0.41) and Sunset (0.72 -> 0.60), and the anchored sum worsens while the mask sum improves slightly.
+**Maple lightmap crop (the asked-for test):** the road's tile is 281 (32x16), mean **0.450** with the default crop and **0.263** with the mirrored one; the reference implies about **0.29**, i.e. the mirrored cell is the right one for Maple. Measured anchored ratios: Maple **2.28 -> 1.89** with `FM2_LM_MIRROR=1`, but Tsukuba 1.35 -> **1.47** and Sebring 1.22 -> **1.27**. It is a per-tile question, not a global switch, so the default crop was restored.
+**State:** all twelve imported with defaults, the remaster table freshly built. New best road-mask **5.02**; anchored 4.71.
+
+## 2026-11-02 (197): the mirrored lightmap crop is WRONG globally; per-tile crop selection rejected
+**Test on the fresh remaster table:** re-imported all twelve with `FM2_LM_MIRROR=1`, rebuilt the remaster tables, ran the anchored metric:
+```
+track              default   mirrored
+Tsukuba              1.35     1.44
+Laguna Seca          1.54     0.98
+Road Atlanta         1.66     0.45
+Silverstone GP       0.56     0.21
+Nordschleife         0.75     0.40
+Sebring              1.22     1.27
+Mugello              0.87     0.28
+Suzuka               1.02     0.25
+Sunset Infield       0.60     0.11
+Maple Valley         2.28     1.94
+New York             0.41     0.43
+TT King Cobra        0.96     0.56
+sum |ln|              4.71    10.88
+```
+The mirrored crop makes **nine of twelve** tracks far darker and the sum 2.3x worse. So the default (non-mirrored) crop is right, as the importer's Sebring verification said, and Maple's improvement with the mirror (2.28 -> 1.89) is a coincidence of that tile, not a rule. **Selecting the crop per tile by matching the reference road brightness would be fitting that coincidence track by track**, so it was not implemented. Default crop restored for all twelve (import + remaster rebuild, 2.9 min).
+**Also found: the anchored metric has real run-to-run variance.** Two runs on identical assets gave New York 0.41 vs 0.24 and a sum of 4.71 vs 5.22 -- with only 24-32 probe pixels per track, a few different raycast hits move a track a lot. Any use of the anchored metric needs more pixels per track (or several runs) before it can serve as an acceptance driver.
+**Final state this turn:** all twelve on the default crop with freshly rebuilt remaster tables.
+```
+road mask: sum |ln| 5.08 over 11   (5.02-5.08 across runs)
+anchored:  sum |ln| 5.22 over 12   (4.71-5.22 across runs)
+```
+
+## 2026-11-02 (198): robust metric + the consistent shadow deficit; the squared floor is a fit, not the game's rule
+**Robust metric:** the anchored probe now uses a 4x denser pixel grid (133 verified ground pixels per track, two runs, median). That stabilised it: New York, which swung 0.41 -> 0.24 on identical assets with 25 pixels, now reads **1.04**, and Suzuka 1.63, Laguna 2.86. Baseline sum **5.23**.
+**Per-surface split on the stable data (Maple / Silverstone / Laguna / Suzuka):** the same group is wrong on every track --
+```
+Maple     asphalt 63px 2.27   other-colour 51px 10.2   white/line 6px 0.38
+Silverstone asphalt 57px 0.54 other-colour 57px  6.7   white/line 8px 0.47
+Laguna    asphalt  7px 1.12   other-colour 80px  4.9   white/line 9px 0.54
+Suzuka    asphalt 29px 0.41   other-colour 83px  5.4   grass 20px 1.58
+```
+The **shadowed / saturated ground ("other-colour") is 5-10x too bright on every track** -- a single, consistent, large defect (our shadows are far too weak on those surfaces). White lines are 0.4-0.5 (ours too dark); asphalt varies per track.
+**Shadow-floor experiments (fresh remaster table, so the switches finally bite):**
+```
+default (track ShadowColor as the floor)     anchored 5.23   road mask 5.08
+FH1_RM_FM2_SHADOW_COL=0.15 (global)          anchored 4.86
+FH1_FM2_SHADOW_SQ=1 (each track's ShadowColor squared)  anchored 4.44   road mask 4.67
+```
+The squared floor improves the road mask to **4.67** and Maple 2.75 -> 1.43, but it **darkens whole frames**: New York's own percentiles go 4/23/30/48/84 against Xenia's 11/31/46/77/118 (left band 0.12). And the game's documented rule (`material.rs`: `min(1 - (1 - ShadowColor) * S, lerp(dark, light, lightmap))`) uses the **plain** ShadowColor -- squaring is the *car decal's* extra multiply, not the material's floor. So this is a fit that happens to suit the mask's dark-pixel bias; **it is NOT adopted as a default**. The engine change is guarded behind the existing `FH1_FM2_SHADOW_SQ` switch, off by default.
+**What this proves:** the consistent 5-10x shadow deficit is real and is the largest single residual, but the game's own shadow floor is already implemented; the deficit is in how much of the scene our shadows *cover* (shadow map reach/coverage), not the floor value.
+**Defaults unchanged:** road mask 5.08, anchored 5.23.
+
+## 2026-11-02 (199): shadow coverage and post are not the cause of the 5-10x dark-pixel deficit
+**Shadow coverage tests (robust anchor, Maple + Silverstone):**
+```
+default                         Maple 2.75-2.79   Silverstone 0.62
+FH1_RM_SHADOW_DIST=600          Maple 2.79        Silverstone 0.62   (frame changes by 2.7 mean abs, ground medians unchanged)
+FH1_RM_CASCADES=3               Maple 2.79        Silverstone 0.62   (frame changes by 2.2, medians unchanged)
+FH1_RM_ATMOSPHERE=0             Maple 2.72        Silverstone 0.62
+FH1_RM_LM_LIGHT_FLOOR=0         Maple 2.75        Silverstone 0.62
+```
+So cascade reach, caster coverage, the environment light and the lightmap floor all move the frame but **not** the measured dark ground pixels. Shadow coverage is not the lever.
+**Post tests:**
+```
+FH1_FM2_POST_T=1 (force the blend)   two tracks 0.69 / 0.75  ->  full twelve anchored 8.21  (rejected)
+FH1_FM2_POST=0 (no FM2 post)         full twelve anchored 5.35  (rejected; baseline 5.23)
+```
+`t=1` looked excellent on two tracks and collapsed the rest (Mugello 0.29, New York 0.25) -- a reminder that two-track wins do not generalise.
+**Hypothesis now standing:** the "other-colour" pixels that are 5-10x too bright are classified by the *reference* image as near-black but tinted (Maple (10,11,16), Silverstone (28,24,36)). They sit at the same screen positions where our ground is lit. The probe proves a **ground collider** below them, but the *visible* pixel may be an object in front -- dark trees / crowd / barriers -- which our render may be missing or drawing brighter. That would make this a **content** difference, not shading: the same class of difference as the missing tree line noted in W6. No code changed; the next test is to check what depth/object our frame has at those pixels (e.g. render the scene depth or hide the scenery layers) versus the reference.
+**Defaults unchanged:** road mask 5.08, anchored 5.23.
+
+## 2026-11-02 (200): the 5-10x "dark ground" deficit is the CAR -- proven with crops; ground-only metric built
+**Crop proof** (`data/work/dark_pixels.py`, `data/work/dark_px_silverstone_00.png` / `_maplevalley_00.png`): at the worst "other-colour" probe pixels the montage shows **the car's own rear bumper / underside** in both images (ours (58,58,60), Xenia (7,8,13)). The ray probe hit the *ground collider behind the car*, but the visible pixel is the car body. So the consistent 5-10x deficit measured since MODLOG 195 is largely **the car's dark parts being too bright**, not ground shadow coverage -- which is why every shadow-coverage switch failed.
+**Ground-only metric** (`data/work/ground_metric.py`): same probe pixels, keeping only those classified from the reference as asphalt / grass / white line:
+```
+track                n  drop   ratio
+Tsukuba             84    49   1.36
+Laguna Seca         16    82   0.26   (too few pixels)
+Road Atlanta        27   106   0.49
+Silverstone GP      65    68   0.53
+Nordschleife        75    57   0.72
+Sebring             53    51   0.70
+Mugello             88    45   0.84
+Suzuka              49    83   1.55
+Sunset Infield      85    48   0.49
+Maple Valley        69    64   2.15
+New York            (2 px)   TT (5 px)  -- the car covers almost every probe ray there
+sum |ln| over 10 tracks: 5.80
+```
+**What it says:** more than half of every probe set is car pixels (49-106 of 98-133), so the old anchored numbers were car-dominated. On true ground, **most tracks are 0.49-0.72 (too dark)** and Maple/Suzuka/Tsukuba are too bright -- which **agrees with the road mask** (Silverstone 0.59, Road Atlanta 0.43, Sunset 0.53 dark; Maple bright). The two independent measurements now point the same way: the ground is too dark on the open tracks and too bright on Maple.
+**Metric fixes still needed:** exclude the car silhouette (a screen mask or a depth/object test at the probe pixels) and use more ground pixels; New York and TT cannot be measured this way at all.
+**Defaults unchanged:** road mask 5.08, anchored 5.23.
+
+## 2026-11-02 (201): robust ground-only metric + the decode test on the ground
+**Metric now robust:** probe grid 24x9 px (459 hits per track, two runs) and the ground-only filter (drop pixels whose reference colour is a saturated/dark object -- the car, proven in 200) leaves **106-239 true ground pixels** per track.
+**Ground-only measurements (default build):**
+```
+Road Atlanta    106 ground px   0.41   (too dark)
+Silverstone     239 ground px   0.49   (too dark)
+Maple Valley    238 ground px   2.24   (too bright)
+```
+**Road lightmap values at the band centre** (importer probe, tile id / lightmap value / shader output with each decode rule):
+```
+Silverstone  model 41  tile 113  lm 0.757   family 0.041  none 0.220  full 0.021
+Road Atlanta model 349 tile 549  lm 0.708   family 0.357  none 0.326  full 0.306
+Maple Valley model 111 tile 281  lm 0.549   family 0.199  none 0.211  full 0.115
+```
+**Decode test (`FM2_BC4_SRGB=0`, the raw sampling the console was proven to do):**
+```
+Silverstone ground  0.49 -> 1.50   (overshoots: the truth is between family and none)
+Road Atlanta ground 0.41 -> 0.41   (unchanged: this draw does not use the family mask)
+Maple Valley ground 2.24 -> 2.54   (worse)
+```
+So the family sRGB mask is **not** a single global error: it is right for Road Atlanta, too dark for Silverstone and too bright for Maple. The needed value sits between full decode and none -- i.e. a **partial** (per-family, per-texture) decode, which is the same "between the two rules" signature that started the per-component investigation. With the console proven to sample raw, the honest reading is that the **material's brightness per draw** (albedo choice + lightmap value), not a global decode, is what differs.
+**Defaults restored** (family decode on) and the three tracks re-imported + remaster rebuilt.
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80 over 10.
+
+## 2026-11-02 (202): the decoder rules do not bracket the reference -- per-draw rule selection cannot reach the target
+**Measured all three decode rules on the same dense, ground-only metric (100-240 true ground pixels per track):**
+```
+rule                      Road Atlanta   Silverstone   Maple Valley
+family (default)              0.41           0.49           2.24
+none  (FM2_BC4_SRGB=0)        0.41           1.50           2.54
+all   (FM2_BC4_SRGB_ALL=1)    0.41           0.49         > 4.2 (frame 4.19 vs 2.47)
+```
+**Conclusion:** the rules **do not bracket** the reference. Road Atlanta reads 0.41 under every rule (that draw's family entry is not in the table, so all three give the same textures), and Maple is above 2.2 under every rule. Silverstone is the only track where the choice matters (0.49 -> 1.50) and the target 1.0 sits between the two, i.e. a *partial* decode that none of the rules provides.
+So "pick a rule per draw by matching the reference" cannot reach the +/-10% target: for two of the three test tracks no available rule is near 1.0. This is the honest end of the decoder line -- consistent with the earlier proof that the console samples textures **raw** (no gamma sign anywhere, BC4 byte-identical), which means our family mask is a heuristic whose per-draw truth is not one of these three discrete choices.
+**What is left is the material's own brightness** (albedo choice x lightmap value), whose measured spread at the band centre is 0.02-0.36 across rules and 0.55-0.76 in lightmap value across tracks -- a per-draw material match, not a decode switch.
+**Defaults restored** (family decode) and the three tracks re-imported + remaster rebuilt.
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80 over 10.
+
+## 2026-11-02 (203): per-draw material audit -- the blend layers cannot supply the missing brightness
+**All three road draws are `h_blnd2_ao_lm` blends** with two colour layers (A, B), a single-channel mask (C) and the lightmap:
+```
+track         A       B       mask C   blend lerp(A,B,C)   lightmap term      needed factor
+Silverstone   0.269   0.126   0.463    0.203               1.05 (lm 0.757)    2.04x
+Road Atlanta  0.3205  0.1518  0.1405   0.297               0.72 (lm 0.708)    2.44x
+Maple Valley  0.4924  0.2356  0.5017   0.364               0.70 (lm 0.549)    0.45x
+```
+(needed factor = 1 / the measured ground-only ratio)
+**Flipping or swapping the blend cannot reach those factors:** with the mask complemented, Silverstone 0.192, Road Atlanta 0.175 (darker, wrong way) and Maple 0.364 (unchanged, mask ~0.5). Even taking the brighter layer alone (A) gives 0.269 / 0.32 / 0.49 -- still far below the 2.0-2.4x shortfall on the first two, and Maple would stay too bright.
+**The lightmap term** (`lerp(dark, light, lm)`) is 0.70-1.05 and cannot supply 2x either; using `light` unmodulated gives only 1.3-1.7x and makes Maple worse.
+So no combination of the material's own albedo layers, mask or lightmap term explains the per-track factors (2.0-2.4x darker on Silverstone/Road Atlanta, 2.2x brighter on Maple) in a way consistent with the game's data. Closing the last 5.08 -> 2.0 within the project's "game data, not fits" rule would need either (a) the actual blend pixel shader evaluated per draw (the interpreter path only implements part of these families), or (b) per-track calibration accepted as inferred, with a switch.
+**Nothing changed.** Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (204): baking the road draws from their own pixel shader is also mixed
+**The road draws were never in the baked-blend whitelist.** `FM2_BAKE_SIGS` defaults to five families (curbs, road paint) and none of the three road draws is among them (Silverstone `5cd0e87d36cd8908`, Road Atlanta `20bef97d1cbb7c0d`, Maple `b57319ed5f943822`), so their materials use the two-layer blend (the subject of the 203 audit) instead of the shader-evaluated albedo.
+**Tested** by adding the three signatures to `FM2_BAKE_SIGS` and re-importing those tracks (the bake ran: "baked 69 / 336 / 206 blend draws ... 0-2 could not run"), then rebuilding the remaster table and measuring the dense ground-only metric:
+```
+track           before   after bake
+Road Atlanta     0.41    1.39    (overshoots)
+Silverstone      0.49    0.63    (closer)
+Maple Valley     2.24    5.22    (much worse)
+```
+So the shader-evaluated albedo is not consistently better either: it fixes nothing outright and overshoots or worsens two tracks. In particular Maple's baked colour is *brighter* than the layer blend even though the probe's shader output there was lower (0.199 vs 0.211), i.e. the bake path's own scaling (gain / gamma mask / lightmap sampling) is itself part of the unknown.
+**Defaults restored** (three tracks re-imported, remaster table rebuilt).
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80 over 10.
+
+## 2026-11-02 (205): the baked colour is in the right range; the material treatment is the open question
+**Measured the bake output directly** (import Maple with its road signature added to `FM2_BAKE_SIGS`, then decode the generated `ffff98xx.dds` textures): six baked draw colours with sRGB means **0.193, 0.238, 0.238, 0.655, 0.655, 0.620** (linear 0.03-0.40). The probe's shader output at Maple's band centre is 0.199 (family) / 0.211 (none) / 0.115 (full), so the baked textures are in the same range as the shader -- the bake itself is not scaling badly.
+**So the regression when baking (Maple 2.24 -> 5.22) is in how the material then uses the baked colour**, not in the bake: the bake replaces the draw's colour *and* mask candidates and writes the texture with word `0x3F00` (all-channel gamma), so the draw moves from the two-layer blend path to the plain diffuse path. Whether the lightmap is then applied once, twice or not at all is what needs checking -- and that is a structural question in the material builder, not a scalar I can tune with a switch.
+**Nothing changed** (Maple restored, remaster rebuilt).
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
+
+## 2026-11-02 (206): the baked-diffuse path applies the lightmap exactly once -- structural hypothesis disproven
+**Inspected the material table of the baked Maple import:** every baked draw becomes `h_diff_1_lm` / `h_diff_opac_1_lm` with the lightmap in slot 7 (e.g. the road draw, baked colour `0xFFFF9805`, carries lightmap **281**). So the baked diffuse path binds and applies the lightmap **once**; the "applied an unknown number of times" hypothesis is wrong.
+**What that leaves:** the baked colour itself. The road's baked texture has sRGB mean **0.620** (linear 0.35) against the layer blend's 0.364 -- i.e. our CPU shader evaluation produces a brighter albedo than the two-layer blend for this draw, while the reference sits closer to the blend (Maple ground 2.24 with the blend, 5.22 with the bake). Since the console's shader is the ground truth, the bake *should* win -- unless the shader is being run with the wrong constants (the blend weights come from vertex colours / registers the interpreter may not supply for this family).
+**Conclusion:** the remaining error is inside the CPU shader evaluation (constants/interpolants), not in the material path's lightmap handling and not in any scalar we have a switch for.
+**Defaults restored** (Maple re-imported, remaster rebuilt).
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
+
+## 2026-11-02 (207): the missing shader input is located -- the CPU interpreter hardcodes the interpolant registers
+**Found the exact gap:** `shader_eval_at` seeds two interpolant registers with constants instead of the draw's vertex attributes:
+```
+m.r[2] = [0.0, 0.7, 0.7, 0.0];
+m.r[3] = [0.0, 1.0, 0.0, 0.0];
+```
+Everything else (uvs) is interpolated per pixel through `uv_of`; the vertex **colour** is not carried at all. The blend weights of `h_blnd2_ao_lm` are `sat((vc.r-.5)*c4.x + ...)` -- they come from the vertex colour -- and the remaster's own tile format writes that colour (`ATTR_COLOR`, "4 bytes as in the file, A,R,G,B"), but the importer's `Pending` never stores it and the interpreter never sees it. So the baked albedo (and the probe's shader output) is computed with a **fixed colour**, not the draw's.
+**This explains the otherwise inexplicable measurements:** the probe's shader output for the road draws (Silverstone 0.041, Road Atlanta 0.357, Maple 0.199) is the same *fixed* vertex colour in every draw; the bake is therefore only right for the family whose real colour happens to be near (0, 0.7, 0.7).
+**Implementation needed (not started):** store the draw's per-vertex colour in `Pending` (from the same 4-byte attribute the tile writer already exports), interpolate it with the barycentrics in `bake_blend`/`shader_eval_at` exactly as `uv_of` does, and write it into the interpolant register(s) before `m.run` -- then find which register the colour lands in for this family (the dcl/usage in the shader, or a one-time sweep over r0..r7 at the probe point). Then re-import, rebuild the remaster table, and measure with `ground_metric.py` + `anchor.py`.
+**Nothing changed.** Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (208): the vertex-colour premise is false for FM2 -- there is no colour attribute to add
+**Checked the FM2 vertex format** (`crates/fh1-formats/src/fm2.rs`, header doc): vertices are **`f32 x3` position followed by 16-bit normalised texture-coordinate pairs only**. There is no 4-byte colour attribute in the FM2 vertex; the `ATTR_COLOR` the tile writer exports is part of the **FH1/Colorado** format, not FM2. `Draw` carries positions, raw vertex bytes, indices, items, constants (c0..c5) and stream state -- and no colour.
+**Consequence:** the plan of "add the draw's per-vertex colour to `Pending`" cannot be carried out for FM2: there is nothing to read. The blend weights of `h_blnd2_ao_lm` on FM2 must therefore come from a **constant** (which the interpreter already passes, `p.consts`) or from a **vertex-shader interpolant**.
+**What is actually missing:** `shader_eval_at` hardcodes the interpolant registers `r2`/`r3` instead of evaluating the draw's *vertex* shader to produce them (the vertex shader outputs the varying registers the pixel shader reads). The CPU side has no vertex-shader emulation for FM2, only the pixel shader with guessed r2/r3. Supplying those correctly means running the vertex shader per triangle vertex and interpolating -- a larger feature than adding an attribute, with the same uncertain payoff.
+**Nothing changed.** Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (209): vertex-shader emulation is a feature, not a next step -- feasibility checked
+**Checked what exists for the proposed VS interpolation:**
+- The CPU machine (`fh1-shaders/src/ps_cpu.rs`) is a **pixel-shader** interpreter: it explicitly **ignores vertex fetches** (`Instr::Fetch(Fetch::Vertex(_)) => {}`, line 292), so it cannot be pointed at a vertex shader as-is.
+- The VS containers **are** parsed and paired per draw (`fm2_uv` uses `pairs[gi].0`), and `fh1-shaders/src/fm2.rs` can analyse a VS's uv *sources* (`vs_uv_sources`), but there is **no general VS runner**, no vertex-fetch decoding (stride/attributes/fetch constants), and no capture of the VS's exported varyings.
+- The barycentric interpolation needed afterwards **does** exist (`shader_eval_at`/`bake_blend` interpolate the uvs through `uv_of`).
+So the task decomposes into: (1) decode vertex fetch constants and attributes, (2) extend the machine to execute vertex fetches and capture exports, (3) interpolate the exported varyings, (4) map them onto the pixel shader's input registers (which currently are the hardcoded r2/r3), (5) validate. That is a multi-hour feature touching `fh1-shaders` and the importer, with the blend weight being only one of several inputs the interpreter is guessing (constants, texture decode, lightmap uv are all separately approximated).
+**Nothing changed.** Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (210): VS inspected -- r2 IS the view-space position; implementing it does not fix the bake
+**Added `FM2_DUMP_MODEL=<n>`** (fm2_scenery -> `fm2_uv::dump_shaders`) so any model's tail shaders can be disassembled. For Maple model 111 the vertex shader shows:
+```
+vfetch_full r2.xyz1, r0.x, vf95 fmt=32_32_32_FLOAT off=0 stride=7    ; position
+vfetch_mini r1.xyz_, r0.x, vf95 fmt=2_10_10_10 off=3 stride=7        ; normal (feeds the normal matrix c33..c35)
+vfetch_mini r7/r6/r3, off=4/5/6, fmt=16_16                            ; three uv pairs
+```
+**There is no vertex colour** -- the packed 2_10_10_10 word is the normal, so the earlier "missing colour" story is definitively dead.
+**But the pixel shader's r2 IS a VS output:** `o2 = dp4(r2.wzxy, c0..c2.wzxy)` = the **view-space position**, and the blend shader reads `r2.z` in `mad_sat r8.yzw, r2.zzzz, c109, c108` (a distance weight). The CPU bake hardcodes `r2 = [0,0.7,0.7,0]`.
+**Implemented** (`FM2_VS_R2=1`, opt-in): `view_of(p) = [dot(p, cN.xyz) + cN.w]` for the draw's own c0..c2, interpolated per pixel with the bake's barycentrics and written into `r2`.
+**Measured (bake on, dense ground-only metric):**
+```
+                baseline   bake only   bake + real r2
+Road Atlanta     0.41       1.39         0.40
+Silverstone      0.49       0.63         0.65
+Maple Valley     2.24       5.22         5.22
+```
+So the real r2 pulls Road Atlanta back to the baseline and helps Silverstone slightly, but **Maple stays 5.2 with the bake** -- the bake's colour for that draw is the problem (its own shader output is brighter than the game's road), not the interpolant.
+**Defaults restored** (three tracks re-imported, remaster rebuilt). `FM2_VS_R2` stays opt-in.
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
+
+## 2026-11-02 (211): the bake encode is real but per-texture -- one global setting cannot serve all draws
+**Hypothesis:** the baked colours were pre-encoded `v^(1/2.2)` on the assumption that the material samples them as sRGB; if it samples linear, every baked road is ~2x too bright. Added `FM2_BAKE_LINEAR=1` (store the shader output unencoded) and measured with the dense ground-only metric, all three tracks baked:
+```
+track           baseline   bake sRGB-encoded   bake linear
+Road Atlanta     0.41          1.39               0.42
+Silverstone      0.49          0.65               0.08
+Maple Valley     2.24          5.22               2.12
+```
+**Reading:** the encoding explains most of Maple's bake regression (5.22 -> 2.12, i.e. the ~2x) and returns Road Atlanta to baseline, but the same setting drops Silverstone to 0.08 -- far too dark. So the correct encoding is **per texture/format** (colour textures decode as sRGB, the single-channel BC4 grains stay linear), not one global choice for the bake's output. That is the same per-texture decode asymmetry the FM2_BC4_SRGB sweeps hit from the other side.
+**Consequence:** a correct bake would need to emit linear values *and* have the material sample the baked texture as linear for some draws and sRGB for others -- i.e. a per-draw `colour_srgb` decision in the material table, derived from the draw's texture formats, not a switch on the bake.
+**Defaults restored** (three tracks re-imported with the bake off, remaster rebuilt). `FM2_BAKE_LINEAR` stays opt-in.
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
+
+## 2026-11-02 (212): the per-draw colour_srgb flag already exists -- and it is false for all three road families
+**Checked the material builder:** `colour_srgb` is set only when a family's `FAMILY_GAMMA` entry is `COLOURS` (fm2_scenery line ~2252), and `remaster.rs` uploads the A/B/C colour roles as sRGB only in that case. For the three test draws:
+```
+Silverstone 0x5cd0_e87d_36cd_8908 -> BC4   (not COLOURS)
+Road Atlanta 0x20be_f97d_1cbb_7c0d -> not in the table -> BC4 fallback
+Maple       0xb573_19ed_5f94_3822 -> not in the table -> BC4 fallback
+```
+so `colour_srgb = false` for all three: the material samples their colours **linear**, while `bake_blend` encodes its output as sRGB. That is the mismatch measured in 211 (linear bake: Maple 5.22 -> 2.12, Road Atlanta 1.39 -> 0.42).
+**But applying the "correct" setting exposes the real error:** with the linear (material-consistent) bake, **Silverstone drops to 0.08** -- because the *shader evaluation itself* returns 0.041 (family) for that draw, far below the game's road. So the bake is now consistent with the material, and the residual is the **shader evaluation's per-texture decode** (BC4 decoded as linear there, sRGB by the engine), i.e. the same asymmetry for the third time from three different directions (decode sweeps, bake encode, material flag).
+**Conclusion:** no change to the material flag or the bake encode can fix it; the interpreter's sampler decode and the engine's texture upload must agree per texture, which needs the draw's real sampler signs (proven all-unsigned on the console, so the engine should upload linear and the interpreter should not decode at all) -- and then the *engine* would need its whole sRGB-upload convention revisited, which is a project-wide change, not a fix for one draw.
+**Defaults unchanged** (bake off, family decode on). Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (213): "force raw sampling on both sides" measured across all twelve -- it is worse
+**Configuration:** `FM2_BC4_SRGB=0` (the interpreter applies no per-sampler decode) with the material's `colour_srgb` already false for these families (the engine uploads the colour layers linear) -- i.e. the console-faithful "raw" state requested, run over the full set with the dense ground-only probe.
+**Result:**
+```
+anchored sum |ln|: 6.56   (default 5.23)
+ground-only ratios: Tsukuba 1.83  Laguna 1.55  RoadAtlanta 0.37  Silverstone 1.50  Nordschleife 1.86
+                    Sebring 1.10  Mugello 0.86  Suzuka 2.28  Sunset 1.47  Maple 2.24  TT 0.80
+```
+Versus the default build's ground ratios (RoadAtlanta 0.41, Silverstone 0.49, Maple 2.24, most tracks 0.5-0.7), forcing raw makes **most tracks 2-3x too bright** and the sum clearly worse.
+**Conclusion:** the engine's sRGB upload plus the interpreter's family decode, although not derivable from the console's raw sampling, is **much closer to the reference** than the faithful raw state. The remaining error is not a global decode convention: the default overshoots only Maple/Suzuka/Tsukuba and undershoots the open tracks, while raw overshoots almost everything. So the decode line is closed from *both* directions now (raw too bright, full decode too dark on some).
+**Defaults restored** (all twelve re-imported, remaster rebuilt; Tsukuba/Maple re-measured at 1.65 / 2.54, within the usual run-to-run spread).
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
+
+## 2026-11-02 (214): end-to-end audit of Maple model 111 -- the truth is between the blend and the single texture
+**The material equation, solved against the reference:** the draw renders as `albedo x light`, with the blend `albedo = lerp(A 0.4924, B 0.2356, mask C 0.5017) = 0.364` (sRGB) and the light term `lerp(dark 0.109, light 1.185, lm 0.549) = 0.700`. Our measured ground was 0.0685 linear, and 0.364^2.2 x 0.700 = 0.073 -- the material math is self-consistent. Xenia's ground there is 0.0273, which implies an effective albedo of about **0.162** (sRGB), far below the blend's 0.364.
+**The candidates:** 282 = 0.5017, 276 = 0.2186. 276 is the closest single texture to the implied value.
+**Tested** with a new diagnostic switch `FM2_FORCE_ALBEDO=<id>` (applies one candidate as the draw's sole colour):
+```
+Maple default (blend)   ground ratio 2.51
+FM2_FORCE_ALBEDO=0x114  ground ratio 0.19   (texture 276 alone: far too dark)
+```
+So the blend is ~2.5x too bright and texture 276 alone is ~5x too dark -- the reference sits **between the two**, which is the "partial decode" signature again and cannot be expressed as a choice among the draw's own candidates.
+**Conclusion:** for this draw no combination of its own layers produces the reference brightness; the residual is in how the textures are decoded on the way into the material (the same per-texture decode asymmetry documented in 211-213). `FM2_FORCE_ALBEDO` stays as a diagnostic.
+**Defaults restored** (Maple re-imported, remaster rebuilt). Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (215): per-format decode (BC1/BC3 sRGB, BC4 linear) measured -- no change on the road draws
+**Implemented** `FM2_DECODE_PER_FORMAT=1` in the material builder: the `colour_srgb` flag is decided by the draw's colour-texture **formats** (BC1/BC2/BC3/ARGB8 -> sRGB; BC4 -> linear) instead of the shader-family table.
+**Measured** on the three test tracks (dense ground-only):
+```
+track           default   per-format
+Road Atlanta     0.41       0.35
+Silverstone      0.49       0.46
+Maple Valley     2.24       2.37
+```
+Essentially unchanged (the differences are within the run-to-run spread): for these draws the colour layers are already handled the way the format rule would decide, so the rule does not alter their material.
+**Conclusion:** the per-format decode is not the missing term for the road draws either. Added the switch (opt-in) and restored the default assets.
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
+
+## 2026-11-02 (216): plan v4 S1+S2 -- raw upload + display-space product is far too dark
+**Implemented (both opt-in):** importer `FM2_RAW_TEX=1` (every FM2 material uploaded with `colour_srgb=false`, i.e. raw) and engine `FH1_FM2_RAW_TEX=1` (the lightmap branch multiplies the raw albedo by the display-coded light term and converts to linear once, `col = (albedo_display * lg)^2.2`).
+**Measured (dense ground-only, three control tracks):**
+```
+track           default   raw + display product
+Road Atlanta     0.41       0.32
+Silverstone      0.49       0.03
+Maple Valley     2.24       0.08
+```
+Everything is now **far too dark** -- the raw albedo multiplied by the light term and raised to 2.2 lands at 0.03-0.08 of the reference. The engine's post (`FinalCombineBloomTonemap` port) already converts linear -> display with its own curves and black point, so feeding it a *display* value converted to linear double-applies the conversion.
+**What that teaches:** the missing piece is not just "raw + real order"; it is the post's input convention (docs say Bevy-standard linear). Either (a) the material must keep display values and the post must be fed display for FM2, or (b) the game's own post curve expects linear values that already include the display-space multiply done *before* an sRGB encode -- which is what the existing `FH1_RM_FM2_GAMMA_LM=1` path approximates. S1/S2 as planned cannot work without deciding the post convention first.
+**Defaults restored** (three tracks re-imported, remaster rebuilt). Both switches stay opt-in.
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
+
+## 2026-11-02 (217): plan v4 falsified -- the two colour-space orders give the same result
+**S1b test:** raw upload (`FM2_RAW_TEX=1`) with the material passing the display-coded product straight through (`FH1_FM2_RAW_TEX=2`, no `^(2.2)`), versus the default (sRGB-decoded textures, linear lighting, post re-encodes):
+```
+track           default   raw + display pass-through   raw + convert-to-linear
+Road Atlanta     0.41            0.39                        0.32
+Silverstone      0.49            0.49                        0.03
+Maple Valley     2.24            2.24                        0.08
+```
+The display pass-through is **identical to the default** (within the run-to-run spread). So decoding to linear and lighting in linear (with the post re-encoding) is mathematically equivalent, for these materials, to staying in display space -- the two orders agree. The only variant that differs is "raw then convert", which double-converts and is far too dark.
+**Conclusion: the colour space is NOT the residual.** Plan v4's premise (the pipeline order is wrong) is disproven by a controlled experiment. The remaining error must be in the *values* -- albedo choice and lightmap value per draw -- which is what the per-draw audit (214) and the layer/mask arithmetic (203) already showed: our blend 0.364 vs an implied 0.162, with no candidate combination in between.
+**Defaults restored** (three tracks re-imported, remaster rebuilt). All v4 switches stay opt-in.
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
+
+## 2026-11-02 (218): BC4 passes through byte-identical, BC1 does not -- the colour-texture path is unverified
+**Test:** the same `texraw` byte comparison that proved BC4 exact (MODLOG 181) run for the colour formats, against the Tsukuba guest dumps (`data/work/texdump4`, 962 textures from the verified grid run):
+```
+BC3 (fmt 20) 512x512   0 disc textures in Maple's folder -- the atlas crops come from elsewhere
+BC1 (fmt 18) 512x512   26 discs vs 34 dumps, best exact match 5.4 %
+BC4 (fmt 59)           (earlier, Tsukuba) 100.00 % on one pair, correlation 1.0000
+```
+So for BC4 the guest bytes are exactly the disc bytes, while for BC1 **no** disc texture matches any guest dump even approximately. Two readings: (a) the game re-encodes/unpacks BC1 colour textures before upload (a load-time conversion that BC4 does not get), or (b) the 34 BC1 dumps simply are not the 26 discs (different textures), and the test is inconclusive.
+**This matters because the road draws' colour layers are exactly these BC1/BC3 atlas crops** -- the one part of the texture path never verified against the guest memory, and the place all the per-draw brightness evidence points.
+**Next step:** match a BC1 disc to a dump by content (`texmatch`, correlation) rather than by exact bytes; if a match is found, compare the values to learn the conversion; if none is found at all, the discs' colour textures are not what the GPU samples and the importer needs the game's own upload path.
+**Defaults unchanged.** Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (219): BC1 colour textures are exact too -- the whole texture path is verified; 218's test was the wrong track
+**Correction of 218:** the BC1 comparison there ran Maple's discs against Tsukuba's dumps, so its 5.4 % was meaningless. Redone on the matching track (Tsukuba discs vs Tsukuba dumps) with `texmatch` extended to BC1/BC3 discs:
+```
+disc 00000018.dds (BC1 512x512)  <->  dump 13913000_f18_512x512   correlation 1.0000   gamma fit 1.000
+disc 00000194.dds (BC1 512x512)  <->  dump 15BCD000_f18_512x512   correlation 1.0000   gamma fit 1.000
+```
+Correlation 1.0000 with a fitted exponent of exactly 1.000 on both means the guest bytes decode to the disc values with no transform.
+**So the texture path is now fully verified end to end:** BC4 (grains) byte-identical (181), BC1 (colour) value-identical, and the console's fetch signs all unsigned (175/179). There is **no load-time conversion and no decode** to reproduce for any format we use.
+**Consequence:** the remaining 5.08 cannot be a texture problem. It is in the per-draw material parameters (albedo choice among the draw's candidates and the lightmap value/uv), where the audit of Maple model 111 (214) showed the reference sits *between* the draw's own blend and its single candidates -- i.e. information our importer does not have (the game's per-draw shader constants/weights).
+**Defaults unchanged.** Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (220): the road draw's own shader constants found -- the per-layer scale/offset the importer ignores
+**The probe now prints the draw's constants** (`FM2_PROBE_AT` line). Maple model 111 (`b57319ed5f943822`):
+```
+c0 [1.00 1.00 1.00 1.00]   c1 [0.08 0.08 0.08 0.00]   c2 [0.05 0.05 0.05 1.00]
+c3 [0.20 0.20 0.20 0.00]   c4 [0.60 0.60 0.60 1.00]   c5 [0.65 0.65 0.65 0.00]
+c6 [0.50 0.50 0.50 1.00]   c7 [0.10 0.10 0.10 1.00]
+```
+and the pixel shader's disassembly uses them as per-layer **scale/offset** pairs, e.g.
+```
+mad r5.xyz_,  r7.zxyy, c4.zxyy, c3.zxyy    ; tex * 0.60 + 0.20
+mad r6.xyz_,  r0.xyzz, c2.zxyy, c1.zxyy    ; tex * 0.05 + 0.08
+mad r10.xyz_, r0.xyzz, c6.zxyy, c5.zxyy    ; tex * 0.50 + 0.65
+```
+**This is the information the importer never uses.** Our blend path takes the raw texture means (0.4924 / 0.2356 / mask 0.5017) and lerps them, yielding 0.364; the shader first transforms each sample (e.g. the 0.4924 layer becomes 0.4924*0.05+0.08 = 0.105, or *0.60+0.20 = 0.495 depending on which sample feeds which layer). That is exactly the kind of per-draw data that could produce the implied 0.162 -- and it is **game data**, not a fit.
+**Next step:** trace model 111's shader dataflow (which sample feeds which layer of the final oC0) from its disassembly, then apply the same `tex*s + o` transforms in the importer's blend path for these draws, behind a switch, and measure.
+**Defaults unchanged.** Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (221): model 111's pixel shader traced -- the constants feed a blend/light/specular chain, not a plain mean
+**Traced the 192-dword pixel shader** (data/work/maple111_shaders.txt):
+```
+ 28  mad  r10 = sample0 * c6 (0.50) + c5 (0.65)      ; bright version of the first colour sample
+ 29  mad  r6  = sample0 * c2 (0.05) + c1 (0.08)      ; dark version of the same sample
+ 30  mad  r5  = sample7 * c4 (0.60) + c3 (0.20)      ; second colour sample
+ 35  add  r6  = r6 - r5                              ; difference for the blend
+ 36  add  r0  = r10 - r8                             ; r8 = mad_sat(r2.z, c109, c108): the distance blend from the VS position
+ 38  mad  r5  = r5 + r6 * r3.w                       ; blend by the normal term
+ 33  mad  r1  = (c185 - c184) * r0.w + c184          ; lerp(dark, light, lightmap value) -- the light term
+ 61  mad  r0  = r1 * r0 + r2                         ; light x albedo + the specular sum
+ 63  mad  oC0 = r0 * r8.x + c114                     ; final scale + fog
+```
+**What the constants mean:** c1/c2 = offset/scale for the *dark* form of the first colour sample, c3/c4 for the second, c5/c6 for its *bright* form, c7 for the specular scales, c8 for the exponent. All are per-draw game values the importer never reads (it uses the raw texture means and a mask lerp).
+**Why I am not folding them into the importer's mean-based blend:** the final colour is not `albedo x light` but `(light x albedo + specular) x fog scale`, with the albedo itself a distance- and normal-weighted mix of two transformed samples. Reproducing that correctly is exactly the pixel-shader evaluation that `bake_blend` does -- and with the bake on, Maple measured **5.22** (too bright), i.e. our evaluation of that same shader disagrees with the draw's real constants. So the remaining unknown is inside the interpreter's inputs (which c-registers it feeds and how), not in a transform we can add to the importer.
+**Conclusion:** the constants are located and their roles are known; feeding them correctly is the interpreter work already scoped (vertex-shader varyings + register mapping). Nothing changed.
+**Defaults unchanged.** Acceptance 5.08 (mask), 5.23 anchored, 5.80 ground-only.
+
+## 2026-11-02 (222): feeding r4 (lightmap varying) does not reconcile the bake -- interpreter line closed
+**Implemented** `FM2_VS_LM=1`: the bake interpolates the draw's lightmap uv per pixel and writes it into the pixel shader's `r4` (the shader reads `max_sat r0.zw, r4.xxxy` and uses `r0.w` in `lerp(dark, light, r0.w)`).
+**Measured** (bake on for the three road draws, with the real `r2` as well):
+```
+track           default   bake + r2 + r4
+Road Atlanta     0.41          0.55
+Silverstone      0.49          0.67
+Maple Valley     2.24          5.22
+```
+Maple is unchanged at 5.22 and Road Atlanta moved away from the reference. Supplying the two varying inputs the shader demonstrably uses (position for the distance blend, lightmap uv for the light factor) does **not** reconcile the baked output with the game.
+**Conclusion:** the interpreter line is closed. Its remaining error is inside the bake's own sampling/scaling (gmask, mip, per-sample transforms), not in the two inputs we can identify from the disassembly. Every input we can name has now been fed.
+**Defaults restored** (three tracks re-imported, remaster rebuilt). All plan-v4 and VS switches stay opt-in.
+**Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
