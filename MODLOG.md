@@ -2117,3 +2117,17 @@ Maple is unchanged at 5.22 and Road Atlanta moved away from the reference. Suppl
 **Checked:** `cargo check --no-default-features -p fh1-formats -p fh1-remaster -p fh1setup -p fh1-engine --examples` exits 0 (one warning, an unused `i` in `texmatch.rs`); `git status` clean afterwards; `git check-ignore` confirms the four ignore rules take effect.
 **NOT checked:** no intermediate commit was rebuilt from a clean tree (the final tree was); no release build; the game was not run and no score was re-measured -- the acceptance numbers above are still the 2026-11-02 measurements, not re-verified today.
 **Staging method:** whole files only, no partial-hunk staging (the `git apply --unidiff-zero` mistake is in STATUS section 8).
+
+## 2026-11-02 (224): plan v5 written (docs/DESIGN.md, local): measurement first, then the draw's real inputs
+**Why:** plan v4 was falsified (colour-space order is not the lever). The next honest route is to read what the console actually fed the road draw instead of inferring it, but the plan is gated behind a correction:
+
+**Four contradictions found while writing it (all dated 2026-11-02):**
+1. STATUS section 3 prose says Maple/Suzuka/Tsukuba are too bright (1.3-2.2); its own table and `data/work/parity_rev.txt` give Maple **0.43** and Suzuka **0.45** - too dark. Only Tsukuba (2.14) and TT (1.44) are bright.
+2. The per-draw probe says Maple model 111 is 2.2x too **bright** (0.364 vs an implied 0.162; MODLOG 220-222, table row 2.24) - the opposite sign to the acceptance mask on the same track.
+3. `parity_rev.txt` Maple: left fixed box 3.31, road patch 0.52, car patch 6.03 - the fixed boxes and the content-aware mask can pick the car (MODLOG 161 recorded "the road band was the HUD" once already).
+4. New York reports no mask, so the acceptance cannot be evaluated on twelve tracks as written.
+
+**The plan (5 phases, each with a numeric gate):** P0 one trustworthy number per track (asphalt-only metric applied to both pictures, New York fixed, pose audit, frozen reference hashes, one regression command); P1 name the draw under the car on 12/12 tracks and dump that draw's real PS/VS constants, sampler words and mip from the instrumented Xenia; P2 turn the existing CPU pixel-shader interpreter into an oracle (>= 90 % of sampled pixels within 2/255); P3 implement only what P2 proved, no fitted gains; P4 lock in and only then touch the car/sky.
+**Non-goals stated:** no per-track gains, no GPU trace, no combined changes. **Stop rule:** two attempts per step, then STATUS.md; the plan does not promise the target is reachable, it promises P2's gate will settle it with numbers.
+
+**Nothing implemented yet.** No engine, importer or data change this turn; only `docs/DESIGN.md` (git-ignored).
