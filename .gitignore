@@ -21,6 +21,14 @@
 # Xenia emulator (binary, source clone, config, cache, dumps)
 /tools/xenia/
 /tools/xenia-canary-src/
+# Isolated Xenia install used for automated reference screenshots
+/tools/xenia-test/
+# Third-party SDKs / CLI tools downloaded at runtime (binaries, never committed)
+/tools/cmake/
+/tools/renderdoc/
+/tools/vulkan-sdk/
+# Stray root file (755 KB list of numbers, unknown origin, present since 2026-10-27); left alone, not committed
+/1
 # Python bytecode
 __pycache__/
 
