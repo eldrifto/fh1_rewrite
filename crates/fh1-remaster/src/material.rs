@@ -488,6 +488,10 @@ fn wgsl() -> String {
         .replace("RM_FM2_GAMMA_LM", &format!("{:.1}", wenv("FH1_RM_FM2_GAMMA_LM", 0.0)))
         .replace("RM_FM2_DBG", &format!("{:.1}", wenv("FH1_RM_FM2_DBG", 0.0)))
         .replace("RM_LM_LIGHT_EXPOSURE", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_EXPOSURE", 1.0)))
+        // Plan v4 S1: the console worked in display-coded values; with raw textures the albedo is display-coded too.
+        // Plan v4 S1b: 1 = raw albedo x display light term, converted to linear once; 2 = the same product passed through as
+        // display (no conversion), to test what the post actually expects.
+        .replace("RM_FM2_RAW_TEX", &format!("{:.1}", std::env::var("FH1_FM2_RAW_TEX").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0)))
         .replace("//BINDLESS_DECL", &decl_bindless).replace("//PLAIN_DECL", &decl_plain).replace("//SAMPLERS", &samplers)
 }
 
@@ -1062,7 +1066,16 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
         }
         // Setup carries the map's own lerp(DarkColor, LightColor, lightmap) as p1.xyz = dark, p3.yzw = light - dark (the
         // TrackSettings values, `fx_globals.json` V2LightmapColor1/2); tables built without it use the tuned gain / bias.
-        if any(p.p[3].yzw != vec3<f32>(0.0)) {
+        if RM_FM2_RAW_TEX > 1.5 {
+            // S1b: pass the display-coded product straight through (tests the post's input convention).
+            let lg = max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR));
+            col = max(col * lg, vec3<f32>(0.0)) * RM_LM_LIGHT_EXPOSURE;
+        } else if RM_FM2_RAW_TEX > 0.5 {
+            // The game's order: albedo is sampled raw (display-coded) and multiplied by the display-coded light term, then converted to
+            // linear once. `col` here is the raw texture value because the material uploads it linear (FM2_RAW_TEX).
+            let lg = max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR));
+            col = pow(max(col * lg, vec3<f32>(0.0)), vec3<f32>(2.2)) * RM_LM_LIGHT_EXPOSURE;
+        } else if any(p.p[3].yzw != vec3<f32>(0.0)) {
             // FLOOR: the game also lights shadow with the sky / bounce light (TrackSettings SH ambient), which its lightmap colours
             // do not include: without it fully shadowed faces draw black.
             if RM_FM2_GAMMA_LM > 0.5 {

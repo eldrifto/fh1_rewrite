@@ -92,6 +92,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         // The game's blend (vertex shader of the technique): t = saturate((average scene luminance - min) / (max - min)) with the track's
         // TrackLumLimits; its average comes from a small adaptation texture, here a grid of samples of the frame. m.z >= 0 overrides t.
         var t = p.m.z;
+        var avg = 0.0;
         if (t < 0.0) {
             var sum = 0.0;
             for (var gy = 0; gy < 6; gy = gy + 1) {
@@ -100,7 +101,13 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
                     sum = sum + dot(to_srgb(clamp(sc, vec3<f32>(0.0), vec3<f32>(8.0))), vec3<f32>(0.2125, 0.7154, 0.0721));
                 }
             }
-            t = clamp((sum / 48.0 - p.lum.w) * p.tint.w, 0.0, 1.0);
+            avg = sum / 48.0;
+            t = clamp((avg - p.lum.w) * p.tint.w, 0.0, 1.0);
+        }
+        // FH1_FM2_CONTRAST=2: diagnostic -- R = the frame average the blend uses (coded luminance), G = the resulting t.
+        // Read back from a normal screenshot (the flat colour encodes the value as its sRGB code).
+        if (p.a.z > 1.5) {
+            return vec4<f32>(from_srgb(clamp(vec3<f32>(avg * 2.0, t, 0.0), vec3<f32>(0.0), vec3<f32>(1.0))), c.a);
         }
         let q = mix(p.dark, p.lite, t);
         let y2 = pow(max(y - q.x, 0.0) / max(q.y - q.x, 1e-4), 1.0 / max(q.z, 0.1)) + q.w;
@@ -118,6 +125,14 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
                 r = select(r, seg, v >= vec3<f32>(xs[k]));
             }
             o = r / 255.0;
+        }
+        // `FH1_FM2_RAMP` (OPT-IN, MODLOG 135/136): the display gamma ramp FM2's own Direct3D code builds for display type 2 (what Xenia reports): the BT.709 OETF,
+        // 4.5 L below 0.018, else 1.099 L^0.45 - 0.099 (constants read from default.xex). 1 = applied to the light the sRGB code o stands for (the Xenia shots then show
+        // this curve instead of sRGB), 2 = applied to o itself as if o were the linear framebuffer.
+        if (p.a.w > 0.5) {
+            let l = select(o, from_srgb(o), p.a.w < 1.5);
+            let d = select(1.099 * pow(l, vec3<f32>(0.45)) - 0.099, l * 4.5, l < vec3<f32>(0.018));
+            return vec4<f32>(from_srgb(clamp(d, vec3<f32>(0.0), vec3<f32>(1.0))), c.a);
         }
         return vec4<f32>(from_srgb(o), c.a);
     }
@@ -359,7 +374,7 @@ fn grade_system(
         settings.strength.min(1.0),
         settings.game_tonemap as u32 as f32,
         env_f32("FH1_FM2_CONTRAST", 0.0),
-        0.0,
+        env_f32("FH1_FM2_RAMP", 0.0),
         settings.vignette,
         2.2,
         aspect,
