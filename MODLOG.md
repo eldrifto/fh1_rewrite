@@ -2102,3 +2102,18 @@ Maple is unchanged at 5.22 and Road Atlanta moved away from the reference. Suppl
 **Conclusion:** the interpreter line is closed. Its remaining error is inside the bake's own sampling/scaling (gmask, mip, per-sample transforms), not in the two inputs we can identify from the disassembly. Every input we can name has now been fed.
 **Defaults restored** (three tracks re-imported, remaster rebuilt). All plan-v4 and VS switches stay opt-in.
 **Acceptance unchanged:** road mask 5.08; anchored 5.23; ground-only 5.80.
+
+## 2026-11-02 (223): the working tree committed in eight steps (housekeeping, no behaviour change)
+**Why:** STATUS.md recorded that nothing from the effort was committed. Eight small commits on `ui-elements` (`fc5065b..1ac752e`), split by file/concern, nothing pushed:
+1. `gitignore` -- the isolated Xenia install, the downloaded `cmake` / `renderdoc` / `vulkan-sdk` folders (344 MB, would have been swept in by `git add -A`) and the stray root file `1`.
+2. `formats` -- `FM2_STREAM_TYPES` stream-record print.
+3. `setup` -- per-draw road probe, shader albedo with gamma mask, per-texel bake, `TrackLightMapColor`.
+4. `fm2 sky` -- per-texture gamma flag (importer + engine).
+5. `render` -- `FH1_FM2_RAW_TEX`, `FH1_FM2_RAMP`, the frame-average diagnostic.
+6. `engine` -- the game's own curve blend as default; fitted table behind `FH1_FM2_POST_T_FIT`.
+7. `setup` -- the four texture-comparison probes (`texcmp`, `texmatch`, `texraw`, `ddsppm`).
+8. `docs` -- MODLOG 134-222 and STATUS.
+
+**Checked:** `cargo check --no-default-features -p fh1-formats -p fh1-remaster -p fh1setup -p fh1-engine --examples` exits 0 (one warning, an unused `i` in `texmatch.rs`); `git status` clean afterwards; `git check-ignore` confirms the four ignore rules take effect.
+**NOT checked:** no intermediate commit was rebuilt from a clean tree (the final tree was); no release build; the game was not run and no score was re-measured -- the acceptance numbers above are still the 2026-11-02 measurements, not re-verified today.
+**Staging method:** whole files only, no partial-hunk staging (the `git apply --unidiff-zero` mistake is in STATUS section 8).
