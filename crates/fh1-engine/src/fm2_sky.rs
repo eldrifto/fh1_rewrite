@@ -16,6 +16,9 @@ struct SkyDraw {
     uv: Vec<[f32; 2]>,
     indices: Vec<u32>,
     dds: Vec<u8>,
+    /// The game's gamma flag for this draw's texture (format word bits 8-13 == 0x3F): the console decoded it as sRGB.
+    /// When false the texture is uploaded linear (mask / normal data the sky shader reads as a value, not a colour).
+    gamma: bool,
     cap: bool,
     /// The sun disc (a sphere mesh with no texture): drawn additive in a flat yellow.
     sun: bool,
@@ -84,10 +87,16 @@ pub fn load(native_dir: &Path) -> Option<Fm2Sky> {
             }
             let uv: Vec<[f32; 2]> = vec![[0.0; 2]; positions.len()];
             let indices: Vec<u32> = d["indices"].as_array()?.iter().filter_map(|i| i.as_u64().map(|i| i as u32)).collect();
-            draws.push(SkyDraw { positions, uv, indices, dds: Vec::new(), cap: false, sun: true });
+            draws.push(SkyDraw { positions, uv, indices, dds: Vec::new(), gamma: true, cap: false, sun: true });
             continue;
         };
         let Some((dds, w, h)) = tex(file) else { continue };
+        // The game's gamma flag of the texture this draw samples (sky.json "gamma"). MEASURED 2026-11-01 (MODLOG 159): Tsukuba's sky
+        // textures all carry `0x01` in bits 8-13 (documented as mask/linear), but uploading them linear reads **2.71x** Xenia's sky
+        // while sRGB reads 0.96 -- so sRGB is what the picture needs and the flag's polarity does not mean "upload linear here".
+        // `FH1_FM2_SKY_LINEAR=1` forces the linear decode for a further A/B; `FH1_FM2_SKY_SRGB=1` forces sRGB (the default).
+        let _data_gamma = d["gamma"].as_array().and_then(|g| g.first()).and_then(Value::as_bool).unwrap_or(true);
+        let gamma = std::env::var_os("FH1_FM2_SKY_LINEAR").is_none() || std::env::var_os("FH1_FM2_SKY_SRGB").is_some();
         // The draws are sectors of one dome, each with its own panorama texture (square textures are the zenith cap, alpha-blended).
         // The sky model lists `shader_sky_cap` first, then the four sector passes (`shader_sky1..4`): the cap is draw 0. (Square textures do not
         // tell: Sunset Infield's sectors are 1024 x 1024 too. `FH1_FM2_SKY_SQUARE_CAP=1` = the old rule.)
@@ -101,7 +110,7 @@ pub fn load(native_dir: &Path) -> Option<Fm2Sky> {
             }
         }
         let indices: Vec<u32> = d["indices"].as_array()?.iter().filter_map(|i| i.as_u64().map(|i| i as u32)).collect();
-        draws.push(SkyDraw { positions, uv, indices, dds, cap, sun: false });
+        draws.push(SkyDraw { positions, uv, indices, dds, gamma, cap, sun: false });
     }
     if draws.is_empty() {
         return None;
@@ -149,7 +158,7 @@ fn spawn(sky: Option<Res<Fm2Sky>>, mut commands: Commands, mut meshes: ResMut<As
             commands.spawn((Mesh3d(meshes.add(mesh)), MeshMaterial3d(materials.add(material)), Transform::default(), NoFrustumCulling, bevy::light::NotShadowCaster, bevy::light::NotShadowReceiver, SkyDome));
             continue;
         }
-        let Some(mut img) = dds_image(&d.dds) else {
+        let Some(mut img) = dds_image(&d.dds, d.gamma) else {
             warn!("fm2 sky: a texture failed to load");
             continue;
         };
@@ -255,18 +264,19 @@ fn follow(sky: Option<Res<Fm2Sky>>, cam: Query<&GlobalTransform, With<fh1_render
 }
 
 /// The importer's BC1 / BC2 / BC3 DDS (DX10 header) as a GPU image with its stored mip chain.
-fn dds_image(b: &[u8]) -> Option<Image> {
+fn dds_image(b: &[u8], srgb: bool) -> Option<Image> {
     let u = |o: usize| b.get(o..o + 4).map(|x| u32::from_le_bytes(x.try_into().unwrap()));
     let (h, w, mips, fmt) = (u(12)?, u(16)?, u(28)?.max(1), u(128)?);
     let format = match fmt {
         29 => {
-            // Uncompressed RGBA8 (sRGB), written by diagnostics only.
+            // Uncompressed RGBA8, written by diagnostics only.
             let len = (w * h * 4) as usize;
-            return Some(Image::new(Extent3d { width: w, height: h, depth_or_array_layers: 1 }, TextureDimension::D2, b.get(148..148 + len)?.to_vec(), TextureFormat::Rgba8UnormSrgb, RenderAssetUsages::RENDER_WORLD));
+            let tex = if srgb { TextureFormat::Rgba8UnormSrgb } else { TextureFormat::Rgba8Unorm };
+            return Some(Image::new(Extent3d { width: w, height: h, depth_or_array_layers: 1 }, TextureDimension::D2, b.get(148..148 + len)?.to_vec(), tex, RenderAssetUsages::RENDER_WORLD));
         }
-        71 => TextureFormat::Bc1RgbaUnormSrgb,
-        74 => TextureFormat::Bc2RgbaUnormSrgb,
-        77 => TextureFormat::Bc3RgbaUnormSrgb,
+        71 => if srgb { TextureFormat::Bc1RgbaUnormSrgb } else { TextureFormat::Bc1RgbaUnorm },
+        74 => if srgb { TextureFormat::Bc2RgbaUnormSrgb } else { TextureFormat::Bc2RgbaUnorm },
+        77 => if srgb { TextureFormat::Bc3RgbaUnormSrgb } else { TextureFormat::Bc3RgbaUnorm },
         _ => return None,
     };
     // Level 0 only (the dome is viewed near 1:1).

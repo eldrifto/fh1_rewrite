@@ -53,6 +53,13 @@ pub fn import(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>,
             swap_red_blue(&tex_dir.join(format!("{id:08x}.dds")));
         }
     }
+    // FM2_SKY_DBG=1: each sky texture's game format word (bits 8-13: 0x3F = colour, 0x01 = mask/normal), which decides whether the
+    // console decoded it as sRGB. The engine loads every sky texture as sRGB today; this is the data that says if that is right.
+    if std::env::var_os("FM2_SKY_DBG").is_some() {
+        for (&id, &(alpha, word)) in &done {
+            println!("[fm2 sky] texture {id:08x} alpha {alpha} word 0x{word:08X} (bits 8-13 0x{:02X})", (word >> 8) & 0x3F);
+        }
+    }
     if std::env::var_os("FM2_DUMP_SKY_PS").is_some() {
         crate::fm2_uv::dump_shaders(&raw, &model);
         let uvs = crate::fm2_uv::resolve(&raw, &model, &|_| crate::fm2_uv::ItemKind::Other);
@@ -70,6 +77,9 @@ pub fn import(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>,
         let (uv0, _) = d.uv_offsets();
         let uv: Vec<[f32; 2]> = d.uv_at(uv0);
         let files: Vec<u32> = d.items.iter().filter_map(|&it| free.get(it as usize).map(|&i| pvs.textures[i].file_id)).collect();
+        // The game's own gamma flag for each of those textures (format word bits 8-13: 0x3F = colour, decoded as sRGB; anything
+        // else, e.g. 0x01 = mask/normal, linear). The engine used to upload every sky texture as sRGB (MODLOG 158/159).
+        let gamma: Vec<bool> = files.iter().map(|f| done.get(f).is_some_and(|&(_, w)| (w >> 8) & 0x3F == 0x3F)).collect();
         // The pixel-shader constants the model sets for the draw (a flare / sun draw keeps its colour there).
         let constants: BTreeMap<String, [f32; 4]> = d.constants.iter().map(|(k, v)| (k.to_string(), *v)).collect();
         out.push(json!({
@@ -78,6 +88,7 @@ pub fn import(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>,
             "uv": uv,
             "indices": d.indices,
             "textures": files,
+            "gamma": gamma,
             "constants": constants,
         }));
     }
