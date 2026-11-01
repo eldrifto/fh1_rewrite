@@ -144,7 +144,7 @@ fn main() -> AppExit {
     // FM2 car look (inferred from the Xenia shots, MODLOG 45 / 46 / 52): set before any plugin reads its environment (the car probe is read at
     // plugin build). An FM2 circuit is on the command line as `--track fm2/<id>`; the launcher's own choice sets the same later (below).
     if std::env::args().any(|a| a.starts_with("fm2/")) {
-        for (k, v) in [("FH1_RM_TAIL_FLOOR", "0.002"), ("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "0.7"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3"), ("FH1_FM2_SAT", "1.5")] {
+        for (k, v) in [("FH1_RM_TAIL_FLOOR", "0.002"), ("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "2.0"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3"), ("FH1_FM2_SAT", "1.0")] {
             if std::env::var_os(k).is_none() {
                 std::env::set_var(k, v);
             }
@@ -296,9 +296,10 @@ fn main() -> AppExit {
             // INFERRED: the car shadow decal multiplies the ground by ShadowColor on top of the scenery shadow that already carries it, so the
             // darkest part of the car shadow is ShadowColor squared (Test Track: 0.31^2 = 0.096 puts the right road band at 32 against Xenia 33;
             // 0.31 left it at 60). `FH1_FM2_SHADOW_SQ=0` = the plain ShadowColor.
-            std::env::set_var("FH1_RM_FM2_SHADOW_COL", format!("{c:.4}"));
+            let __sq = std::env::var("FH1_FM2_SHADOW_SQ").is_ok_and(|v| v == "1");
+            std::env::set_var("FH1_RM_FM2_SHADOW_COL", format!("{:.4}", if __sq { c * c } else { c }));
             if std::env::var_os("FH1_RM_FM2_PROJ_COL").is_none() {
-                let p = if std::env::var("FH1_FM2_SHADOW_SQ").is_ok_and(|v| v == "1") { c * c } else { c };
+                let p = if __sq { c * c } else { c };
                 std::env::set_var("FH1_RM_FM2_PROJ_COL", format!("{p:.4}"));
             }
         }
@@ -325,17 +326,20 @@ fn main() -> AppExit {
         let xml = track::native_track_dir(&assets, &track.id).and_then(|d| std::fs::read_to_string(d.join("tracks/TrackSettings.xml")).ok());
         match xml.as_deref().and_then(fh1_remaster::post::Fm2Post::from_xml) {
             Some(mut p) => {
-                // INFERRED (not read from the game): the curve blend t per circuit, the best of {computed, 0, 0.5, 1} against the twelve Xenia shots
-                // (road bands, `data/work/cmp12.py`; sum |ln ratio| 10.94 -> 8.35). The game's own t needs its scene-average units, which we lack.
-                // `FH1_FM2_POST_T` still overrides.
+                // The game's own blend: t = saturate((average frame luminance - min) / (max - min)) with the track's TrackLumLimits
+                // (post.rs). `FH1_FM2_POST_T_FIT=1` restores the old per-circuit fitted table (tsukuba/laguna 1, silverstone/sebring/
+                // roadatlanta/newyork 0, mugello 0.5), which was fitted against the BT.709 reference; it is a fit, not the game's value.
                 if std::env::var_os("FH1_FM2_POST_T").is_none() {
-                    let t = match track.id.trim_start_matches("fm2/").split('_').next().unwrap_or("") {
-                        "tsukuba" | "testtrackinfield" | "lagunaseca" => 1.0,
-                        "silverstone" | "sebring" | "roadatlanta" | "newyork" => 0.0,
-                        "mugello" => 0.5,
-                        _ => -1.0,
+                    p.t = if std::env::var_os("FH1_FM2_POST_T_FIT").is_some() {
+                        match track.id.trim_start_matches("fm2/").split('_').next().unwrap_or("") {
+                            "tsukuba" | "testtrackinfield" | "lagunaseca" => 1.0,
+                            "silverstone" | "sebring" | "roadatlanta" | "newyork" => 0.0,
+                            "mugello" => 0.5,
+                            _ => -1.0,
+                        }
+                    } else {
+                        -1.0
                     };
-                    p.t = t;
                 }
                 bevy::log::info!("FH1_FM2_POST: {p:?}");
                 app.insert_resource(p);
@@ -358,7 +362,7 @@ fn main() -> AppExit {
     // Inferred from the Xenia shots (Tsukuba): with the final combine on, the car's paint reads paler than Xenia's navy at the default fill and
     // the lamps glow too wide; fill 0.4 and lamp level 5000 nits are closer.
     if track.id.starts_with("fm2/") {
-        for (k, v) in [("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "0.7"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3")] {
+        for (k, v) in [("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "2.0"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3")] {
             if std::env::var_os(k).is_none() {
                 std::env::set_var(k, v);
             }
