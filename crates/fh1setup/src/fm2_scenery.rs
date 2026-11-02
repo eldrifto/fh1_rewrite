@@ -1233,6 +1233,23 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     // with neutral light, for several sampler gamma choices; times the lightmap light there (lerp(dark, light, tile value), the map's fx_globals) that
     // is the shader's lit value at the patch, to compare with the Xenia band (linear G).
     if let Ok(spec) = std::env::var("FM2_PROBE_AT") {
+        // Diagnostic (2026-11-02): the probe found no triangle for points that FM2_UNDER matches, so print what it is
+        // looking at -- how many draws are still pending and the bounding box of their vertices.
+        {
+            let mut tris = 0usize;
+            let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+            for p in &pending {
+                tris += p.indices.len() / 3;
+                for v in &p.positions {
+                    for k in 0..3 {
+                        lo[k] = lo[k].min(v[k]);
+                        hi[k] = hi[k].max(v[k]);
+                    }
+                }
+            }
+            println!("[fm2] probe: {} draws, {} triangles, positions x {:.0}..{:.0} y {:.0}..{:.0} z {:.0}..{:.0}",
+                     pending.len(), tris, lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]);
+        }
         let fx: serde_json::Value = [dir.join("tracks/fx_globals.json"), dir.parent().unwrap_or(&dir).join("tracks/fx_globals.json")].iter().find_map(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         let col = |k: &str, d: f32| -> [f32; 3] { [0, 1, 2].map(|i| fx["globals"][k][i].as_f64().map_or(d, |x| x as f32)) };
         let (mut dark, mut light) = (col("V2LightmapColor1", 0.0), col("V2LightmapColor2", 1.0));
@@ -1253,7 +1270,10 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                     }
                 }
                 // The triangle under the point and its barycentric weights.
+                let tol: f32 = std::env::var("FM2_PROBE_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5);
                 let mut hit = None;
+                let mut nearest = f32::INFINITY;
+                let mut containing = 0usize;
                 for t in p.indices.chunks_exact(3) {
                     let [a, b, c] = [t[0] as usize, t[1] as usize, t[2] as usize];
                     if a >= p.positions.len() || b >= p.positions.len() || c >= p.positions.len() {
@@ -1271,10 +1291,16 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                         continue;
                     }
                     let y = wa * pa[1] + wb * pb[1] + wc * pc[1];
-                    if (y - q[1]).abs() < 1.5 {
+                    containing += 1;
+                    nearest = nearest.min((y - q[1]).abs());
+                    if (y - q[1]).abs() < tol {
                         hit = Some(([a, b, c], [wa, wb, wc]));
                         break;
                     }
+                }
+                if std::env::var_os("FM2_PROBE_TOL").is_some() && hit.is_none() {
+                    println!("[fm2]   model {}: {} triangles contain (x,z), nearest height differs by {:.2} m",
+                             p.model, containing, nearest);
                 }
                 let Some((tri, w)) = hit else { continue };
                 let lerp2 = |v: &[[f32; 2]]| -> Option<[f32; 2]> {
