@@ -2465,3 +2465,13 @@ The per-track bins are stable (Silverstone reproduces 3.64 exactly), but **the s
 **Gate W2 (bright 0.46 -> >= 0.80, dark 3.64 -> <= 1.50): NOT met.** Far-road coverage remains 3 % against 14 %, and the only lever found so far is per-track, not global.
 
 **Next step (concrete):** the direction finding says the sun's azimuth is track-dependent, so the faithful fix is to derive each track's light vector from its own data rather than flip it globally -- Silverstone's `ShadowLightDirection` is (-0.95, -0.70, -0.05) and the engine's convention for its sign is what needs checking against the game's own code path (`0x825220f0`, STATUS 2026-10-19). That is a data/code check, not a fit.
+
+## 2026-11-02 (239): the sun-direction hypothesis checked against the game's own code -- no convention bug
+**What was checked:** `0x825220f0` in `data/work/fm2_xex/text.asm` (FM2's `default.xex`, decompressed). The function compares the settings object's current `+0x550/+0x554/+0x558` against sentinels and, when they match, **copies the caller's vector into them** (`stfs f0, 0x550(r3)` and the next two). It is a one-shot setter for `ShadowLightDirection`; it says nothing about the sign convention, and the engine already reads the same three attributes per track:
+`crates/fh1-engine/src/track.rs:178` reads `ShadowLightDirection x/y/z`, and `:219` builds the towards-sun vector as `[-x, -y, z]` (travel direction negated, engine z mirrored), documented since 2026-10-19.
+
+**Therefore:** the per-track derivation the plan asked for is already in place and agrees with the game's data path, so there is nothing to correct. The `FH1_RM_FM2_SHADOW_DIR=fx` result from MODLOG 238 (Silverstone coverage 3 % -> 10 %) is a **global sign flip**, not a per-track derivation, and it demonstrably trades tracks (Nordschleife 0.54 -> 0.82). Rejected; the honest reading is that Silverstone's coverage gain there was coincidence rather than a convention error.
+
+**Consequence for W2:** the remaining coverage gap (3 % vs 14 % on far road) is **not** a sun-direction bug. The candidates left are the caster set and what the game bakes statically into the lightmap; neither is a one-line change, and W2's gate stays unmet: bright 0.46 -> >= 0.80, dark 3.64 -> <= 1.50 **NOT met**.
+
+**No code or data changed this entry.**
