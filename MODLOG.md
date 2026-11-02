@@ -2340,3 +2340,26 @@ A global knob moves one and breaks the other, which is what every earlier global
 **First check inside W0:** confirm the oracle's units on a draw whose value already matched Xenia (Sunset's road, 3/255 historically), because every W1/W2 number depends on it.
 
 **Nothing implemented this turn:** the plan is a document; no code or data changed.
+
+## 2026-11-02 (234): plan v6 W0 done -- all twelve tracks classified from two independent measurements
+**Unit check the plan required:** forcing the lightmap sampler white leaves the shader's neutral-light output unchanged (model 111: `family 0.216` before and after) while the `full` path does change (0.136 -> 0.328). So the oracle's outside lightmap multiply is **not** a double count, and the albedo numbers stand. (The oracle's values also sit in the same units as the historical Sunset interpreter value, 0.158, though the spread point-to-point is dominated by which texture area is sampled.)
+
+**Measurement 1 -- road albedo against the game's own shader** (`p3_alb.py`, 18 points/track, points whose light term is below 0.10 skipped because dividing by a near-zero term inflates the game albedo):
+```
+Tsukuba 0.70  Laguna 0.42  RoadAtlanta 0.27  Silverstone 0.90  Nordschleife 0.49  Sebring 1.11
+Mugello 0.48  Suzuka 0.46  Sunset 0.70      Maple 0.29        NewYork 0.20       TT 0.18
+```
+**Measurement 2 -- the same twelve with the post-process off** (`FH1_FM2_POST=0`, `acceptance_np12.json`): sum 6.53, bin error 7.54.
+
+**Classification (the W0 gate):**
+| bucket | tracks | why |
+|---|---|---|
+| **A -- albedo explains it** | Tsukuba 0.70, Sunset 0.70, Mugello 0.48, Nordschleife 0.49, Suzuka 0.46, Road Atlanta 0.27 | albedo low **and** the scene bins sit below 1 -- raising albedo moves the right way |
+| **B -- albedo is fine** | Silverstone 0.90, Sebring 1.11 | albedo at the game's value; the error is in light/shadow/display |
+| **mixed -- albedo low but shadows too bright** | Maple 0.29, Laguna 0.42, TT 0.18, New York 0.20 | albedo is low yet the scene's dark third reads 2.1-7.6x **too bright** (New York 7.63) -- something adds light that the game does not |
+
+That last row is a new fact: on New York and TT our albedo is the lowest measured (0.20 / 0.18) while our shadows are the brightest relative to the reference. Those two cannot be fixed by albedo alone, and they are the two tracks with the fewest usable pixels, so their numbers carry the most uncertainty.
+
+**Consequence for W1/W2:** W1 (albedo) can be judged directly now -- the gate is Maple's albedo median, not a band score -- and W2 must handle the mixed group's excess shadow light, not just deficiency.
+
+**Not tested:** no rendering change in this entry; both measurements are of the current defaults.
