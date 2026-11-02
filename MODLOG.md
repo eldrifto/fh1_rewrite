@@ -2412,3 +2412,27 @@ So the near road is **3-5x too bright**, and our rendered value is *above our ow
 **Gate W2 (bright 0.46 -> >= 0.80, dark 3.64 -> <= 1.50): NOT met** -- no change was adopted this turn; the mechanism is now named and bounded.
 
 **Not tested:** the sun-term gating change itself (needs a material edit); whether our car's shadow reaches that strip at all.
+
+## 2026-11-02 (237): W2.3 attempted -- the gate hypothesis is disproven by measurement, and the decal change is rejected
+**The step the plan named** was to gate the road material's additive sun/specular term on the lightmap (`step(lightmap > c253.w)`), because our near road renders 3-5x brighter than the reference (MODLOG 236). Two measurements were taken before changing anything:
+
+1. **`FH1_RM_FM2_SHADOW_DBG=1` paints the shadow visibility** (`sh^3` in red). At the nine near-road pixels: `sh` = **0.47-0.62**, i.e. our shadow map is not missing -- the car does shade that road.
+2. **The lightmap gate is already open there**: the same debug paints the light term in green, and it reads ~1.0 (lit), so `step(lm > 0.45)` would be 1 in both engines.
+
+Together these say the sun-gate change **cannot** darken the near road: the shadow exists and the gate is open. The 236 hypothesis is therefore disproven before any code was written -- the near-road gap is shadow *depth/surface identity*, not gating.
+
+**A real game-data difference was found and tested instead:** the projected car-shadow decal. The game uses `DropShadowColor`, which is **0.00 on nine of twelve tracks** (Laguna 0.02, Suzuka 0.06, Sunset 0.07), while the engine built the decal from `ShadowColor` (0.34-0.50). Implemented (reading `DropShadowColor`, old behaviour kept behind `FH1_FM2_PROJ_SHADOW_COL=1`), and measured on the same build:
+```
+track          ShadowColor decal (old)     DropShadowColor decal (new)
+Silverstone    3.64 / 0.62 / 0.46  err 0.85   3.81 / 0.62 / 0.45  err 0.87
+Maple Valley   3.07 / 2.15 / 0.47  err 0.88   3.21 / 2.10 / 0.48  err 0.88
+```
+**Worse, not better. Rejected and reverted** (per the plan's stop rule); the release engine rebuilt and the baseline verified bit-for-bit: Silverstone **3.64 / 0.62 / 0.46**, and the tree is clean.
+
+**Useful by-products:**
+- The metric is **stable**: Silverstone now reproduces exactly across repeated runs (3.81 twice, 3.64 twice). The earlier 3.10 reading came from a different build and is withdrawn as not comparable.
+- The reference's near-road darkness (0.004-0.008 against an unshadowed 0.057-0.082) is **deeper than the game's own shadow rule can produce** (`min(1-(1-ShadowColor)*S, lerp)` bottoms out at `ShadowColor` 0.45, a 55 % darkening, not 94 %). So those near pixels are probably not bare asphalt -- the car body or its black decal is in them. **The "91 % vs 0 %" coverage figure is therefore contaminated by surface identity** and must be re-measured on a region the car cannot occupy.
+
+**Gate W2 (bright 0.46 -> >= 0.80, dark 3.64 -> <= 1.50): NOT met.** No change adopted.
+
+**Next concrete step:** re-measure coverage on the *far* road only (where the car cannot be), which removes the contamination, and treat the near-car band as a separate question about the car's shadow rather than about the road material.
