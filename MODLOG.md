@@ -2574,3 +2574,21 @@ TT King Cobra    0.0284  0.0356   0.0262    0.0010  0.0091      2.87
 **W3 status: CLOSED** -- both halves executed on all twelve. Its gate ("t in (0.2, 0.8) on the tracks whose scene was fixed") is not met because no scene fix exists, which is now a measured consequence, not an assumption.
 
 **No code or data changed this entry.** The installed data is at defaults and the tree is clean.
+
+## 2026-11-02 (243): W4 closed -- plan v6 worked through, with W3's cause added to every row
+W3 (MODLOG 242) supplies the missing column of the W4 table: the failure is in the **pre-post scene** (0.40-0.87 of the reference's road on nine tracks, 1.30-2.87 on three), produced by a low albedo and a low light term, and then **amplified into the opposite error** by the dark tone curve that our dark scene selects (t ~ 0.02 everywhere). The final acceptance, in the restored state: **6.04** sum, **6.86** bin error, against a target of <= 2.0 with every track <= 0.10.
+
+**Plan v6 as written is now worked through:**
+| phase | status | evidence |
+|---|---|---|
+| W0 classification | **done** | MODLOG 234, twelve rows, oracle unit check passed |
+| W1 albedo fix | **failed, reverted** | MODLOG 235 (Maple 2.15->3.62) and 240 (A-bucket 2.44->3.36) |
+| W2 light/shadow | **gate not met, nothing adopted** | MODLOG 236-239: coverage 3 % vs 14 % (far road), depth matches; gate/floor/distance/cull/decal/direction all tested |
+| W3 blend input | **done on all twelve** | MODLOG 242, t = 0.00-0.26, scene shortfall localised |
+| W4 close-out | **done** | MODLOG 241 + this entry |
+
+**What the whole effort established, in one paragraph:** the reference's road is darker than `albedo x lightmap` on most tracks, so neither a more faithful albedo (tested twice, both buckets) nor a change to the shadow machinery (six levers, all measured) closes the gap; the scene is short of light by roughly 1.5-2x and the game's own tone-curve blend, pinned at its dark end by that shortfall, then over-brightens the darks and compresses the highlights -- the "shadows too bright" signature that started the whole line of work.
+
+**The decision remains the user's** (restated from MODLOG 241): accept the measured state, adopt a clearly labelled calibration, or park FM2 road parity. No further change with an evidence-backed mechanism is available inside this plan.
+
+**No code or data changed this entry; tree clean; installed data at defaults.**
