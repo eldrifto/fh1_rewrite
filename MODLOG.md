@@ -2382,3 +2382,33 @@ The albedo moves **toward** the game's own shader value (0.29 -> 0.65) and the r
 **Plan consequence (amendment, not a rewrite):** for the **mixed** bucket (Maple, Laguna, TT, New York -- albedo low *and* shadows too bright) the order must be **light/shadow first, albedo second**, because the albedo change cannot be judged while the light path is wrong. For the pure **A** bucket (Tsukuba, Sunset, Mugello, Nordschleife, Suzuka, Road Atlanta -- albedo low, scene bins below 1) W1 as written still applies and can be tried next.
 
 **Not tested:** the A-bucket tracks under the same switch; whether a partial albedo correction (between 0.29 and 0.65) helps Maple alongside a light fix.
+
+## 2026-11-02 (236): plan v6 W2.1/W2.3 -- coverage is the problem, and it is the near road
+**New statistic** (`data/work/w2_shadow.py`): undo the tone curve on both displayed values and divide by the unshadowed material, giving a shadow-ish factor per road point:
+`S_game = curve^-1(X) / O` (X = reference pixel, O = oracle) and `S_ours = curve^-1(A) / P` (A = our render, P = our `DBG=4` product). Coverage = share with S < 0.6; depth = median S among those.
+
+**Silverstone, 40 points:**
+```
+                     coverage        depth      median S
+game (dark curve)      35%            0.42        2.07
+ours (dark curve)       2%            0.51        1.83
+near rows (y>=540): game 91%   ours 0%      far rows: game 14%  ours 3%
+```
+**Coverage is the problem, not depth** -- where we do shadow, the depth matches (0.51 vs 0.42). And it is concentrated where it matters: **the road within a few metres of the car is shadowed 91 % of the time in the game and 0 % in ours.**
+
+**Near-car values (linear green), nine points:**
+```
+game 0.0040-0.0080     ours 0.0160-0.0232     unshadowed oracle 0.057-0.082
+```
+So the near road is **3-5x too bright**, and our rendered value is *above our own unshadowed product* (`S_ours` 2-11): our pipeline **adds** light there instead of removing it. With Silverstone's sun at ~36 degrees (`ShadowLightDirection -0.95, -0.70, -0.05`, `ShadowColor 0.45`), the game's car casts a long shadow across exactly that strip; ours does not darken it.
+
+**Levers tested and ruled out for this:**
+- `FH1_RM_SHADOW_DIST=600`: coverage unchanged (2 %), depth only.
+- `FH1_RM_LM_LIGHT_FLOOR=0`: near road went marginally **brighter**, not darker -- the invented floor is not the cause (third independent confirmation).
+- Sun elevation is not the explanation: 36 degrees gives long shadows, and the engine already uses `ShadowLightDirection`.
+
+**Working hypothesis for W2.3, from the game's own shader:** the road shader gates its additive sun/specular term on the lightmap (`step(lightmap > 0.45)`, STATUS 2026-10-19 end 7/12), so in shadowed regions the term is zero. If our material adds its sun/specular unconditionally, shadowed road is lifted exactly as measured (our near road is brighter than our own unshadowed product). That is a one-term difference and it is testable next.
+
+**Gate W2 (bright 0.46 -> >= 0.80, dark 3.64 -> <= 1.50): NOT met** -- no change was adopted this turn; the mechanism is now named and bounded.
+
+**Not tested:** the sun-term gating change itself (needs a material edit); whether our car's shadow reaches that strip at all.
