@@ -2271,3 +2271,33 @@ Tsukuba          0.1441  0.4621   0.0666    0.0666  0.1170        0.57
 **Next:** add the shadow factor to the comparison (the shader applies `min(1-(1-ShadowColor)*S, lerp(dark, light, lm))`, and `TrackSettings` carries ShadowColor), then the residual is the albedo question and the per-stage attribution is complete.
 
 **Not tested:** no rendered change; the importer change is diagnostic only.
+
+## 2026-11-02 (231): the albedo comparison -- a median of ~0.3-0.7, but per-point scatter defeats a single claim
+`data/work/p3_alb.py` removes the shadow term from the question algebraically: the probe reports the shader's lit value and the point's lightmap value, so `albedo_game = lit / lerp(dark, light, lm)`; our albedo is painted directly (`FH1_RM_FM2_DBG=1`, POST=0). No reference image, no curve, no shadow involved.
+```
+track           px      albedo(G)  albedo(ours)  ours/game    lm
+Maple Valley    51,403     0.4103      0.2462       0.60     0.247
+Maple Valley   135,403     0.4159      0.1845       0.44     0.224
+Maple Valley   219,403     0.4856      0.1714       0.35     0.281
+Maple Valley   303,403     0.5129      0.1384       0.27     0.301
+Maple Valley   687,439     0.4755      0.0296       0.06     0.232
+Maple Valley   783,667     0.3680      0.0052       0.01     0.547
+Tsukuba         51,403     0.2585      0.1620       0.63     0.437
+Tsukuba        123,499     0.3572      0.1500       0.42     0.549
+Tsukuba        207,463     0.2213      0.2270       1.03     0.579
+Tsukuba        291,427     0.0901      0.1683       1.87     0.499
+Tsukuba        615,667     0.0933      0.0065       0.07     0.549
+Tsukuba        795,427     0.2138      0.1683       0.79     0.488
+```
+**Median ours/game: 0.31 on Maple, 0.71 on Tsukuba -- our road albedo is low, consistently below 1 at the median, which supports MODLOG 229's "lit road too dark".** But the per-point spread (0.01 to 1.87) is far too wide to call it a single scaling error: the points where `ours` is 0.005-0.007 are almost certainly pixels where our render shows something else (car shadow / occluder) while the probe point lies on open road. Individual points therefore cannot arbitrate; only a many-point median can, and it should be computed on points where our render is known to show the same draw.
+
+**What is now established end to end:**
+1. The draw under the car is known on 12/12 tracks (P1.1).
+2. The game's own shader can be evaluated at the exact road points we measure (P2's oracle) -- `FM2_PROBE_AT` + `FM2_PROBE_LERP`.
+3. Our engine renders 0.04-0.62 of that shader value at the same points (MODLOG 230).
+4. Of that gap, the albedo alone accounts for a median of 0.3-0.7 (this entry); the rest is the shadow/light term and the display curve.
+5. The tone curve is not the cause (swept, MODLOG 228); the invented light floor is not either.
+
+**Next (concrete):** restrict the albedo comparison to points where the engine's own probe confirms the same draw is visible (drop the occlusion outliers), and add the shadow factor `min(1-(1-ShadowColor)*S, lerp)` from `TrackSettings` so the residual is albedo only. The harness for both exists.
+
+**Not tested:** no rendered change; the albedo numbers are a measurement of the current defaults.
