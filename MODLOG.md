@@ -2249,3 +2249,25 @@ Tsukuba          0.1441  0.4621   0.0666    0.0666  0.1170        0.57
 **Open (not claimed):** whether the shortfall is the baked albedo or the light term. The albedo paints at 0.14 on Tsukuba where the shader's own road value was recorded as 0.375 (STATUS, 2026-10-19 "the importer's baked road albedo agrees with both (about 0.34 and 0.57)") -- those are not the same quantity (the second is albedo x light), so the comparison cannot be made until the draw's albedo alone is printed at the same point. That needs the `FM2_PROBE_AT` oracle, whose probe prints nothing today: it runs at `fm2_scenery.rs:1235`, before the draw list is consumed at 1863, and matched no triangle for points that `FM2_UNDER` (line 2348) matches with the same geometry -- so the two blocks see different data and the probe block needs a diagnostic before it is trustworthy.
 
 **Not tested:** no rendered change; all numbers are A/B on unchanged defaults.
+
+## 2026-11-02 (230): the oracle works -- the game's own shader vs our engine vs the reference
+**Correction to MODLOG 229:** `FM2_PROBE_AT` was never broken. It prints `[fm2]   model N ... -> lit G: family X ... | full Y`, and my filter in the earlier runs simply missed the line. Model 111 at the Maple road point gives `family 0.180 | none 0.180 | BC4 0.180 | colours 0.179 | all 0.205 | word 0.180 | full 0.104` -- the five gamma choices agree, so the shader's value there is not a gamma question.
+
+**Importer (committed):** `FM2_PROBE_TOL` (height tolerance, default 1.5 = unchanged) and a diagnostic that prints, per draw, how many triangles contain (x,z) and the nearest height difference; plus a pending-geometry bounding-box report. No behaviour change at the defaults.
+
+**`data/work/p3_oracle.py`** runs the draw's own shader at the world points under real road pixels (`FM2_PROBE_LERP` supplies the track's own V2LightmapColor1/2, because the staging folder has no `fx_globals.json` yet), and compares with our material's painted product (`DBG=4`, POST=0) and the reference at the same pixels. Maple Valley, linear green:
+
+| pixel | game shader | our engine | xenia | engine/shader | lm |
+|---|---|---|---|---|---|
+| 759,451 | 0.164 | 0.0070 | 0.0040 | 0.04 | 0.277 |
+| 279,475 | 0.183 | 0.0529 | 0.0194 | 0.29 | 0.368 |
+| 339,475 | 0.153 | 0.0497 | 0.0284 | 0.32 | 0.392 |
+| 687,487 | 0.238 | 0.1470 | 0.0382 | 0.62 | 0.453 |
+| 843,403 | 0.245 | 0.0578 | 0.0529 | 0.24 | 0.241 |
+| 123,403 | 0.133 | 0.0452 | 0.2542 | 0.34 | 0.224 |
+
+**Two readings, and one caveat that has to be stated:** our engine renders **0.04-0.62 of the value the game's own shader produces at the same road point** -- never above it. That is a fitting-free statement and it matches MODLOG 228-229 (lit road too dark). **Caveat:** the probe's number is *unshadowed* (neutral light x lightmap), while the reference pixel includes the game's cast-shadow term -- which is why the reference is often far below the shader value (0.004 against 0.164 at the first point). So the oracle bounds the problem from above but does not yet separate "our albedo/light is low" from "our shadow term is weak".
+
+**Next:** add the shadow factor to the comparison (the shader applies `min(1-(1-ShadowColor)*S, lerp(dark, light, lm))`, and `TrackSettings` carries ShadowColor), then the residual is the albedo question and the per-stage attribution is complete.
+
+**Not tested:** no rendered change; the importer change is diagnostic only.
