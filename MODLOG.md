@@ -2531,3 +2531,46 @@ sum                 2.44              3.36     <- worse
 3. **Park FM2 road parity** and move to another area.
 
 **No code or data changed this entry; the tree is clean and the installed data is at defaults (re-verified: Tsukuba 0.38, Road Atlanta 0.36, Mugello 0.16).**
+
+## 2026-11-02 (242): W3 executed on all twelve -- t measured everywhere, the missing light localised
+**Part 1 -- the blend input (`p2_avg.py`, all twelve).** The scene average against each track's own `TrackLumLimits`:
+```
+track             avg    min    max      t
+Tsukuba         0.2310 0.3333 1.4902  0.002  clamped low
+Laguna Seca     0.2792 0.5882 0.8431  0.000  clamped low
+Road Atlanta    0.3086 0.1569 1.6510  0.023
+Silverstone     0.4154 0.3725 0.9412  0.021
+Nordschleife    0.4956 0.0000 1.3725  0.109
+Sebring         0.5000 0.3686 1.0588  0.048
+Mugello         0.4234 0.0784 1.1608  0.105
+Suzuka          0.4523 0.4510 1.2157  0.003
+Sunset Infield  0.1831 0.2078 0.8275  0.027  clamped low
+Maple Valley    0.2254 0.2314 1.0980  0.017  clamped low
+New York        0.0560 0.0000 1.4941  0.014
+TT King Cobra   0.3188 0.3137 0.4902  0.258
+```
+**t = 0.000-0.258, median ~0.02**, four tracks clamped at the bottom. The game's own blend is therefore at its dark end on every track -- confirming MODLOG 227 on all twelve rather than four.
+
+**Part 2 -- the per-stage paints (DBG 1/3/4, POST=0), all twelve** (linear green, median over the frozen pixels):
+```
+track            albedo    term  product  albedo*t   xenia  product/xenia
+Silverstone      0.0513  0.9911   0.0513    0.0508  0.1022      0.50
+Sunset           0.1046  0.5906   0.0630    0.0618  0.1590      0.40
+Maple Valley     0.1221  0.3515   0.0545    0.0429  0.0382      1.43
+Tsukuba          0.1441  0.4621   0.0666    0.0666  0.1170      0.57
+Laguna Seca      0.0612  0.0762   0.0578    0.0047  0.0666      0.87
+Road Atlanta     0.1651  0.2623   0.0802    0.0433  0.1070      0.75
+Nordschleife     0.0802  0.6105   0.0513    0.0490  0.0908      0.56
+Sebring          0.6654  0.5841   0.4969    0.3886  0.3813      1.30
+Mugello          0.1981  0.5395   0.1095    0.1069  0.1651      0.66
+Suzuka           0.0262  0.1620   0.0144    0.0043  0.0307      0.47
+New York         0.0091  0.0116   0.0065    0.0001  0.0116      0.56
+TT King Cobra    0.0284  0.0356   0.0262    0.0010  0.0091      2.87
+```
+**The localisation:** our pre-post road is at **0.40-0.87 of the reference on nine tracks** (too dark) and **1.30-2.87 on three** (Sebring, Maple, TT -- already too bright). Then the dark tone curve (t~0) brightens what is already present, which is why Tsukuba, Road Atlanta and Laguna end up *too bright* in the final image while their scene is *too dark*: the curve overshoots. So the missing light is in the **scene** -- split between a low albedo and a low light term (Laguna's term is only 0.076, Suzuka's 0.162, New York's 0.012) -- and the curve converts it into the opposite error downstream. That is the mechanism W3 was asked to find.
+
+**Caveat recorded, because it limits the per-track split:** `product` (DBG=4) and `albedo x term` (DBG=1 x DBG=3) disagree badly on the darkest tracks -- Road Atlanta 0.080 vs 0.043, Suzuka 0.014 vs 0.004, Laguna 0.058 vs 0.005, New York 0.007 vs 0.0001, TT 0.026 vs 0.001. Where they disagree the per-track attribution of the shortfall to albedo vs term is **not** reliable; the `product/xenia` column is (it is one paint compared with one reference). The tracks where the two agree (Silverstone, Sunset, Maple, Tsukuba, Nordschleife, Mugello, Sebring) are the ones whose stage split can be quoted.
+
+**W3 status: CLOSED** -- both halves executed on all twelve. Its gate ("t in (0.2, 0.8) on the tracks whose scene was fixed") is not met because no scene fix exists, which is now a measured consequence, not an assumption.
+
+**No code or data changed this entry.** The installed data is at defaults and the tree is clean.
