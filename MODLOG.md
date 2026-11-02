@@ -2603,3 +2603,17 @@ W3 (MODLOG 242) supplies the missing column of the W4 table: the failure is in t
 **One state difference noticed and recorded:** the Xenia panel's HUD reads `RACE 00:04.817`, ours reads `00:00.000` -- the engine's race clock is not running for this shot route. The geometry still aligns (gradient NCC peaks at 0,0), so the anchored metric is unaffected, but the HUD row itself is not a like-for-like comparison and should not be read as one.
 
 **No code or data changed; nothing committed (the sheet is a git-ignored artifact).**
+
+## 2026-11-02 (245): goal restated and plan v7 written -- FM2 parity first, results stored as per-game visual profiles
+**The user's goal (2026-11-02):** *first* visual parity with FM2; *and* the findings must make the other Xbox 360 Forzas cheaper; ideally a switch between each game's visual style. That reframes FM2 parity from "one finished thing" into "the first filled-in profile".
+
+**What the code shows today:** the FM2 style already exists as a chain of **sixteen `if track.id.starts_with("fm2/")` blocks** in `crates/fh1-engine/src/main.rs` (146-420), each setting an environment variable (grade/LUT/vignette off, tone curve, shadow rule, specular, sky gain, camera, crowds, car knobs, exposure). It works, but it is a string-prefix test that no second game can join, the values cannot be listed or compared, and **inferred fits are indistinguishable from values read out of the game's files** -- which is how a project grows knobs nobody can defend.
+
+**Plan v7 (docs/DESIGN.md):**
+- **v7.1** move the sixteen blocks into `VisualStyle::fm2()` with **no behaviour change** (gate: acceptance reproduces 6.04 / 6.86 exactly; existing overrides still win);
+- **v7.2** the switch `FH1_VISUAL_STYLE=<game>`, default = the track's own game (gate: forcing a style on a foreign track behaves as the override says);
+- **v7.3** the remaining v6 parity work is expressed as profile fields, so each change is one named value;
+- **v7.4** FM4 as the first other game (it shares the most with FM2), gated on it reporting its own acceptance table.
+**Guardrail that gives the plan its value:** every profile field must be either *read* from that game's files or *measured* against the reference pictures with a MODLOG entry naming it. There is no third category, so an unsourced value gets no field.
+
+**Nothing implemented yet:** the document only. The sixteen-block move (v7.1) is a refactor of `main.rs`, so it will be done as one isolated step with the exact-reproduction gate, not folded into other work.
