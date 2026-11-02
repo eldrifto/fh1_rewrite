@@ -2175,3 +2175,22 @@ The light curve fixes the lifted shadows exactly (Tsukuba 2.21 -> 1.00) and over
 **P1.2 is BLOCKED on the user:** the runtime state (sampler state, mip, engine-filled registers) needs the instrumented Xenia driven to a grid. **ViGEmBus is not installed** (no service, no driver) and the focused loop needs the machine left idle; STATUS 2026-11-01 (144/145) records that background input then failed outright.
 
 **Not tested:** nothing rendered was changed this turn except the shot-probe logging; the tone finding is a measurement, not a fix.
+
+## 2026-11-02 (227): ViGEmBus installed (input unblocked) + the tone-curve blend measured: t ~ 0 on every track
+**System change (outside the repo, user-requested):** ViGEmBus v1.22.0 installed from the official nefarius release (Authenticode valid, publisher "Nefarius Software Solutions e.U.", SHA-256 `89220A7865076B342892F98865F3499FB7C4CFD673159E89D352C360FD014C6A`, Advanced Installer wrapper, `/exenoui /qn`). Service `ViGEmBus` **Running**, `System32\drivers\ViGEmBus.sys` present, PnP node OK. A client was needed to create a pad; `vgamepad` 0.2.0 was built from source into a project-local venv `data/work/venv` (Python 3.14 has no wheel; built with the VS 2022 Build Tools already on the machine + `tools/cmake`). `data/work/vpad_test.py` created a real `XBOX_360_DEVICE_00:01` and Windows listed "Xbox 360 Controller for Windows". **The background-input blocker from STATUS 2026-11-01 (144/145) is therefore liftable.**
+
+**P1.2 deferred on purpose:** the fork's instrumentation (`data/work/xenia-build`, 74 uncommitted lines) logs per-binding fetch signs/textures only. Adding a per-draw constant dump is a small C++ change, but MODLOG 222 already concluded that every input we can name has been fed and that the remaining bake error is in its sampling -- so the dump would very likely reproduce what we know. The emulator route stays available; it is not the top-value step any more.
+
+**Instead, the post-P0 measurement that needed no emulator (`data/work/p2_avg.py`):** `FH1_FM2_CONTRAST=2` paints the blend's own inputs into the frame (R = frame average x2, G = t). Against each track's own `TrackSettings.xml` `TrackLumLimits`:
+```
+track             avg    min    max      t   curve(0.18) light/dark
+Tsukuba         0.2226 0.3333 1.4902  0.001   0.177 / 0.281   clamped to DARK
+Silverstone GP  0.4316 0.3725 0.9412  0.024   0.112 / 0.147   barely above min
+Sunset Infield  0.2089 0.2078 0.8275  0.037   0.170 / 0.227   barely above min
+Maple Valley    0.2143 0.2314 1.0980  0.015   0.093 / 0.248   clamped to DARK
+```
+So the game's own blend is **pinned at t ~ 0.02 on every track measured**: our scene average sits at or below the track's `TrackLumLimits` minimum. The dark curve is 1.6-2.7x brighter on a mid grey than the light curve -- the exact "shadows/mids too bright, highlights compressed" signature P0 measured (dark bins 2.2-3.6). This closes the C1 chain from measurement to P0's bins.
+
+**What it means:** the error is not the curve (the curve is the game's own and is implemented correctly) -- it is that our **scene is too dark before the post**, so the game's auto-exposure-style blend selects the brightening curve. Brightening our scene would move the blend toward the game's t and, through the compressive curve, restore the contrasts P0 asks for. The next measurement is the scene buffer's luminance against the game's own `TrackLumLimits` range per track, then which scene term is missing the light.
+
+**Not tested:** no rendered change was made this turn; the ViGEm pad has only been exercised by `vpad_test.py`, not yet by the emulator.
