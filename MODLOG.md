@@ -2363,3 +2363,22 @@ That last row is a new fact: on New York and TT our albedo is the lowest measure
 **Consequence for W1/W2:** W1 (albedo) can be judged directly now -- the gate is Maple's albedo median, not a band score -- and W2 must handle the mixed group's excess shadow light, not just deficiency.
 
 **Not tested:** no rendering change in this entry; both measurements are of the current defaults.
+
+## 2026-11-02 (235): plan v6 W1 attempted on Maple -- FAILS its gate, and the reason reorders the plan
+**What was tried:** `FM2_SHADER_ROAD=1` on the maplevalley import, which is W1.1 in practice -- the importer computes the road albedo by evaluating the draw's **own pixel shader with its own constants** (c1..c7, MODLOG 220-221) instead of using texture means and a mask lerp. Remaster tables rebuilt, then both measurements.
+
+**Result:**
+```
+                    Maple albedo (ours/game)   acceptance median   bins dark/mid/bright
+default                    0.29 (0.22-0.36)          2.15               3.16 / 2.15 / 0.47
+FM2_SHADER_ROAD=1          0.65 (0.56-0.78)          3.62               5.40 / 3.66 / 0.74
+```
+The albedo moves **toward** the game's own shader value (0.29 -> 0.65) and the rendered result moves **away** from the reference (2.15 -> 3.62).
+
+**Reading:** on Maple our light/display path already delivers too much light, so raising the albedo compounds it. The two errors were partly cancelling at the defaults, which is why every previous "fix the albedo" attempt looked worse and every "darken it" attempt looked better -- neither was addressing the whole.
+
+**Gate W1 as written (albedo >= 0.85 AND acceptance <= 1.0): FAILED.** Per the plan's stop rule the change is **reverted**: maplevalley re-imported with defaults and the remaster tables rebuilt; the acceptance reproduces the baseline (2.15, bins 3.16 / 2.15 / 0.47).
+
+**Plan consequence (amendment, not a rewrite):** for the **mixed** bucket (Maple, Laguna, TT, New York -- albedo low *and* shadows too bright) the order must be **light/shadow first, albedo second**, because the albedo change cannot be judged while the light path is wrong. For the pure **A** bucket (Tsukuba, Sunset, Mugello, Nordschleife, Suzuka, Road Atlanta -- albedo low, scene bins below 1) W1 as written still applies and can be tried next.
+
+**Not tested:** the A-bucket tracks under the same switch; whether a partial albedo correction (between 0.29 and 0.65) helps Maple alongside a light fix.
