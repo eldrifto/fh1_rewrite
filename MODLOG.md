@@ -2493,3 +2493,41 @@ sum                 2.44              3.36     <- worse
 **What this establishes, and it is the important part:** an albedo that is *closer to the game's own shader* (0.29 -> 0.65 on Maple, and the shader path on six more) makes the picture *further from the reference* every time it changes anything. The reference's road is therefore darker than `albedo x lightmap` everywhere -- so the dominant difference is downstream of the albedo, in the light/shadow/display path, not in the bake. That is consistent with W2 and with the tone-curve sweep (MODLOG 228), and it retires the "per-draw material brightness" theory that the last several weeks were built around.
 
 **W1 status: closed (failed, both buckets, reverted).** The bake is not the lever.
+
+## 2026-11-02 (241): plan v6 W4 -- the loop closed with numbers; decision needed
+**Final acceptance in the restored state** (`data/work/acceptance_w4.json`): **sum 6.04, bin error 6.86** (previous same-code run 5.97 / 6.74 -- the documented +-0.5 aggregate drift).
+
+| track | median | bins dark/mid/bright | albedo (ours/game) | bucket | measured cause |
+|---|---|---|---|---|---|
+| Tsukuba | 1.28 | 2.36 / 1.33 / 1.00 | 0.70 | A | albedo low, darks 2.4x bright |
+| Laguna Seca | 1.57 | 4.62 / 1.25 / 1.07 | 0.42 | mixed | dark third 4.6x bright |
+| Road Atlanta | 1.39 | 1.48 / 1.69 / 1.19 | 0.27 | A | darks and mids both bright |
+| Silverstone | 0.60 | 3.89 / 0.62 / 0.46 | 0.90 | B | shadow coverage 3 % vs 14 % (far road) |
+| Nordschleife | 0.77 | 1.38 / 0.75 / 0.38 | 0.49 | A | bright third 2.6x dark |
+| Sebring | 1.21 | 1.73 / 1.33 / 0.69 | 1.11 | B | light/shadow path |
+| Mugello | 0.86 | 1.07 / 0.87 / 0.76 | 0.48 | A | nearly flat -- best track |
+| Suzuka | 0.60 | 1.25 / 0.52 / 0.53 | 0.46 | A | dark third 1.25x, bright 1.9x dark |
+| Sunset Infield | 0.53 | 0.74 / 0.54 / 0.34 | 0.70 | A | uniformly ~2x dark |
+| Maple Valley | 2.15 | 3.25 / 2.15 / 0.48 | 0.29 | mixed | albedo low *and* light too high |
+| New York | 0.48 | 1.00 / 0.74 / 0.12 | 0.20 | mixed | bright third 8x dark |
+| TT King Cobra | 3.49 | 5.91 / 1.06 / 0.79 | 0.18 | mixed | dark third 5.9x bright |
+
+**W3 (blend input t):** its precondition -- "the tracks whose scene was fixed" -- was **not met**, because no scene change was adopted. t is therefore unchanged at ~0.02 on every measured track (MODLOG 227); re-measuring would repeat that measurement. W3 cannot be completed before a scene fix exists.
+
+**Everything the plan's W1 and W2 tried, and the verdict:**
+| change | source | result |
+|---|---|---|
+| the draw's own-shader albedo (W1) | game's pixel shader | fails on Maple (2.15->3.62) **and** on the six A-bucket tracks (2.44->3.36) |
+| gate the sun term on the lightmap (W2.3) | the game's `step(lm > 0.45)` | moot: shadow map is active (`sh` 0.47-0.62) and the gate is already open there |
+| `DropShadowColor` for the car decal | the game's track settings | worse (Silverstone 3.64->3.81, Maple 3.07->3.21) |
+| lightmap light floor = 0 | the game has no floor | no effect (2.74->2.76) -- third confirmation |
+| shadow distance 600 / small-caster cull off | -- | depth only; coverage unchanged at 3 % |
+| global sun-direction flip (`fx`) | -- | coverage 3 %->10 % on Silverstone, but Nordschleife 0.54->0.82 and Maple worse |
+| per-track sun direction from `ShadowLightDirection` | game's code `0x825220f0` | **already implemented** (`track.rs:219`); the function only copies the vector |
+
+**The plan's own conclusion rule now applies:** the acceptance is not met (6.04 against 2.0), the causes are measured per track, and no further change has a mechanism behind it that the evidence supports. The three options are therefore put to the user:
+1. **Accept** the measured state with this document as the record;
+2. **Adopt a clearly labelled calibration** (a per-track gain fitted to the reference) -- it would very likely reach <= 2.0 but is drawing the target, not reproducing the game;
+3. **Park FM2 road parity** and move to another area.
+
+**No code or data changed this entry; the tree is clean and the installed data is at defaults (re-verified: Tsukuba 0.38, Road Atlanta 0.36, Mugello 0.16).**
