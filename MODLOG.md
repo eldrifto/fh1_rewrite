@@ -2436,3 +2436,32 @@ Maple Valley   3.07 / 2.15 / 0.47  err 0.88   3.21 / 2.10 / 0.48  err 0.88
 **Gate W2 (bright 0.46 -> >= 0.80, dark 3.64 -> <= 1.50): NOT met.** No change adopted.
 
 **Next concrete step:** re-measure coverage on the *far* road only (where the car cannot be), which removes the contamination, and treat the near-car band as a separate question about the car's shadow rather than about the road material.
+
+## 2026-11-02 (238): W2 on the CONTAMINATED-FREE far road -- coverage is the gap, three levers tested, none passes the gate
+**The step:** re-measure shadow coverage on far-road pixels only (y < 540), where the car body and its decal cannot be (MODLOG 237).
+
+```
+FAR ONLY (29 points, Silverstone)         coverage      depth     median S
+game (dark curve)                           14%          0.56        2.44
+ours, default                                3%          0.51        1.67
+```
+So on clean data: **coverage is the gap (14 % vs 3 %), depth already matches (0.56 vs 0.51).** The near-car band's 91 % vs 0 % is confirmed as surface contamination and is no longer used.
+
+**Three levers tested against that statistic:**
+| lever | far coverage | far depth | verdict |
+|---|---|---|---|
+| `FH1_RM_SHADOW_DIST=600` | 3 % (unchanged) | 0.51 -> 0.21 | deepens, does not extend |
+| `FH1_SHADOW_SMALL_CULL=0` | 3 % (unchanged) | 0.51 -> 0.19 | same |
+| `FH1_RM_FM2_SHADOW_DIR=fx` | **10 %** | 0.51 | closest to the game, but see below |
+
+The direction override is the only lever that moves coverage, which says our sun's azimuth is wrong for Silverstone. **But it is a global knob and it trades tracks**: on the freshly measured baseline it improves Tsukuba (bin err 0.40 -> 0.31) and Silverstone (0.86 -> 0.84), and **worsens Nordschleife (0.54 -> 0.82) and Maple (0.89 -> 0.97)**; four-track total 2.45 -> 2.71. **Rejected** under the plan's "no global knob that trades one track for another" rule. Nothing adopted.
+
+**Baseline re-measured in full (current build, all twelve):**
+```
+sum |ln(median ratio)| = 5.97      sum of bin errors = 6.74
+```
+The per-track bins are stable (Silverstone reproduces 3.64 exactly), but **the sum moved 5.38 -> 5.97 with unchanged code**, so the aggregate carries roughly +-0.5 of run-to-run variation. Any future claim of "the total improved by 0.3" is therefore not supportable; only per-track, same-build A/B comparisons are, which is how every change in this plan has been judged.
+
+**Gate W2 (bright 0.46 -> >= 0.80, dark 3.64 -> <= 1.50): NOT met.** Far-road coverage remains 3 % against 14 %, and the only lever found so far is per-track, not global.
+
+**Next step (concrete):** the direction finding says the sun's azimuth is track-dependent, so the faithful fix is to derive each track's light vector from its own data rather than flip it globally -- Silverstone's `ShadowLightDirection` is (-0.95, -0.70, -0.05) and the engine's convention for its sign is what needs checking against the game's own code path (`0x825220f0`, STATUS 2026-10-19). That is a data/code check, not a fit.
