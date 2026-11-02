@@ -2592,3 +2592,14 @@ W3 (MODLOG 242) supplies the missing column of the W4 table: the failure is in t
 **The decision remains the user's** (restated from MODLOG 241): accept the measured state, adopt a clearly labelled calibration, or park FM2 road parity. No further change with an evidence-backed mechanism is available inside this plan.
 
 **No code or data changed this entry; tree clean; installed data at defaults.**
+
+## 2026-11-02 (244): comparison sheets produced (Xenia vs engine, same pose)
+`data/work/compare.py` composes the two picture sets the acceptance measures -- `screenshots/xenia_ref/g1_*.png` (Xenia) and `screenshots/acc_*.png` (engine, same pose) -- with the measured numbers in the caption, so the picture and the score are the same evidence.
+- `screenshots/compare_maplevalley.png` (2568 x 788), `screenshots/compare_three.png` (Tsukuba, Silverstone, Maple, 2568 x 2296). Both git-ignored, regenerable:
+  `python -I data/work/compare.py --tracks=maplevalley_00 --out=maplevalley`
+
+**What the Maple sheet shows** (reading of the composite, not of the game): the layouts align panel-for-panel, and the differences are the ones the numbers name -- the road in ours is lighter and flatter (the dark shadow band across Xenia's foreground is weak in ours), the car reads lighter blue against Xenia's near-black navy, and the grandstand side is paler. Maple's caption: median 2.15, bins 3.25/2.15/0.48 -- i.e. we are brighter in shadow and mid, darker in the highlight.
+
+**One state difference noticed and recorded:** the Xenia panel's HUD reads `RACE 00:04.817`, ours reads `00:00.000` -- the engine's race clock is not running for this shot route. The geometry still aligns (gradient NCC peaks at 0,0), so the anchored metric is unaffected, but the HUD row itself is not a like-for-like comparison and should not be read as one.
+
+**No code or data changed; nothing committed (the sheet is a git-ignored artifact).**
