@@ -2475,3 +2475,21 @@ The per-track bins are stable (Silverstone reproduces 3.64 exactly), but **the s
 **Consequence for W2:** the remaining coverage gap (3 % vs 14 % on far road) is **not** a sun-direction bug. The candidates left are the caster set and what the game bakes statically into the lightmap; neither is a one-line change, and W2's gate stays unmet: bright 0.46 -> >= 0.80, dark 3.64 -> <= 1.50 **NOT met**.
 
 **No code or data changed this entry.**
+
+## 2026-11-02 (240): W1 tested on the six A-bucket tracks -- FAILS there too, and that closes W1
+The A-bucket tracks (albedo low, scene bins already below 1) were the one place W1 could still pass. Applied `FM2_SHADER_ROAD=1` -- the importer's draw's-own-shader albedo -- to Tsukuba, Sunset, Mugello, Nordschleife, Suzuka and Road Atlanta, rebuilt the remaster tables, and measured:
+```
+track            default err      shader-albedo err
+Tsukuba             0.40              0.40
+Road Atlanta        0.38              0.90     <- much worse
+Nordschleife        0.54              0.56
+Mugello             0.17              0.44     <- much worse
+Suzuka              0.33              0.41
+Sunset              0.62              0.64
+sum                 2.44              3.36     <- worse
+```
+**W1 fails on both buckets**: Maple (MODLOG 235, 2.15 -> 3.62) and the six A-bucket tracks (2.44 -> 3.36). Reverted: the six maps re-imported with defaults, remaster rebuilt, and the baseline re-verified on three of them (Tsukuba 0.38, Road Atlanta 0.36, Mugello 0.16 against 0.40 / 0.38 / 0.17 measured fresh).
+
+**What this establishes, and it is the important part:** an albedo that is *closer to the game's own shader* (0.29 -> 0.65 on Maple, and the shader path on six more) makes the picture *further from the reference* every time it changes anything. The reference's road is therefore darker than `albedo x lightmap` everywhere -- so the dominant difference is downstream of the albedo, in the light/shadow/display path, not in the bake. That is consistent with W2 and with the tone-curve sweep (MODLOG 228), and it retires the "per-draw material brightness" theory that the last several weeks were built around.
+
+**W1 status: closed (failed, both buckets, reverted).** The bake is not the lever.
