@@ -2194,3 +2194,41 @@ So the game's own blend is **pinned at t ~ 0.02 on every track measured**: our s
 **What it means:** the error is not the curve (the curve is the game's own and is implemented correctly) -- it is that our **scene is too dark before the post**, so the game's auto-exposure-style blend selects the brightening curve. Brightening our scene would move the blend toward the game's t and, through the compressive curve, restore the contrasts P0 asks for. The next measurement is the scene buffer's luminance against the game's own `TrackLumLimits` range per track, then which scene term is missing the light.
 
 **Not tested:** no rendered change was made this turn; the ViGEm pad has only been exercised by `vpad_test.py`, not yet by the emulator.
+
+## 2026-11-02 (228): the error is in the scene, not the curve -- sweeps and separations
+Four measurements, each on the frozen pixel sets, that narrow P0's finding to two independent scene errors.
+
+**1. Tone-curve sweep (`data/work/p2_tsweep.py`, t = 0 / 0.25 / 0.5 / 0.75 / 1):** no t fixes any track.
+```
+track          best t   bins at the best t      note
+Tsukuba        0.50     1.6 / 1.0 / 0.8         mid perfect, shadows 1.6x bright, highlights 0.8
+Silverstone    1.00     5.7 / 0.8 / 0.6         no t helps (error flat at 0.87); highlights 1.7x dark
+Sunset         0.00     0.9 / 0.6 / 0.4         uniformly too dark at every t
+Maple          0.75     1.3 / 0.9 / 0.2         highlights 5x too dark at the best t
+```
+Totals 2.72 / 2.60 / 2.54 / 2.64 / 3.10 -- the curve moves the total by 0.5 at most and never fixes the highlights. **The curve choice is a second-order term.** (It is also already the game's own: FH1's tonemap/LUT/vignette are off for FM2 tracks, `main.rs` 228-232.)
+
+**2. Is the light term flat? No** (`data/work/p3_lm.py`, `FH1_RM_FM2_DBG=3` + `FH1_FM2_POST=0` paints `lerp(dark, light, lm)`):
+```
+track           our light term p10/p50/p90      contrast p90/p10
+Silverstone     0.025 / 0.991 / 1.000                39.7
+Sunset          0.030 / 0.591 / 0.604                20.4
+Maple           0.023 / 0.352 / 0.552                23.8
+Tsukuba         0.024 / 0.462 / 0.491                20.3
+```
+The lightmap term carries real contrast, but **the median road pixel is at 0.99 light on Silverstone**: ~90 % of the compared road is fully lit, i.e. our shadow *coverage* is small, which is the known "shadows weaker" item.
+
+**3. The invented light floor is not the cause.** `FH1_RM_LM_LIGHT_FLOOR=0` on the frozen pixels: 2.74 -> 2.76, dark bins unchanged (Tsukuba 2.21 -> 2.31, Silverstone 3.64 -> 3.64). Closed.
+
+**4. Post off (`FH1_FM2_POST=0`) -- the decisive split:**
+```
+track         with the game's combine     scene only (no curve)
+Tsukuba       2.21 / 1.33 / 1.00          0.86 / 0.62 / 0.47   curve multiplies ~2.2-2.6x
+Silverstone   3.64 / 0.62 / 0.46          3.03 / 0.53 / 0.40   curve multiplies ~1.2x
+Maple         3.21 / 2.15 / 0.45          2.04 / 1.40 / 0.31
+```
+**Silverstone's error survives the curve almost unchanged: shadows 3x too bright and sunlit road 2.5x too dark in the scene itself.** Tsukuba's scene is instead uniformly ~2x too dark (the curve then over-brightens it).
+
+**Conclusion:** the road is wrong in two independent ways -- **lit road too dark** and **shadowed road too bright / too little shadow area** -- and the tone curve is a downstream consequence (our dark scene makes it pick the brightening curve). The per-draw albedo question (STATUS 6.1) is only one of the two, and the shadow term is the other. P3 therefore has a defined starting point: bring the lit-road value and the shadow coverage to the game's numbers, then re-check that the blend lands mid-range.
+
+**Not tested:** no rendered change this turn; all four measurements are A/B on unchanged defaults.
