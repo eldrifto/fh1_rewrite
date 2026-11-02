@@ -2301,3 +2301,21 @@ Tsukuba        795,427     0.2138      0.1683       0.79     0.488
 **Next (concrete):** restrict the albedo comparison to points where the engine's own probe confirms the same draw is visible (drop the occlusion outliers), and add the shadow factor `min(1-(1-ShadowColor)*S, lerp)` from `TrackSettings` so the residual is albedo only. The harness for both exists.
 
 **Not tested:** no rendered change; the albedo numbers are a measurement of the current defaults.
+
+## 2026-11-02 (232): robust albedo medians -- Maple has an albedo deficit, Silverstone does not
+`data/work/p3_alb.py --per-bin=4` (12 probe points per track, median of ours/game):
+```
+track             median  p25   p75     reading
+Maple Valley       0.35   0.29  0.38   TIGHT: our albedo is ~2.9x too low, consistently
+Tsukuba            0.60   0.16  0.76   wide, median low
+Silverstone GP     0.82   0.55  1.04   our albedo is essentially right
+Sunset Infield     0.72   0.13  1.51   wide, median low
+```
+**This splits the problem in two, and that is the useful result:**
+- **Maple Valley** has a real albedo deficit: median 0.35 with a tight quartile range (0.29-0.38) over twelve points. That is the draw's own two-layer blend, i.e. exactly the "per-draw material brightness" unknown STATUS section 6.1 describes -- now measured, not inferred.
+- **Silverstone's albedo is right (0.82, p75 1.04)**, yet its rendered road is 2.5x too dark (MODLOG 228). So Silverstone's error is NOT albedo: it must be the light term or the display path.
+- Tsukuba and Sunset are in between and their quartiles are wide, so no single number should be quoted for them yet.
+
+**Consequence for P3:** the fix list is per track, not global. Maple needs the draw's bake corrected (the constants c1..c7 the importer ignores, MODLOG 220-221). Silverstone needs the light/display path, which the t-sweep already bounded. A single global knob would move one and break the other -- which is exactly what every earlier global attempt did.
+
+**Not tested:** no rendered change; these are measurements of the current defaults. The per-point outliers (up to 6.5x the other way) remain surface-identity noise and are why the median, not the mean, is quoted.
