@@ -2232,3 +2232,20 @@ Maple         3.21 / 2.15 / 0.45          2.04 / 1.40 / 0.31
 **Conclusion:** the road is wrong in two independent ways -- **lit road too dark** and **shadowed road too bright / too little shadow area** -- and the tone curve is a downstream consequence (our dark scene makes it pick the brightening curve). The per-draw albedo question (STATUS 6.1) is only one of the two, and the shadow term is the other. P3 therefore has a defined starting point: bring the lit-road value and the shadow coverage to the game's numbers, then re-check that the blend lands mid-range.
 
 **Not tested:** no rendered change this turn; all four measurements are A/B on unchanged defaults.
+
+## 2026-11-02 (229): the lit road decomposed -- albedo, light term and product, per stage
+`data/work/p3_dbg.py`: `FH1_RM_FM2_DBG` 1/3/4 with `FH1_FM2_POST=0` paints each material stage as a flat colour, so the scene values can be read off a screenshot over the frozen road pixels (linear green, median):
+```
+track            albedo    term   product  albedo*t   xenia   product/xenia
+Silverstone GP   0.0513  0.9911   0.0513    0.0508  0.1022        0.50
+Sunset Infield   0.1046  0.5906   0.0630    0.0618  0.1590        0.40
+Maple Valley     0.1221  0.3515   0.0545    0.0429  0.0382        1.43
+Tsukuba          0.1441  0.4621   0.0666    0.0666  0.1170        0.57
+```
+(`product` and `albedo*t` agree to within 25 % -- the two independent paints confirm each other, except Sunset/Maple where the painted `albedo` channel and the product differ, worth a look later.)
+
+**What this says.** Our lit road reaches the screen at 0.40-0.57 of the reference's displayed value on three of four tracks (Maple is the exception, already too bright). The reference number includes the game's tone curve, which our own A/B shows contributes only ~1.15-1.6x of that gap, so **the scene's lit road is roughly 1.5-2x too dark**, not 2.5x. Combined with the shadow third at ~3x too bright, the net scene contrast error is ~4x -- consistent with MODLOG 228.
+
+**Open (not claimed):** whether the shortfall is the baked albedo or the light term. The albedo paints at 0.14 on Tsukuba where the shader's own road value was recorded as 0.375 (STATUS, 2026-10-19 "the importer's baked road albedo agrees with both (about 0.34 and 0.57)") -- those are not the same quantity (the second is albedo x light), so the comparison cannot be made until the draw's albedo alone is printed at the same point. That needs the `FM2_PROBE_AT` oracle, whose probe prints nothing today: it runs at `fm2_scenery.rs:1235`, before the draw list is consumed at 1863, and matched no triangle for points that `FM2_UNDER` (line 2348) matches with the same geometry -- so the two blocks see different data and the probe block needs a diagnostic before it is trustworthy.
+
+**Not tested:** no rendered change; all numbers are A/B on unchanged defaults.
