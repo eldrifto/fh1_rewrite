@@ -2319,3 +2319,24 @@ Sunset Infield     0.72   0.13  1.51   wide, median low
 **Consequence for P3:** the fix list is per track, not global. Maple needs the draw's bake corrected (the constants c1..c7 the importer ignores, MODLOG 220-221). Silverstone needs the light/display path, which the t-sweep already bounded. A single global knob would move one and break the other -- which is exactly what every earlier global attempt did.
 
 **Not tested:** no rendered change; these are measurements of the current defaults. The per-point outliers (up to 6.5x the other way) remain surface-identity noise and are why the median, not the mean, is quoted.
+
+## 2026-11-02 (233): plan v6 written (docs/DESIGN.md, local) -- per-bucket instead of single-cause
+**Why a new plan:** v5 assumed the whole error was the per-draw material brightness and sequenced an emulator capture to recover it. The measurements in MODLOG 225-232 show at least **two independent causes on different tracks**:
+- Maple Valley: road albedo **0.35** against the game's own shader, with tight quartiles (0.29-0.38) -- a real albedo (bake/constants) deficit.
+- Silverstone: road albedo **0.82** (essentially right) yet its rendered road is 2.5x too dark, and the error **survives the tone curve** -- a light/shadow/display error.
+A global knob moves one and breaks the other, which is what every earlier global attempt measured.
+
+**What v6 keeps:** the metric of record (asphalt-anchored, neutral in both pictures, frozen pixels, binned by the reference's brightness; baseline 5.38 / 6.77), the frozen reference hashes, the 12/12 draw map, and the shader oracle.
+
+**What v6 changes:**
+- **W0** classify all twelve tracks (albedo ratio + does the error survive POST=0) into bucket A (albedo), B (light/display) or mixed. Gate: no track "unknown".
+- **W1** bucket A, Maple first: fold the draw's own `c1..c7` into the bake, or restrict the per-texel bake to the named draw. Gate: Maple albedo >= 0.85 and its acceptance 2.15 -> <= 1.0, others unchanged.
+- **W2** bucket B, Silverstone first: a new statistic, **shadow coverage** (implied shadow factor from `curve(oracle)` vs the reference), then fix coverage or depth. Gate: bright third 0.46 -> >= 0.80, dark third 3.64 -> <= 1.50.
+- **W3** re-measure the blend input t only after W1/W2 (it is downstream, MODLOG 227/228).
+- **W4** close the loop: acceptance or a per-track residual table with named causes; no fitted values adopted as game data.
+
+**Non-goals / stop rules kept:** no per-track gains, no global knobs, no emulator on the critical path (the ViGEm pad is ready if a measurement needs it), two attempts per step then write up, and any change that does not move the frozen-pixel metric is reverted rather than left behind a switch.
+
+**First check inside W0:** confirm the oracle's units on a draw whose value already matched Xenia (Sunset's road, 3/255 historically), because every W1/W2 number depends on it.
+
+**Nothing implemented this turn:** the plan is a document; no code or data changed.
