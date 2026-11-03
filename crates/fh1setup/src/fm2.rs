@@ -139,6 +139,21 @@ pub fn run() -> Result<()> {
         }
     }
     println!("[fm2] done: {}", root.display());
+    // MODLOG 303: record the environment that produced these maps. The FM2 import path does not go through the
+    // group pipeline hash, so nothing used to remember how the content on disk was made -- and re-importing the
+    // same disc with different `FM2_*` settings changes the render by far more than the measurement noise
+    // (measured: mean 2.52, 29 % of pixels). Writing the fingerprint here turns that silence into a warning on the
+    // next import, and into a recorded fact for anyone comparing two captures.
+    {
+        let fp = crate::install::env_fingerprint();
+        let path = root.join("import_env.txt");
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let old = old.trim();
+        if !old.is_empty() && old != fp.trim() {
+            println!("[fm2] WARNING: these maps were built with a different environment ({old:?} -> {:?}); captures taken before and after this import are not comparable", fp.trim());
+        }
+        let _ = std::fs::write(&path, format!("{}\n", fp.trim()));
+    }
     Ok(())
 }
 

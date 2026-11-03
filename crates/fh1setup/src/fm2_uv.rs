@@ -13,7 +13,7 @@ fn be(d: &[u8], o: usize) -> Option<u32> {
     d.get(o..o + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()))
 }
 
-fn section(d: &[u8], name: &[u8]) -> Option<usize> {
+pub fn section(d: &[u8], name: &[u8]) -> Option<usize> {
     let pos = d.get(..0x190)?.windows(name.len() + 1).position(|w| &w[..name.len()] == name && w[name.len()] == 0)?;
     Some(be(d, pos + 16)? as usize)
 }
@@ -148,7 +148,7 @@ pub fn dump_shaders(raw_model: &[u8], model: &fm2::Model) {
         match d.ps_container.and_then(|o| data.get(o..)) {
             Some(bytes) => match fh1_shaders::container::ShaderBlob::parse(bytes, d.ps_container.unwrap_or(0)) {
                 Ok(b) => {
-                    println!("[fm2 sky] draw {i}: pixel container at {:#x}, target {}, constants {:?}", d.ps_container.unwrap_or(0), b.target, b.constants.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
+                    println!("[fm2 sky] draw {i}: pixel container at {:#x}, target {}, constants {:?}", d.ps_container.unwrap_or(0), b.target, b.constants.iter().map(|c| format!("{}{}:{}", c.name, format!("{:?}", c.set), c.register)).collect::<Vec<_>>());
                     println!("[fm2 sky]   float defs {:?}
 {}", b.float_defs, fh1_shaders::fm2::disassemble(b.microcode.clone(), false));
                 }

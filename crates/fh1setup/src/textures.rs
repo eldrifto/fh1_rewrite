@@ -26,7 +26,7 @@ pub fn bix_to_dds(header: &[u8], base: &[u8]) -> Result<Converted> {
     let (h, img) = bix::decode_base(header, base)?;
     let stored = bundle::decode_chain(&header[bix::HEADER_LEN..], h.format, h.endian, h.width, h.height, 1, h.mip_count)?;
     let word = u32::from_be_bytes(header[16..20].try_into()?);
-    faces_to_dds(&[(img, game_mips(stored))], word)
+    faces_to_dds(&[(img, game_mips(stored))], word, false)
 }
 
 /// CAFF textures: 2D (level 0 and the game's mips decoded as one Xenos chain, which also places level 0 of the
@@ -40,23 +40,31 @@ pub fn caff_to_dds(file: &[u8]) -> Result<Converted> {
 pub fn caff_texture_to_dds(file: &[u8], t: caff::CaffTexture) -> Result<Converted> {
     if t.cube {
         let faces: Vec<_> = caff::decode_faces_of(file, t)?.1.into_iter().map(|f| (f, Vec::new())).collect();
-        return faces_to_dds(&faces, t.raw_format);
+        return faces_to_dds(&faces, t.raw_format, false);
     }
     let mut chain = bundle::decode_chain(&file[t.gpu_offset..], t.format, t.endian, t.width, t.height, 0, t.mip_count.max(1))?;
     let base = chain.remove(0);
-    faces_to_dds(&[(base, game_mips(chain))], t.raw_format)
+    faces_to_dds(&[(base, game_mips(chain))], t.raw_format, false)
 }
 
 /// Bundle previews (fh1_formats::bundle): the only data the disc has for PVS runtime textures. `chain` largest
 /// first.
 pub fn preview_to_dds(mut chain: Vec<xds::Image>, word: u32) -> Result<Converted> {
     let base = chain.remove(0);
-    faces_to_dds(&[(base, game_mips(chain))], word)
+    faces_to_dds(&[(base, game_mips(chain))], word, false)
 }
 
 /// RGBA8 texels -> BC3 DDS with generated mips (for images decoded by hand, e.g. punch-through BC1).
 pub fn rgba_to_dds(rgba: Vec<u8>, width: u32, height: u32) -> Result<Converted> {
-    faces_to_dds(&[(xds::Image { width, height, format: xds::Format::Argb8, data: rgba }, Vec::new())], 0)
+    faces_to_dds(&[(xds::Image { width, height, format: xds::Format::Argb8, data: rgba }, Vec::new())], 0, false)
+}
+
+///
+/// RGBA8 texels to a BC3 DDS with **level 0 only** -- no stored and no generated mip chain (plan v10 P2, MODLOG 326).
+/// Used to test whether the road's missing fine detail is the sampler choosing a coarse mip: a one-level texture has
+/// nothing to choose.
+pub fn rgba_to_dds_level0(rgba: Vec<u8>, width: u32, height: u32) -> Result<Converted> {
+    faces_to_dds(&[(xds::Image { width, height, format: xds::Format::Argb8, data: rgba }, Vec::new())], 0, true)
 }
 
 /// The game's stored levels below level 0, unless all zero (837 .bix, mostly 128² lightmaps, and many 64² CAFF AO
@@ -71,11 +79,14 @@ fn game_mips(chain: Vec<xds::Image>) -> Vec<xds::Image> {
 
 /// One face = 2D texture; six = cube map (each face with its own mip chain, as DDS stores them). Each face comes
 /// with the game's stored levels below level 0 (may be empty).
-fn faces_to_dds(faces: &[(xds::Image, Vec<xds::Image>)], word: u32) -> Result<Converted> {
+fn faces_to_dds(faces: &[(xds::Image, Vec<xds::Image>)], word: u32, level0: bool) -> Result<Converted> {
     let mut levels: Vec<Vec<u8>> = Vec::new();
     let (mut dxgi, mut alpha, mut mips) = (0, false, 0);
     for (img, stored) in faces {
-        let (d, a, l) = mip_chain(img, stored)?;
+        let (d, a, mut l) = mip_chain(img, stored)?;
+        if level0 {
+            l.truncate(1);
+        }
         (dxgi, alpha, mips) = (d, alpha || a, l.len());
         levels.extend(l);
     }

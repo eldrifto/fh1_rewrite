@@ -155,16 +155,8 @@ pub(crate) fn finish(disc: &Path, private: &Path, out: &Path, game: &str) -> Res
         .prepare("SELECT Id, BadgeTexturePathPrefix, MaxPerformanceIndex, MaxDisplayPerformanceIndex FROM CarClasses ORDER BY Id")?
         .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<Result<_, _>>()?;
-    let display_pi = |pi: f64| -> i64 {
-        let (mut lo, mut lo_d) = (0.0, 100.0);
-        for &(_, _, hi, hi_d) in &classes {
-            if pi <= hi {
-                return (lo_d + (pi - lo) / (hi - lo).max(1e-9) * (hi_d - lo_d)).round() as i64;
-            }
-            (lo, lo_d) = (hi, hi_d);
-        }
-        lo_d as i64
-    };
+    let bands: crate::cars::PiBands = classes.iter().map(|&(_, _, hi, hi_d)| (hi, hi_d)).collect();
+    let display_pi = |pi: f64| crate::cars::display_pi(&bands, pi);
     let makes: HashMap<i64, String> = db
         .prepare("SELECT ID, DisplayName FROM List_CarMake")?
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?

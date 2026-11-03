@@ -428,3 +428,137 @@ pub(crate) fn rows<P: rusqlite::Params>(db: &Connection, sql: &str, params: P) -
     }
     Ok(out)
 }
+
+/// The lowest number the PI display scale can show.
+///
+/// The scale bottoms here, which makes the first class start one below it: a class covers the
+/// display values `(previous class max, its own max]`, and a car's position inside that range is
+/// numbered from 1. Verified against nine in-game readings across FM2, FM3 and FM4 (MODLOG 254).
+const PI_FLOOR: f64 = 100.0;
+
+/// A game's PI display scale: `(max normalised PI, max display PI)` per class, in class order,
+/// exactly as `CarClasses` stores it.
+pub(crate) type PiBands = Vec<(f64, f64)>;
+
+/// Normalised PI -> the number the game shows for it.
+///
+/// `display = prev + floor(f * span) + 1`, where `prev` is the previous class's maximum display
+/// value (`PI_FLOOR - 1` for the first class), `span = class max - prev`, and `f` is the car's
+/// position inside its class. The shipped conversion before 2026-11-02 interpolated from `prev`
+/// with no offset and rounded, which was one point low.
+pub(crate) fn display_pi(bands: &[(f64, f64)], pi: f64) -> i64 {
+    let (mut lo, mut prev) = (0.0, PI_FLOOR - 1.0);
+    for &(hi, hi_d) in bands {
+        if pi <= hi {
+            let f = (pi - lo) / (hi - lo).max(1e-9);
+            // A car sitting exactly on a class boundary would give one past the class max
+            // (f = 1 -> prev + span + 1); clamp so a number never leaves its own class.
+            return ((prev + (f * (hi_d - prev)).floor() + 1.0) as i64).min(hi_d as i64);
+        }
+        (lo, prev) = (hi, hi_d);
+    }
+    prev as i64
+}
+
+/// FM2's `R4`/`R3`/`R2`/`R1` badges show the class with **no PI number** (in-game, 2026-11-02),
+/// which is also why those classes give the PI nothing to separate them by.
+pub(crate) fn class_shows_pi(letter: &str) -> bool {
+    !letter.starts_with('R')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The class ladders exactly as each game's `CarClasses` stores them (MODLOG 249-254).
+    const FM2: [(f64, f64); 10] = [
+        (0.265, 400.0),
+        (0.3565, 550.0),
+        (0.4596, 700.0),
+        (0.585, 850.0),
+        (0.72, 998.0),
+        (1.0, 999.0),
+        (1.0, 999.0),
+        (1.0, 999.0),
+        (1.0, 999.0),
+        (1.0, 999.0),
+    ];
+    const FM3: [(f64, f64); 11] = [
+        (0.091, 200.0),
+        (0.162, 275.0),
+        (0.235, 350.0),
+        (0.31, 425.0),
+        (0.385, 500.0),
+        (0.5, 600.0),
+        (0.62, 700.0),
+        (0.74, 800.0),
+        (0.86, 900.0),
+        (0.999999, 998.0),
+        (1.0, 999.0),
+    ];
+    const FM4: [(f64, f64); 11] = [
+        (0.157, 200.0),
+        (0.2224, 275.0),
+        (0.282493, 350.0),
+        (0.347, 425.0),
+        (0.4177, 500.0),
+        (0.53, 600.0),
+        (0.6233, 700.0),
+        (0.7245, 800.0),
+        (0.796, 875.0),
+        (0.938, 998.0),
+        (1.0, 999.0),
+    ];
+
+    /// Ten readings taken from FM2/FM3/FM4 in Xenia on 2026-11-02, with the car's stored
+    /// normalised PI. These are the gate for any change to the conversion.
+    #[test]
+    fn display_pi_matches_the_game() {
+        // (bands, stored normalised PI, what the game shows)
+        let readings: [(&[(f64, f64)], f64, i64); 11] = [
+            (&FM2, 0.379494, 584), // 2002 Skyline GT-R V-Spec II, B
+            (&FM2, 0.098145, 211), // Honda Civic VTi, D
+            (&FM2, 0.232810, 364), // 2004 Audi TT 3.2 quattro, D
+            (&FM3, 0.285084, 401), // 2002 Skyline GT-R V-Spec II, C
+            (&FM3, 0.067670, 175), // Scion xD, F
+            (&FM3, 0.066769, 174), // 2009 Citroen C4 VTS, F
+            (&FM3, 0.769603, 825), // 2003 #12 Calsonic Skyline, R2
+            (&FM4, 0.420014, 503), // 2002 Skyline GT-R V-Spec II, A
+            (&FM4, 0.778993, 858), // 2003 #12 Calsonic Skyline, R2
+            (&FM4, 0.001174, 100), // 2011 Ford Ka, F -- bottom of the scale
+            (&FM4, 0.001309, 100), // 2011 Toyota Aygo, F -- bottom of the scale
+        ];
+        for (bands, pi, want) in readings {
+            assert_eq!(display_pi(bands, pi), want, "normalised PI {pi}");
+        }
+    }
+
+    /// Every band must be reachable and must not overlap the one before it.
+    #[test]
+    fn display_pi_stays_inside_its_band() {
+        for bands in [&FM2[..], &FM3[..], &FM4[..]] {
+            let mut prev = PI_FLOOR as i64 - 1;
+            for &(hi, hi_d) in bands {
+                if hi_d as i64 > prev {
+                    let top = display_pi(bands, hi);
+                    assert!(
+                        top <= hi_d as i64 && top > prev,
+                        "class max {hi_d} gives {top}, previous max {prev}"
+                    );
+                }
+                prev = hi_d as i64;
+            }
+        }
+    }
+
+    /// FM2's race classes show the letter only; everything else shows a number.
+    #[test]
+    fn race_classes_show_no_number_in_fm2() {
+        for letter in ["R4", "R3", "R2", "R1"] {
+            assert!(!class_shows_pi(letter), "{letter}");
+        }
+        for letter in ["D", "C", "B", "A", "S", "U", "F", "E"] {
+            assert!(class_shows_pi(letter), "{letter}");
+        }
+    }
+}

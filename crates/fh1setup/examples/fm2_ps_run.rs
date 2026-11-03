@@ -405,6 +405,7 @@ fn main() {
     let (mut texmap, mut cset, mut rset, mut bset): (Vec<(u32, u32)>, Vec<(u32, [f32; 4])>, Vec<(u32, [f32; 4])>, Vec<(u32, bool)>) = Default::default();
     let (mut scale, mut n, mut dump) = (1.0f32, 16usize, false);
     let (mut pvs_path, mut draw_ix): (Option<String>, Option<usize>) = (None, None);
+    let mut vertex_at: Option<usize> = None;
     let mut i = 5;
     while i < a.len() {
         let kv = |s: &str| -> (u32, String) {
@@ -448,6 +449,10 @@ fn main() {
             "--draw" => {
                 i += 1;
                 draw_ix = Some(a[i].parse().unwrap());
+            }
+            "--vertex" => {
+                i += 1;
+                vertex_at = Some(a[i].parse().unwrap());
             }
             _ => {}
         }
@@ -514,6 +519,39 @@ fn main() {
     }
     let bools: HashMap<u32, bool> = bset.into_iter().collect();
 
+    // `--vertex N`: texture coordinates from the draw's own vertex N, resolved by the importer's `fm2_uv` (which
+    // sampler each item feeds, through which atlas rectangle). Mirrors `fm2_ps_gpu --vertex`, so both tools are
+    // driven from one command line.
+    let mut uv_from_vertex = false;
+    if let (Some(vn), Some(pp), Some(di)) = (vertex_at, &pvs_path, draw_ix) {
+        use fh1setup::fm2_uv::{self, ItemKind};
+        let pvs = fm2::parse_pvs(&std::fs::read(pp).unwrap()).unwrap();
+        let list = &pvs.models[model];
+        let kind = |it: u32| match list.get(it as usize).and_then(|&t| pvs.textures.get(t as usize)) {
+            None => ItemKind::System,
+            Some(t) if matches!(t.flags, 8 | 9 | 12) => ItemKind::Tile,
+            Some(_) => ItemKind::Other,
+        };
+        let uvs = fm2_uv::resolve(&d, &m, &kind);
+        if let Some((u, ps)) = uvs.get(di).and_then(|u| u.ps.as_ref().map(|ps| (u, ps))) {
+            let dd = &m.draws[di];
+            for (item, coords) in &u.slots {
+                let Some(&uv) = coords.get(vn) else { continue };
+                let Some(&tf) = ps.item_sampler.get(item) else { continue };
+                let Some(&reg) = ps.sampler_reg.get(&tf) else { continue };
+                let uv = match u.atlas.get(item).and_then(|c| dd.constants.get(c)) {
+                    Some(c) => [uv[0].fract() * c[0] + c[2], uv[1].fract() * c[1] + c[3]],
+                    None => uv,
+                };
+                rset.push((reg, [uv[0], uv[1], 0.0, 1.0]));
+                println!("vertex {vn}: item {item} -> tf{tf} r{reg} uv [{:.4},{:.4}]", uv[0], uv[1]);
+            }
+            uv_from_vertex = true;
+        } else {
+            println!("--vertex: draw {di} has no resolved shader");
+        }
+    }
+
     let mut sum = [0.0f64; 3];
     let mut cnt = 0;
     let mut unsupported = std::collections::BTreeSet::new();
@@ -525,6 +563,9 @@ fn main() {
                 mm.r[*r as usize] = *val;
             }
             for s in &samplers {
+                if uv_from_vertex {
+                    break; // the coordinates came from the draw's own vertex, not the grid
+                }
                 if let Some(r) = s.direct {
                     mm.r[r as usize][0] = u;
                     mm.r[r as usize][1] = v;
@@ -540,7 +581,7 @@ fn main() {
             let _ = mm.a0;
             unsupported.extend(mm.unsupported.iter().cloned());
             if dump {
-                println!("({u:.3},{v:.3}) -> {:.3?}{}", mm.out, if mm.killed { " (killed)" } else { "" });
+                println!("({u:.3},{v:.3}) -> {:.6?}{}", mm.out, if mm.killed { " (killed)" } else { "" });
             }
             for k in 0..3 {
                 sum[k] += mm.out[k] as f64;

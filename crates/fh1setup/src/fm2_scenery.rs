@@ -1550,7 +1550,14 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
         };
         let id = if let Some((w, h, rgba)) = px {
             let id = 0xFFFF_2000 + baked_new.len() as u32;
-            if let Ok(c) = crate::textures::rgba_to_dds(rgba, w as u32, h as u32) {
+            // `FM2_ROAD_NOMIP=1` (plan v10 P2, MODLOG 326): write the per-texel road bake with level 0 only, so the
+            // sampler cannot choose a coarser mip. This is P2's named no-mip test on the road texture.
+            let conv = if std::env::var("FM2_ROAD_NOMIP").is_ok_and(|v| v == "1") {
+                crate::textures::rgba_to_dds_level0(rgba, w as u32, h as u32)
+            } else {
+                crate::textures::rgba_to_dds(rgba, w as u32, h as u32)
+            };
+            if let Ok(c) = conv {
                 let _ = std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds);
             }
             baked_new.push(id);
@@ -1601,7 +1608,12 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 }
                 px.push(255);
             }
-                if let Ok(c) = crate::textures::rgba_to_dds(px, w as u32, h as u32) {
+                let conv = if std::env::var("FM2_ROAD_NOMIP").is_ok_and(|v| v == "1") {
+                    crate::textures::rgba_to_dds_level0(px, w as u32, h as u32)
+                } else {
+                    crate::textures::rgba_to_dds(px, w as u32, h as u32)
+                };
+                if let Ok(c) = conv {
                 let _ = std::fs::write(dir.join("textures").join(format!("{id:08x}.dds")), &c.dds);
             }
             baked_new.push(id);
@@ -2614,6 +2626,26 @@ fn convert_lightmaps(
             let mean = px.chunks_exact(4).map(|p| p[0] as u32).sum::<u32>() as f32 / (px.len() / 4).max(1) as f32;
             let k = if mean < 4.0 { "black" } else if mean < 40.0 { "dark" } else { "lit" };
             *DEBUG_TILES.lock().unwrap().entry(k).or_insert(0usize) += 1;
+        }
+        // `FM2_LM_STATS=1` (diagnostic, MODLOG 309): is a lightmap tile flat because the atlas region it is cut from is
+        // flat, or because the CROP reads the wrong part of a page that does have structure? Prints, per tile, the crop's
+        // mean and spread against the whole source page's, so the two can be told apart without looking at a picture.
+        if std::env::var_os("FM2_LM_STATS").is_some() {
+            let crop_lum: Vec<f32> = px.chunks_exact(4).map(|p| p[0] as f32).collect();
+            let page_lum: Vec<f32> = rgba.chunks_exact(4).map(|p| p[0] as f32).collect();
+            let stats = |v: &[f32]| -> (f32, f32, f32, f32) {
+                let n = v.len().max(1) as f32;
+                let mean = v.iter().sum::<f32>() / n;
+                let var = v.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / n;
+                (mean, var.sqrt(), v.iter().cloned().fold(f32::INFINITY, f32::min), v.iter().cloned().fold(f32::NEG_INFINITY, f32::max))
+            };
+            let (cm, cs, cmin, cmax) = stats(&crop_lum);
+            let (pm, ps, pmin, pmax) = stats(&page_lum);
+            let x0 = texel(0.0, ou, su, *pw);
+            let y0 = texel(0.0, ov, sv, *ph);
+            println!(
+                "[fm2] lm {id:08x} page {page:#x} {pw}x{ph} tile su={su:+.4} sv={sv:+.4} ou={ou:+.4} ov={ov:+.4} -> crop {w}x{h} at ({x0},{y0}) | crop mean {cm:.1} sd {cs:.1} [{cmin:.0}..{cmax:.0}] | page mean {pm:.1} sd {ps:.1} [{pmin:.0}..{pmax:.0}]"
+            );
         }
         // Keep the page's fetch word so the engine picks gamma the same way (BC4 → linear).
         let word = ents.get(page as usize).map_or(0x0100, |c| c.raw_format);

@@ -72,6 +72,37 @@ pub fn import(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>,
             }
         }
     }
+    // Plan v10 P3 (MODLOG 328): find the sky material block. The draw sets registers < 100; the shader's named
+    // constants (c_skyMultiplier at 188, c_globalSpecularLevel at 104) live at >= 100 and come from the material
+    // record, which this importer has never read. Locate the block by searching `.data` for one of the draw's own
+    // non-zero constants and print the float4s around it, so the >= 100 registers can be read off.
+    if std::env::var_os("FM2_SKY_MAT").is_some() {
+        let dt = crate::fm2_uv::section(&raw, b".data");
+        let uvs = crate::fm2_uv::resolve(&raw, &model, &|_| crate::fm2_uv::ItemKind::Other);
+        if let Some(data) = dt.and_then(|dt| raw.get(0x190 + dt..)) {
+            for (i, u) in uvs.iter().enumerate() {
+                let Some(ps) = &u.ps else { continue };
+                let Some((k, v)) = ps.consts.iter().find(|(_, v)| v.iter().any(|x| *x != 0.0)) else { continue };
+                let mut pat = Vec::with_capacity(16);
+                for x in v.iter() {
+                    pat.extend_from_slice(&x.to_be_bytes());
+                }
+                let at = (0..data.len().saturating_sub(16)).step_by(4).find(|&o| data[o..o + 16] == pat[..]);
+                let Some(o) = at else { continue };
+                let vec_at = |p: usize| -> Option<[f32; 4]> {
+                    let w = |j: usize| data.get(p + 4 * j..p + 4 * j + 4).map(|b| f32::from_be_bytes(b.try_into().unwrap()));
+                    Some([w(0)?, w(1)?, w(2)?, w(3)?])
+                };
+                // `fm2_uv::spec_exponent` reads consecutive registers at a 0x14 (20-byte) stride, so the block stores
+                // one extra word per register. Print 32 registers from `k - 8` at that stride, labelled.
+                let base = o.saturating_sub(8 * 0x14);
+                let row: Vec<String> = (0..32)
+                    .filter_map(|n| vec_at(base + n * 0x14).map(|v| format!("c{}={:.2?}", (*k as i64 - 8 + n as i64).max(0), v)))
+                    .collect();
+                println!("[fm2 sky] draw {i}: block at {o:#x} (match c{k}) -- {}", row.join(" "));
+            }
+        }
+    }
     let mut out = Vec::new();
     for d in &model.draws {
         let (uv0, _) = d.uv_offsets();

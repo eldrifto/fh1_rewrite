@@ -25,6 +25,18 @@ rayon = "1"
 # Disc images handed over inside a .zip (zip64, deflate/deflate64/lzma as 7-Zip and Windows write them).
 zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs", "deflate64", "lzma"] }
 
+[dev-dependencies]
+# `examples/fm2_ps_gpu` runs a translated FM2 pixel shader on the real GPU, so the WGSL translation can be checked
+# against the CPU interpreter (`examples/fm2_ps_run`) pixel for pixel. Same wgpu as bevy uses (Cargo.lock: 29.0.4),
+# so it runs on the vendored wgpu-core patch like the game does.
+wgpu = "29"
+# Same check, translation side: `--validate-all` parses every translated module with naga, which is what the GPU
+# driver does, so a shader the translator gets wrong is found without a window.
+naga = { version = "29", features = ["wgsl-in"] }
+# The FM2 final-combine parameters (`post::Fm2Post::from_xml`), so the probe reads the track's tone curve through the
+# same struct the renderer uses instead of parsing TrackSettings.xml a second time.
+fh1-remaster = { path = "../fh1-remaster" }
+
 [features]
 # Importers for other Forza games the user owns: `fh1setup import-fh2` / `import-fm4` / `import-fm3`. Default features since 2026-10-08
 # (user: every build carries them); `--no-default-features` builds the FH1-only tool.

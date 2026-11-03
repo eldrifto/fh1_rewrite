@@ -226,7 +226,12 @@ fn record(shader: &str, ps: &[[f32; 4]], textures: &[Value], fam: Option<&Family
         }
     }
     let has = |r: &Record, role: usize| r.tex[role] != u32::MAX;
-    let lm_slot = fam.roles.iter().find(|(_, &role)| role == LM).map(|(&slot, _)| slot as usize);
+    // Deterministic slot choice: `roles` is a HashMap and its iteration order is randomised per process, so
+    // `.iter().find(...)` picked a DIFFERENT lightmap slot between runs whenever a family bound more than one.
+    // That made the whole remaster step non-reproducible: re-running `--only remaster --force` on the same input
+    // changed Mugello by 0.79 and Sunset Infield by 2.95 mean (MODLOG 304). Lowest slot wins, always.
+    let lm_slot = fam.roles.iter().filter(|(_, &role)| role == LM).map(|(&slot, _)| slot as usize).min();
+    let _ = has;
     if lm_slot.is_some_and(|s| textures.get(s).is_none_or(Value::is_null)) {
         r.flags |= FLAG_INSTANCE_LM;
     }

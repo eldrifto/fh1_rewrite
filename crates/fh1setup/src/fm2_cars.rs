@@ -46,17 +46,13 @@ pub(crate) fn cars(disc: &Path, private: &Path, out: &Path) -> Result<()> {
         let s = &p[p.find("CLS_")? + 4..];
         Some(s[..s.find('_')?].to_owned())
     };
-    let display_pi = |pi: f64| -> i64 {
-        let (mut lo, mut lo_d) = (0.0, 100.0);
-        for c in &classes {
-            let (hi, hi_d) = (c["MaxPerformanceIndex"].as_f64().unwrap_or(1.0), c["MaxDisplayPerformanceIndex"].as_f64().unwrap_or(999.0));
-            if pi <= hi {
-                return (lo_d + (pi - lo) / (hi - lo).max(1e-9) * (hi_d - lo_d)).round() as i64;
-            }
-            (lo, lo_d) = (hi, hi_d);
-        }
-        lo_d as i64
-    };
+    let bands: crate::cars::PiBands = classes
+        .iter()
+        .map(|c| {
+            (c["MaxPerformanceIndex"].as_f64().unwrap_or(1.0), c["MaxDisplayPerformanceIndex"].as_f64().unwrap_or(999.0))
+        })
+        .collect();
+    let display_pi = |pi: f64| crate::cars::display_pi(&bands, pi);
     let sound = crate::fh2::Donors::load(private);
     let donors = WheelDonor::load_all(private);
     anyhow::ensure!(!donors.is_empty(), "no FH1 car with a model + physics.json to borrow wheels from (run fh1setup on the FH1 disc first)");
@@ -81,6 +77,9 @@ pub(crate) fn cars(disc: &Path, private: &Path, out: &Path) -> Result<()> {
                     Some(3) => "AWD",
                     _ => "",
                 };
+                let letter = car["ClassID"].as_i64().and_then(&class_letter);
+                // FM2's R4/R3/R2/R1 badges show the class with no PI number (in-game, MODLOG 252).
+                let shows_pi = letter.as_deref().is_none_or(crate::cars::class_shows_pi);
                 index.push(json!({
                     "id": car["Id"],
                     "media_name": media,
@@ -88,8 +87,8 @@ pub(crate) fn cars(disc: &Path, private: &Path, out: &Path) -> Result<()> {
                     "model": model,
                     "maker": maker,
                     "year": car["Year"],
-                    "class": car["ClassID"].as_i64().and_then(&class_letter),
-                    "pi": car["PerformanceIndex"].as_f64().map(display_pi),
+                    "class": letter,
+                    "pi": car["PerformanceIndex"].as_f64().filter(|_| shows_pi).map(display_pi),
                     "drive": drive,
                     "selectable": true,
                     "has_model": true,
@@ -429,6 +428,18 @@ fn build_car(db: &Connection, disc: &Path, donors: &[WheelDonor], car: &Row, med
         "cockpit_eye": cockpit_eye,
     });
     std::fs::write(dir.join("model.json"), serde_json::to_vec_pretty(&model)?)?;
+
+    // ---- fx/paint_settings.xml: the game's own body shader settings for this paint type.
+    // FM2 keeps them in `Media/cars/ShaderSettings/<PaintType>.xml` -- `Metallic.xml` for a metallic colour,
+    // `Normal.xml` otherwise -- and the game's chain puts that file BEFORE the car's own `fx/ShaderSettings.xml`.
+    // Without it the engine read the FH1 install's shared Normal.xml for an FM2 car, so `SpecularAmount2` /
+    // `SpecularPower2` / `SpecularColor` (the paint's lobes) were never the game's (MODLOG 317, 335).
+    let paint_type = if metallic { "Metallic" } else { "Normal" };
+    if let Ok(xml) = std::fs::read(disc.join("media/cars/ShaderSettings").join(format!("{paint_type}.xml"))) {
+        let fx = dir.join("fx");
+        std::fs::create_dir_all(&fx)?;
+        std::fs::write(fx.join("paint_settings.xml"), xml)?;
+    }
 
     // ---- physics.json: the donor's, with everything FM2 has a table for replaced.
     let mut p = dphys;
