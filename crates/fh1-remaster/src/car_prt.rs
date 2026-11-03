@@ -43,7 +43,13 @@ pub fn gain() -> f32 {
 /// ShadowColor (green, `FH1_RM_FM2_SHADOW_COL`, set by the engine) raised to the display gamma, because the game multiplies display-coded colours.
 /// `FH1_FM2_CAR_SHADE=0` leaves it out; `FH1_FM2_CAR_SHADE_GAMMA` (default 2.2) is the exponent.
 pub fn shade() -> f32 {
-    if gain() <= 0.0 || std::env::var("FH1_FM2_CAR_SHADE").is_ok_and(|v| v == "0") {
+    // Plan v9 Phase G (MODLOG 314): this used to require `gain() > 0`, so the game's shadow rule could not run
+    // unless the additive PRT light (whose level is INFERRED, not read) was also on. They are independent now:
+    // `FH1_FM2_CAR_SHADE=0` turns the shadow rule off and it applies whatever `FH1_FM2_CAR_PRT` says.
+    //
+    // Still FM2-only, like `gain()`: the rule needs the track's own `<SHLighting>`, which only an imported FM2 map
+    // provides, so the other games keep the engine's car lighting exactly as before.
+    if TRACK_SH.get().is_none() || std::env::var("FH1_FM2_CAR_SHADE").is_ok_and(|v| v == "0") {
         return 0.0;
     }
     let sc: f32 = std::env::var("FH1_RM_FM2_SHADOW_COL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.4);
@@ -104,7 +110,9 @@ fn attach(
     mut lib: ResMut<PrtLibrary>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    if gain() <= 0.0 {
+    // Run when either mechanism needs the transfer numbers: the additive PRT light (`gain`) or the game's shadow
+    // rule (`shade`), which is independent of it (MODLOG 314).
+    if gain() <= 0.0 && shade() <= 0.0 {
         return;
     }
     for (e, name, mesh) in &new {

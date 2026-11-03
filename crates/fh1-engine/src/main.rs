@@ -537,7 +537,10 @@ fn main() -> AppExit {
         .add_systems(Update, objects::teleport.before(scenery::stream))
         .init_resource::<smash::PropCollision>()
         .add_systems(Update, (smash::update.after(scenery::stream), smash::test_drive))
-        .add_systems(Update, (autotest, shot_probe));
+        .add_systems(Update, (autotest, shot_probe))
+        .init_resource::<ShotFrozen>()
+        .add_systems(PostUpdate, lock_shot_camera)
+        .add_systems(Last, pin_frame_count.after(bevy::diagnostic::update_frame_count));
     // Mesh slabs (2026-10-08, 47's analysis of log 133825: the streaming hitches are bevy's allocate_and_free_meshes, which
     // regrows a slab by x1.5 from 1 MiB = a new buffer + a full copy each time the resident scenery set grows): start at
     // FH1_MESH_SLAB_MB (16; global, so every vertex layout's slab starts that big: watch vram_mb) and double.
@@ -938,22 +941,146 @@ fn update_drop_shadow(fixed: Res<Time<Fixed>>, hist: Res<perf::interp::WheelHist
 
 /// Automated check: `FH1_SHOT=<png>` saves a screenshot after `FH1_SHOT_AT` seconds (default 4)
 /// and quits shortly after. `FH1_AUTODRIVE=1` holds full throttle with a little steering.
-fn autotest(mut commands: Commands, time: Res<Time<Real>>, mut done: Local<u8>, mut exit: MessageWriter<AppExit>) {
+///
+/// **Readiness gate (plan v8 P0).** `FH1_SHOT_AT` alone is not reproducible: two runs of the same command
+/// differ (measured 2026-11-02: mean |difference| 7.4/255 between two runs, against 0.18 for two Xenia captures
+/// of the same pose). Two separate causes, both fixed here:
+/// 1. **Readiness** — mip chains are built on worker threads (`mipgen.rs`) and scenery streams in, so a shot at a
+///    fixed wall-clock time may catch a texture with no chain in one run and with one in the next. The shot waits
+///    for (a) no mip chain still building and (b) the image+mesh counts to stop changing for `FH1_SHOT_STABLE`.
+/// 2. **Physics state** — the car's ride height differed by 2 pixels between runs, because the number of fixed
+///    steps simulated by a given wall-clock time depends on the machine's frame rate. The simulation is therefore
+///    **paused at an exact step count** (`FH1_SHOT_AT` x `PHYSICS_HZ`), so the state is a function of the step
+///    count alone, then the shot is taken.
+/// Set `FH1_SHOT_READY=0` for the old behaviour (time only).
+fn autotest(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    fixed: Res<Time<Fixed>>,
+    mut virt: ResMut<Time<Virtual>>,
+    mut done: Local<u8>,
+    mut ready_at: Local<Option<f32>>,
+    mut stable: Local<(usize, u32)>,
+    mut frozen_at: Local<Option<u64>>,
+    mut settled: Local<u32>,
+    jobs: Option<Res<mipgen::MipJobs>>,
+    images: Res<Assets<Image>>,
+    meshes: Res<Assets<Mesh>>,
+    mut exit: MessageWriter<AppExit>,
+) {
     let Some(path) = std::env::var_os("FH1_SHOT") else { return };
     let at: f32 = std::env::var("FH1_SHOT_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(4.0);
     let t = time.elapsed_secs();
-    if *done == 0 && t > at {
+    if *done == 0 {
+        if std::env::var("FH1_SHOT_READY").map_or(true, |v| v != "0") {
+            // (2) Simulate to an exact step, then stop. The shot can then never depend on the frame rate.
+            let target = (at as f64 * PHYSICS_HZ).round() as u64;
+            let steps = (fixed.elapsed_secs_f64() * PHYSICS_HZ).round() as u64;
+            if frozen_at.is_none() {
+                if steps < target {
+                    return;
+                }
+                virt.pause();
+                *frozen_at = Some(steps);
+                commands.insert_resource(ShotFrozen(true));
+                bevy::log::info!("FH1_SHOT: simulation paused at fixed step {steps} (target {target}); waiting for assets");
+            }
+        } else if t <= at {
+            return;
+        }
+        if std::env::var("FH1_SHOT_READY").map_or(true, |v| v != "0") {
+            // The camera spring converges only after a number of frames at the frozen step (camera.rs), so the capture
+            // must not depend on how quickly the assets happened to settle: require a minimum since the freeze.
+            *settled = settled.saturating_add(1);
+            let since_freeze: u32 = std::env::var("FH1_SHOT_SETTLE").ok().and_then(|s| s.parse().ok()).unwrap_or(150);
+            if *settled < since_freeze {
+                return;
+            }
+            // (a) every mip chain has landed.
+            let mips_busy = jobs.as_ref().is_some_and(|j| j.pending() > 0);
+            // (b) nothing new has been added for `stable_frames` frames.
+            let count = images.len() + meshes.len();
+            let frames = if stable.0 == count { stable.1 + 1 } else { 0 };
+            *stable = (count, frames);
+            let need: u32 = std::env::var("FH1_SHOT_STABLE").ok().and_then(|s| s.parse().ok()).unwrap_or(90);
+            // A capture must never hang an automated run: past `FH1_SHOT_MAX` seconds it fires regardless and says so.
+            let max: f32 = std::env::var("FH1_SHOT_MAX").ok().and_then(|s| s.parse().ok()).unwrap_or(180.0);
+            if (mips_busy || frames < need) && t < max {
+                return;
+            }
+            if mips_busy || frames < need {
+                bevy::log::warn!("FH1_SHOT: readiness gate not met at {t:.1}s (mips building {mips_busy}, {frames}/{need} stable frames); taking the shot anyway");
+            }
+        }
         commands.spawn(Screenshot::primary_window()).observe(save_to_disk(PathBuf::from(path)));
+        *ready_at = Some(t);
         *done = 1;
-    } else if *done == 1 && t > at + 0.1 {
+    } else if *done == 1 && t > ready_at.unwrap_or(at) + 0.1 {
+
         // FH1_SHOT2=<png>: a second frame ~0.1 s later in the same run (flicker / z-fight checks).
         if let Some(p2) = std::env::var_os("FH1_SHOT2") {
             commands.spawn(Screenshot::primary_window()).observe(save_to_disk(PathBuf::from(p2)));
         }
         *done = 2;
-    } else if *done == 2 && t > at + 1.5 {
+    } else if *done == 2 && t > ready_at.unwrap_or(at) + 1.5 {
         exit.write(AppExit::Success);
         *done = 3;
+    }
+}
+
+
+/// Deterministic capture (plan v8 P0), part 3: `globals.frame_count` feeds `interleaved_gradient_noise`, which rotates
+/// the shadow-sampling (PCF) noise pattern every frame. Two otherwise identical runs therefore land on a different
+/// dither pattern and differ by a uniform speckle (measured 0.74-1.06/255), even with the same simulation state.
+/// Pinning the counter makes the pattern constant. Only under `FH1_SHOT`; nothing else sees the change.
+fn pin_frame_count(mut frame: ResMut<bevy::diagnostic::FrameCount>) {
+    if std::env::var_os("FH1_SHOT").is_some() {
+        frame.0 = 0;
+    }
+}
+
+/// Set once the capture has frozen the simulation (`autotest`), so systems that must hold still for the shot can check
+/// one explicit flag instead of inferring it from the clock.
+#[derive(Resource, Default)]
+pub struct ShotFrozen(pub bool);
+
+/// Deterministic capture (plan v8 P0), final piece. The chase camera's spring settles to a value that still depends on
+/// the frame cadence by a few millimetres, and a millimetre moves the whole frame: the road texture is high frequency,
+/// so two runs 5 mm apart differ by ~1.5/255 per pixel. Once the simulation is frozen for a shot, the camera is
+/// therefore locked to a recorded transform. The first run writes `screenshots/pose_<track>.txt`; every later run reads
+/// it, so every capture of that track shares one camera exactly. Only under `FH1_SHOT`, only while paused, so it can
+/// never affect play.
+fn lock_shot_camera(track: Res<Track>, frozen: Res<ShotFrozen>, mut cam: Query<&mut Transform, With<fh1_render::post::FxPostCamera>>) {
+    if std::env::var_os("FH1_SHOT").is_none() || !frozen.0 {
+        return;
+    }
+    let Ok(mut t) = cam.single_mut() else { return };
+    let dir = std::path::Path::new("screenshots");
+    let _ = std::fs::create_dir_all(dir);
+    let path = dir.join(format!("pose_{}.txt", track.id.replace(['/', '\\'], "_")));
+    let parse = |s: &str| -> Option<(Vec3, Quat)> {
+        let v: Vec<f32> = s
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|x| !x.is_empty())
+            .filter_map(|x| x.parse().ok())
+            .collect();
+        (v.len() >= 7).then(|| (Vec3::new(v[0], v[1], v[2]), Quat::from_xyzw(v[3], v[4], v[5], v[6])))
+    };
+    match std::fs::read_to_string(&path).ok().and_then(|s| parse(&s)) {
+        Some((p, r)) => {
+            t.translation = p;
+            t.rotation = r;
+        }
+        None => {
+            let _ = std::fs::write(
+                &path,
+                format!(
+                    "{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6}",
+                    t.translation.x, t.translation.y, t.translation.z, t.rotation.x, t.rotation.y, t.rotation.z, t.rotation.w
+                ),
+            );
+            bevy::log::info!("FH1_SHOT: recorded camera pose {} (later captures of this track lock to it)", path.display());
+        }
     }
 }
 
@@ -972,6 +1099,17 @@ fn shot_probe(time: Res<Time<Real>>, track: Res<Track>, sky: Option<Res<fm2_sky:
     // The main 3D camera: the active one with the lowest order.
     let Some((cam, gt)) = cams.iter().filter(|(c, _)| c.is_active).min_by_key(|(c, _)| c.order) else { return };
     let Some(size) = cam.logical_viewport_size() else { return };
+    // Full-precision pose (plan v8 P0): a run-to-run difference of a thousandth here moves the whole frame, so the
+    // determinism check needs more than the 3 decimals printed for the sun.
+    {
+        let p = gt.translation();
+        let r = gt.rotation();
+        let f = gt.forward();
+        info!(
+            "shot pose: cam [{:.6},{:.6},{:.6}] rot [{:.6},{:.6},{:.6},{:.6}] fwd [{:.6},{:.6},{:.6}]",
+            p.x, p.y, p.z, r.x, r.y, r.z, r.w, f.x, f.y, f.z
+        );
+    }
     // The sun disc and the glow card's centre on the 1280 x 720 picture (the sky dome sits on the camera), with the camera's forward vector.
     if let Some(sky) = sky.as_ref() {
         let pos = gt.translation();

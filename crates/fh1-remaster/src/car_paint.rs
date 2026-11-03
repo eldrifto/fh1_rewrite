@@ -41,7 +41,9 @@ pub(crate) fn sun_match_on() -> bool {
 
 /// The paint WGSL with the build-time switches applied.
 pub(crate) fn wgsl() -> String {
+    let sh = std::env::var("FH1_RM_PAINT_SPEC_SH").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.3183);
     WGSL.replace("const SUN_MATCH: bool = true;", &format!("const SUN_MATCH: bool = {};", sun_match_on()))
+        .replace("const RM_PAINT_SPEC_SH: f32 = 0.3183;", &format!("const RM_PAINT_SPEC_SH: f32 = {sh:.5};"))
 }
 
 /// Paint parameters on top of the StandardMaterial base (whose base colour must be white, its texture the atlas).
@@ -63,6 +65,17 @@ pub struct CarPaint {
     pub prt: f32,
     /// With `prt`: the multiplier on pixels the sun does not reach (car_prt.rs `shade`; 0 = none).
     pub shade: f32,
+    /// The game's own hemisphere colours **before** the inferred fill scale (`TrackSettings` HLTopColour /
+    /// HLBottomColour). The body shader's specular lobes multiply the SH term directly (MODLOG 331), so a
+    /// game-sourced lobe must use these rather than the scaled `fill_top` / `fill_bottom`.
+    pub fill_raw_top: LinearRgba,
+    pub fill_raw_bottom: LinearRgba,
+    /// The game's second specular lobe (`body`: `SpecularAmount2`, `SpecularPower2`); `x` = amount, `y` = power.
+    /// Zero unless `FH1_RM_PAINT_SPEC2=1`, so it cannot change anything before it has been measured.
+    pub spec2: Vec3,
+    /// The game's first specular lobe (ody: SpecularAmount, SpecularPower) -- x = amount, y = power.
+    /// Zero unless the game-specular mode is on.
+    pub spec1: Vec4,
     /// The track's own car cube map (FM2 circuits), the game's coded colour (the shader squares the fetch); `None` = no reflection.
     #[texture(51, dimension = "cube")]
     #[sampler(52)]
@@ -142,18 +155,25 @@ pub struct CarPaintUniform {
     pub fill_bottom: Vec4,
     /// x gain of the per-vertex lit colour (0 = off).
     pub prt: Vec4,
+    /// The game's own hemisphere colours, before the inferred fill scale (MODLOG 331).
+    pub fill_raw_top: Vec4,
+    pub fill_raw_bottom: Vec4,
+    /// x = the second specular lobe's amount, y = its power, z = SpecularColor (0 = none).
+    pub spec: Vec4,
+    /// x = the first specular lobe's amount, y = its power.
+    pub spec1: Vec4,
 }
 
 impl Default for CarPaintUniform {
     fn default() -> Self {
-        Self { colour: Vec4::ZERO, params: Vec4::ZERO, fill_top: Vec4::ZERO, fill_bottom: Vec4::ZERO, prt: Vec4::ZERO }
+        Self { colour: Vec4::ZERO, params: Vec4::ZERO, fill_top: Vec4::ZERO, fill_bottom: Vec4::ZERO, prt: Vec4::ZERO, fill_raw_top: Vec4::ZERO, fill_raw_bottom: Vec4::ZERO, spec: Vec4::ZERO, spec1: Vec4::ZERO }
     }
 }
 
 impl From<&CarPaint> for CarPaintUniform {
     fn from(p: &CarPaint) -> Self {
         let strength = if p.cube.is_some() { crate::light::env_f32("FH1_FM2_CAR_REFL", 1.0) } else { 0.0 };
-        Self { colour: p.colour.to_vec4(), params: Vec4::new(p.flake, p.flake_scale, strength, crate::light::env_f32("FH1_FM2_CUBE_FLIP", 0.0)), fill_top: p.fill_top.to_vec4(), fill_bottom: p.fill_bottom.to_vec4(), prt: Vec4::new(p.prt, p.shade, crate::light::env_f32("FH1_FM2_CUBE_MUL", if p.prt > 0.0 { 12.0 } else { 0.0 }), 0.0) }
+        Self { colour: p.colour.to_vec4(), params: Vec4::new(p.flake, p.flake_scale, strength, crate::light::env_f32("FH1_FM2_CUBE_FLIP", 0.0)), fill_top: p.fill_top.to_vec4(), fill_bottom: p.fill_bottom.to_vec4(), prt: Vec4::new(p.prt, p.shade, crate::light::env_f32("FH1_FM2_CUBE_MUL", if p.prt > 0.0 { 12.0 } else { 0.0 }), 0.0), fill_raw_top: p.fill_raw_top.to_vec4(), fill_raw_bottom: p.fill_raw_bottom.to_vec4(), spec: Vec4::new(p.spec2.x, p.spec2.y, p.spec2.z, 0.0), spec1: p.spec1 }
     }
 }
 
@@ -176,10 +196,14 @@ pub(crate) const WGSL: &str = r#"
     mesh_bindings::mesh,
 }
 
-struct CarPaint { colour: vec4<f32>, params: vec4<f32>, fill_top: vec4<f32>, fill_bottom: vec4<f32>, prt: vec4<f32> }
+struct CarPaint { colour: vec4<f32>, params: vec4<f32>, fill_top: vec4<f32>, fill_bottom: vec4<f32>, prt: vec4<f32>, fill_raw_top: vec4<f32>, fill_raw_bottom: vec4<f32>, spec: vec4<f32>, spec1: vec4<f32> }
 
 // Car sun removal matched to Bevy's shadowing (module doc; replaced at registration from FH1_RM_PAINT_SUN_MATCH).
 const SUN_MATCH: bool = true;
+
+// The 1/pi the vertex transfer numbers carry (car_prt.rs SCALE: "transfer / pi"); `FH1_RM_PAINT_SPEC_SH` overrides.
+const RM_PAINT_SPEC_SH: f32 = 0.3183;
+
 
 #ifdef BINDLESS
 struct CarPaintIndices { material: u32, cube: u32, cube_sampler: u32 }
@@ -225,6 +249,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let prt_lit = vec3<f32>(1.0);
 #endif
     pbr_input.material.base_color = vec4<f32>(mix(paint.colour.rgb * select(vec3<f32>(1.0), prt_lit, prt_on), atlas.rgb, decal), 1.0);
+    // `FH1_RM_PAINT_GAME_DIFFUSE` (MODLOG 336): the game's body shader *is* the SH lighting -- its diffuse is the SH
+    // term, not Bevy's ambient/sun. `paint.spec1.z` is the flag and `.w` the scale on the SH term. With the flag on,
+    // Bevy's diffuse is removed here and the SH term is added below, so the two are not summed.
+    var game_albedo = vec3<f32>(0.0);
+    if paint.spec1.z > 0.5 {
+        game_albedo = pbr_input.material.base_color.rgb;
+        pbr_input.material.base_color = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
     // The diffuse light replaces Bevy's: the paint is lit by the vertex colour and Bevy only adds the specular (black albedo).
     let prt_diffuse = pbr_input.material.base_color.rgb * paint.prt.x;
     if prt_on {
@@ -262,7 +294,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let coded4 = textureSample(car_cube, car_cube_sampler, d);
 #ifdef VERTEX_UVS_B
     // The body's environment visibility from its transfer numbers (the VS `shEnv` dot product), with the light-on car.
-    let env_vis = select(1.0, in.uv_b.y, prt_on);
+    // Only when the FM2 car rule is active (`prt_on`, or the game's shadow rule via `prt.y`, both FM2-only): other
+    // games' cars have their own UV_1, which is not a visibility and must not be read as one (MODLOG 314).
+    let env_vis = select(1.0, in.uv_b.y, prt_on || paint.prt.y > 0.0);
 #else
     let env_vis = 1.0;
 #endif
@@ -314,10 +348,40 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         let kept = select(vec3<f32>(0.0), out.color.rgb * keep, SUN_MATCH);
         out.color = vec4<f32>(max(out.color.rgb - removed, max(kept, vec3<f32>(0.0))), out.color.a);
     }
-    // The game's shadow term on the whole lit car (car_prt.rs `shade`): lerp(shade, 1, sun visibility). The visibility is the body's own self-shadowing
-    // from its transfer numbers (UV_1.x: the sun reaches the vertex, in the sun direction of the car's light), 0 on sides facing away from the sun.
+    // The game's second specular lobe (`body`: SpecularAmount2 / SpecularPower2), as the body pixel shader computes it
+    // (MODLOG 331): `SpecularColor . SpecularAmount2 . pow(sat(N.H), SpecularPower2) . SH`, where SH is the game's own
+    // hemisphere (`fill_raw_*`, before the inferred fill scale) evaluated the same way the SH term is -- see the
+    // instructions `mul r0.yz, r3.zzzz, r6.xyy` / `mulsc r0.x, c181.x, r0.z` / `mul r6.xyz, r5.xxxx, c180.yzxx`.
+    if paint.spec.x > 0.0 || paint.spec1.x > 0.0 {
+        let n = normalize(pbr_input.world_normal);
+        let hemi_raw = mix(paint.fill_raw_bottom.rgb, paint.fill_raw_top.rgb, clamp(n.y * 0.5 + 0.5, 0.0, 1.0));
+        // `HLTopColour` / `HLBottomColour` are **radiance**, while the body shader's `r3.z` is the SH term the vertex
+        // transfer numbers produce -- and `prt.bin`'s numbers are "transfer / pi" (car_prt.rs `SCALE`), so the same
+        // quantity carries a 1/pi. `FH1_RM_PAINT_SPEC_SH` scales it for the test (default 1/pi), MODLOG 335.
+        let sh = dot(hemi_raw, vec3<f32>(0.2126, 0.7152, 0.0722)) * RM_PAINT_SPEC_SH;
+        var sheen = vec3<f32>(0.0);
+        for (var i = 0u; i < view_bindings::lights.n_directional_lights; i = i + 1u) {
+            let light = &view_bindings::lights.directional_lights[i];
+            let h = normalize((*light).direction_to_light + v);
+            let nh = clamp(dot(n, h), 0.0, 1.0);
+            // c190/c191: SpecularAmount / SpecularPower (Metallic.xml sets the amount to 0, so a metallic paint has none).
+            sheen += pow(nh, max(paint.spec1.y, 1.0)) * paint.spec1.x;
+            // c181/c182: SpecularAmount2 / SpecularPower2 -- the broad sheen a metallic paint carries.
+            sheen += pow(nh, max(paint.spec.y, 1.0)) * paint.spec.x;
+        }
+        out.color = vec4<f32>(out.color.rgb + sheen * sh * vec3<f32>(paint.spec.z), out.color.a);
+    }
+    if paint.spec1.z > 0.5 {
+        // The game's diffuse: albedo x SH (the same term the lobes multiply), scaled by `spec1.w` for the experiment.
+        let n2 = normalize(pbr_input.world_normal);
+        let hemi2 = mix(paint.fill_raw_bottom.rgb, paint.fill_raw_top.rgb, clamp(n2.y * 0.5 + 0.5, 0.0, 1.0));
+        out.color = vec4<f32>(out.color.rgb + game_albedo * hemi2 * paint.spec1.w, out.color.a);
+    }
+    // The game's shadow term on the whole lit car (car_prt.rs `shade`): lerp(shade, 1, sun visibility). The visibility
+    // is the body's own self-shadowing from its transfer numbers (UV_1.x), 0 on sides facing away from the sun.
+    // Independent of the additive PRT light (MODLOG 314).
 #ifdef VERTEX_UVS_B
-    if prt_on && paint.prt.y > 0.0 {
+    if paint.prt.y > 0.0 {
         out.color = vec4<f32>(out.color.rgb * mix(paint.prt.y, 1.0, in.uv_b.x), out.color.a);
     }
 #endif

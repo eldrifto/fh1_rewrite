@@ -228,7 +228,10 @@ fn fill_results(p: &mut Player, data: &UiData, def: &super::RaceDef, rs: &RaceSt
         text(p, total, shown_total);
         match r.class_pi {
             Some((_, v)) => {
-                text(p, pi, v.to_string());
+                // FM2's R4/R3/R2/R1 badges show the class with no PI number (MODLOG 252), and the
+                // importer writes no `pi` for them, which reads as 0. Leave the number empty rather
+                // than printing "0"; the class itself still shows.
+                text(p, pi, if v == 0 { String::new() } else { v.to_string() });
                 p.fire_at("SHOW_CAR_CLASS", row);
             }
             None => {

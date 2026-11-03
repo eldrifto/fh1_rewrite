@@ -26,7 +26,15 @@ impl Plugin for MipGenPlugin {
 /// atlases took 21-28 ms frames while cars and maps loaded). The image draws without mips for the few frames until its
 /// chain lands. FH1_MIPGEN_ASYNC=0 = build in the system, as before.
 #[derive(Resource, Default)]
-struct MipJobs(Vec<(AssetId<Image>, usize, bevy::tasks::Task<(Vec<u8>, u32)>)>);
+pub struct MipJobs(Vec<(AssetId<Image>, usize, bevy::tasks::Task<(Vec<u8>, u32)>)>);
+
+impl MipJobs {
+    /// How many mip chains are still being built. A screenshot taken while this is non-zero may catch a
+    /// texture drawing without its chain, which differs run to run (plan v8 P0: capture determinism).
+    pub fn pending(&self) -> usize {
+        self.0.len()
+    }
+}
 
 fn mipgen_async() -> bool {
     !std::env::var("FH1_MIPGEN_ASYNC").is_ok_and(|v| v == "0")
@@ -47,6 +55,46 @@ fn add_mips(mut events: MessageReader<AssetEvent<Image>>, mut images: ResMut<Ass
     for id in added {
         let Some(image) = images.get(id) else { continue };
         if !wants_mips(image) {
+            // Compressed textures and the game's own DDS arrive WITH their mip chain, so they never reach
+            // `build_chain` below and keep Bevy's default sampler (trilinear, anisotropy 1).
+            //
+            // Plan v9 Phase D tested the obvious hypothesis -- that this is why our road is smoother than the
+            // reference -- by raising anisotropy here: `FH1_ANISO=<n>`, default 1 = OFF. MEASURED AND REJECTED
+            // (MODLOG 298): with 16x the road region got WORSE on average (30.70 -> 34.21 over six tracks) and
+            // its fine-detail energy did not move at all (7.03 -> 7.04 against the reference's 9.51). So the
+            // road's missing detail is not a sampling problem, and this knob stays off by default.
+            let want: u16 = std::env::var("FH1_ANISO").ok().and_then(|v| v.parse().ok()).unwrap_or(1).max(1);
+            // Only genuinely filterable colour formats: anisotropic sampling on a depth, integer or
+            // non-filterable format is a validation error (found the hard way).
+            let filterable = matches!(
+                image.texture_descriptor.format,
+                TextureFormat::Rgba8Unorm
+                    | TextureFormat::Rgba8UnormSrgb
+                    | TextureFormat::Bgra8Unorm
+                    | TextureFormat::Bgra8UnormSrgb
+                    | TextureFormat::Bc1RgbaUnorm
+                    | TextureFormat::Bc1RgbaUnormSrgb
+                    | TextureFormat::Bc2RgbaUnorm
+                    | TextureFormat::Bc2RgbaUnormSrgb
+                    | TextureFormat::Bc3RgbaUnorm
+                    | TextureFormat::Bc3RgbaUnormSrgb
+                    | TextureFormat::Bc4RUnorm
+                    | TextureFormat::Bc5RgUnorm
+                    | TextureFormat::Bc7RgbaUnorm
+                    | TextureFormat::Bc7RgbaUnormSrgb
+            );
+            if want > 1 && filterable && image.texture_descriptor.dimension == TextureDimension::D2 {
+                let mut s = match &image.sampler {
+                    ImageSampler::Descriptor(d) => d.clone(),
+                    _ => ImageSamplerDescriptor::default(),
+                };
+                if s.mag_filter == ImageFilterMode::Linear && s.min_filter == ImageFilterMode::Linear && s.anisotropy_clamp < want {
+                    s.anisotropy_clamp = want;
+                    if let Some(mut image) = images.get_mut(id) {
+                        image.sampler = ImageSampler::Descriptor(s);
+                    }
+                }
+            }
             continue;
         }
         if mipgen_async() {

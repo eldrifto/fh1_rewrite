@@ -339,7 +339,18 @@ pub struct RemasterLamps {
 /// take their colour from Combo_Colors here).
 fn load_settings(assets: &Path, car_dir: &Path) -> ShaderSettings {
     let read = |p: PathBuf| fh1_render::files::read_to_string(&p);
-    ShaderSettings::chain(&[read(assets.join("cars/shared/ShaderSettings/Normal.xml")).as_deref(), read(car_dir.join("fx/ShaderSettings.xml")).as_deref()])
+    // The game's chain is: the shared ShaderSettings for the paint type, then the car's own FX file. An imported FM2
+    // car carries the first as `fx/paint_settings.xml` (the disc's `Media/cars/ShaderSettings/<PaintType>.xml`, written
+    // by the importer), because the shared Normal.xml on disk belongs to the FH1 install and is not an FM2 car's data
+    // (MODLOG 317). Applied after the shared file and before the car's own, which is the game's order.
+    let name = car_dir.file_name().map(|n| n.to_owned());
+    let shared = read(assets.join("cars/shared/ShaderSettings/Normal.xml"));
+    let fm2 = name
+        .map(|n| assets.join("imported/fm2/cars").join(n).join("fx/paint_settings.xml"))
+        .and_then(|p| read(p));
+    let own_paint = read(car_dir.join("fx/paint_settings.xml"));
+    let own_fx = read(car_dir.join("fx/ShaderSettings.xml"));
+    ShaderSettings::chain(&[shared.as_deref(), fm2.as_deref(), own_paint.as_deref(), own_fx.as_deref()])
 }
 
 /// A technique's colour constant (linear: the parser degammes ShaderSettings colours like the game).
@@ -356,6 +367,52 @@ fn paint_scale(settings: &ShaderSettings, technique: &str) -> f32 {
     }
     let t = settings.params.get(technique).or_else(|| settings.params.iter().find(|(k, _)| k.eq_ignore_ascii_case(technique)).map(|(_, v)| v));
     t.and_then(|t| t.get("PaintScale")).map_or(1.0, |v| v[0].clamp(0.0, 2.0))
+}
+
+/// A technique's second specular lobe (`SpecularAmount2`, `SpecularPower2`) and `SpecularColor`'s red channel: the
+/// broad sheen the body pixel shader adds on top of the cube reflection, as `SpecularColor . SpecularAmount2 .
+/// pow(sat(N.H), SpecularPower2) . SH` (read off the game's own pixel shader, MODLOG 331). Metallic.xml's `body`
+/// carries 4.0 at power 5 with colour 2.0; Normal.xml's carries 0/0. **Zero unless `FH1_RM_PAINT_SPEC2` is set and
+/// not "0"**, so the term cannot change anything before it has been measured; the variable may also be a number,
+/// overriding the amount.
+fn specular2(settings: &ShaderSettings, technique: &str) -> bevy::math::Vec3 {
+    let Ok(mode) = std::env::var("FH1_RM_PAINT_SPEC2") else { return bevy::math::Vec3::ZERO };
+    if mode == "0" {
+        return bevy::math::Vec3::ZERO;
+    }
+    let t = settings
+        .params
+        .get(technique)
+        .or_else(|| settings.params.iter().find(|(k, _)| k.eq_ignore_ascii_case(technique)).map(|(_, v)| v));
+    let amount = t.and_then(|t| t.get("SpecularAmount2")).map_or(0.0, |v| v[0]);
+    let power = t.and_then(|t| t.get("SpecularPower2")).map_or(0.0, |v| v[0]);
+    let colour = t.and_then(|t| t.get("SpecularColor")).map_or(1.0, |v| v[0]);
+    let amount = mode.parse::<f32>().unwrap_or(amount);
+    if amount <= 0.0 || power <= 0.0 {
+        bevy::math::Vec3::ZERO
+    } else {
+        bevy::math::Vec3::new(amount, power, colour)
+    }
+}
+
+/// The game's **first** specular lobe (`SpecularAmount`, `SpecularPower`): `x` = amount, `y` = power. Metallic.xml
+/// sets the amount to 0 (a metallic paint's sheen is the second lobe), Normal.xml sets both lobes to 0 (the highlight
+/// is then the cube alone). Zero unless `FH1_RM_PAINT_SPEC2` is set, like [`specular2`].
+fn specular1(settings: &ShaderSettings, technique: &str) -> bevy::math::Vec2 {
+    if std::env::var("FH1_RM_PAINT_SPEC2").map_or(true, |v| v == "0") {
+        return bevy::math::Vec2::ZERO;
+    }
+    let t = settings
+        .params
+        .get(technique)
+        .or_else(|| settings.params.iter().find(|(k, _)| k.eq_ignore_ascii_case(technique)).map(|(_, v)| v));
+    let amount = t.and_then(|t| t.get("SpecularAmount")).map_or(0.0, |v| v[0]);
+    let power = t.and_then(|t| t.get("SpecularPower")).map_or(0.0, |v| v[0]);
+    if amount <= 0.0 || power <= 0.0 {
+        bevy::math::Vec2::ZERO
+    } else {
+        bevy::math::Vec2::new(amount, power)
+    }
 }
 
 /// Glass reflectance from the technique's FresnelIndex / FresnelScalar: the game's head-on reflection is
@@ -426,6 +483,12 @@ impl Plugin for RemasterCarPlugin {
 pub struct CarFill {
     pub top: LinearRgba,
     pub bottom: LinearRgba,
+    /// The same hemisphere **before** the inferred `FH1_RM_CAR_FILL` scale: the game's own `HLTopColour` /
+    /// `HLBottomColour`. The body shader multiplies its specular lobes by the SH term directly (MODLOG 331:
+    /// `mul r0.yz, r3.zzzz, r6.xyy` then `SpecularAmount2 x ...`), so a game-sourced lobe must use this, not the
+    /// scaled pair -- otherwise an INFERRED constant would sit inside a term that claims to be the game's.
+    pub raw_top: LinearRgba,
+    pub raw_bottom: LinearRgba,
 }
 
 /// Fill = TOD HLTopColour / HLBottomColour x IBLAmbientScale x FH1_RM_CAR_FILL x game_unit_scale. The scale stands in for
@@ -450,7 +513,12 @@ fn update_car_fill(tod: Option<Res<fh1_render::lighting::FxTimeOfDay>>, mut fill
     };
     let mut top = c("HLTopColour");
     top.alpha = keep;
-    let want = CarFill { top, bottom: c("HLBottomColour") };
+    // The unscaled pair (see `CarFill::raw_top`): the game's own HLTopColour / HLBottomColour, no inferred scale.
+    let raw = |n: &str| {
+        let v = Vec3::from_array(t.tod.get(n, m));
+        LinearRgba::rgb(v.x, v.y, v.z)
+    };
+    let want = CarFill { top, bottom: c("HLBottomColour"), raw_top: raw("HLTopColour"), raw_bottom: raw("HLBottomColour") };
     let moved = |a: LinearRgba, b: LinearRgba| {
         (a.to_vec3() - b.to_vec3()).abs().max_element() > 0.02 * b.to_vec3().max_element().max(1e-4) || (a.alpha - b.alpha).abs() > 0.01
     };
@@ -461,6 +529,8 @@ fn update_car_fill(tod: Option<Res<fh1_render::lighting::FxTimeOfDay>>, mut fill
     for (_, p) in paints.iter_mut() {
         p.extension.fill_top = want.top;
         p.extension.fill_bottom = want.bottom;
+        p.extension.fill_raw_top = want.raw_top;
+        p.extension.fill_raw_bottom = want.raw_bottom;
     }
 }
 
@@ -554,6 +624,14 @@ fn restyle_car_materials(
                         base.reflectance = env_f32("FH1_RM_PAINT_REFLECTANCE", 0.5);
                         base.clearcoat = env_f32("FH1_RM_PAINT_CLEARCOAT", 1.0);
                         base.clearcoat_perceptual_roughness = 0.03;
+                        // `FH1_RM_PAINT_GAME_SPEC=1` (MODLOG 333): the game's body shader has no PBR specular -- its paint's
+                        // highlights are the two game lobes plus the cube -- so driving the lobes and leaving Bevy's own
+                        // specular on double-counts it (MODLOG 332 measured the double count). This turns Bevy's off.
+                        if std::env::var("FH1_RM_PAINT_GAME_SPEC").is_ok_and(|v| v == "1") {
+                            base.metallic = 0.0;
+                            base.reflectance = 0.0;
+                            base.clearcoat = 0.0;
+                        }
                         // Paint albedo scale. c3 (2026-10-06) measured the raw Combo_Colors colour ~0.6 EV too bright under
                         // the TrackSettings-shadow-azimuth sun; with the TOD sun + frame EV (2026-10-07) the raw colour
                         // matches faithful on sunlit panels (roof 0.82x, hood 0.90x vs 0.64x / 0.78x at 0.6).
@@ -580,6 +658,16 @@ fn restyle_car_materials(
                         cube: crate::car_paint::cube(),
                         prt: crate::car_prt::gain(),
                         shade: crate::car_prt::shade(),
+                        fill_raw_top: fill.raw_top,
+                        fill_raw_bottom: fill.raw_bottom,
+                        spec2: if matte { bevy::math::Vec3::ZERO } else { specular2(&settings, &name.0) },
+                        spec1: {
+                            let l1 = if matte { bevy::math::Vec2::ZERO } else { specular1(&settings, &name.0) };
+                            // z = the game-diffuse flag, w = its scale (`FH1_RM_PAINT_GAME_DIFFUSE` / `_DIFF_SH`).
+                            let flag = std::env::var("FH1_RM_PAINT_GAME_DIFFUSE").is_ok_and(|v| v == "1");
+                            let scale = env_f32("FH1_RM_PAINT_DIFF_SH", 1.0);
+                            bevy::math::Vec4::new(l1.x, l1.y, if flag { 1.0 } else { 0.0 }, scale)
+                        },
                     };
                     paints.add(CarPaintMaterial { base, extension: ext })
                 })
