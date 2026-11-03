@@ -1,230 +1,247 @@
-# STATUS, 2026-11-02: FM2 visual parity — where it stands after the measurement rebuild
+# STATUS, 2026-11-02 (second revision): goals recorded, the PI display solved, visual parity still the open problem
 
-> **This replaces the previous STATUS.md** (the 2026-11-02 "detailed handoff" and the older material below it). That text is preserved in git history: `git show 4f30844:STATUS.md`. Everything still true from it is carried forward here; everything it recorded about the old **5.08** acceptance figure is now void, because that figure was not a measurement (section 3).
+> **This replaces the previous `STATUS.md`** (the 2026-11-02 "measurement rebuild" handoff). That text is preserved in git history: `git show 4f30844:STATUS.md`. Everything still true from it is carried forward or pointed at here; its detailed FM2 tables and its tooling sections are **not** reproduced in full, so read them there.
 >
-> The plan is `docs/DESIGN.md` (git-ignored): plan v6 (per-bucket fixes) and plan v7 (per-game visual profiles). Every number below is in `MODLOG.md` entries 223-245.
->
-> **The goal, restated by the user 2026-11-02:** first reach visual parity with FM2; have the findings make the other Xbox 360 Forzas cheaper; ideally switch between each game's visual style. FM2 parity is the active workstream.
+> Since that document: the goals were written down (`docs/GOALS.md`, `docs/ATTACHMENT.md`), a new priority-1 goal was added (**G6, visual parity with every 360-era game**), the per-car **PI display** question was answered from the game files and **fixed in code**, the **part inventories** of four more games were read, and FM2's cars were **re-imported** with the fix. No rendering change was made. MODLOG 246-258.
+
+---
 
 ## 1. The short version
 
-**The goal is not met.** On the corrected metric the twelve circuits read **6.04** (sum of |ln| of the median ours/Xenia road ratio) against a target of **2.0**, with **every track off** (best: New York 0.48; worst: TT King Cobra 3.49). Ten weeks of work was spent judging progress with a number that could not be reproduced when a threshold moved 3.3x (section 3); the measurement was replaced this session, and with a trustworthy instrument the picture is different from what the old notes said.
+**FM2 visual parity is not met and did not move this session.** The judged number is **6.04** against a target of **2.0**, with every track off. The previous STATUS retired the older 5.08 figure as unreproducible; the replacement instrument stands, and the honest position in it still stands: every cause is named with numbers, and no change inside the plan has an evidence-backed mechanism. The decision left to the user (`STATUS.md` §12 in the old document) is unchanged and now sits inside goal **G6** as the thing blocking it.
 
-**What the new measurements establish:**
-- The road draws are named on all twelve tracks and the **game's own shader** can be evaluated at the exact pixels we measure, so changes can be judged without fitting to a screenshot.
-- Our engine renders **0.04-0.62 of the game's own shader value** at the same road points -- never above it.
-- Road **albedo alone** is **0.18-1.11** of the game's (median ~0.5), but making it *more* faithful makes the picture *worse* every time it was tried (twice, both buckets).
-- Our **pre-post scene** is short of light (0.40-0.87 of the reference on nine tracks), and FM2's own tone-curve blend, **pinned at its dark end (t ~ 0.02) because of that shortfall**, then over-brightens the darks and compresses the highlights. That is the visible signature: shadows too bright, highlights too dark.
-- The **shadow machinery is not the lever** either: coverage on clean far road is 3 % against the game's 14 %, but distance, caster cull, decal colour, the shadow gate and the sun direction were all tested and none improves the acceptance.
+**What did move:** the goals now exist as a document with gates and a priority order; the PI display is solved, fixed and verified end to end; the model part inventories are known for FH1, FM2, FM3, FM4 and FM6, which unblocks customisation (G4).
 
-**The honest position:** every cause is now named with numbers; no remaining change inside the plans has an evidence-backed mechanism. The decision left to the user is at section 12.
+**The project's own game (FH1) is unaffected:** full Colorado map, 175 cars, races, garage, remaster renderer. Only regression-tested lately.
 
-## 2. How it is measured now
+---
 
-One command:
+## 2. Priority order (the goals, in work order)
 
-```powershell
-python -I data/work/acceptance.py <prefix>        # ~8 min, all twelve tracks
+From `docs/GOALS.md`, which is the detailed version. Ids are stable, the order is not.
+
+| # | id | goal | state |
+|---|---|---|---|
+| 1 | **G6** | Visual parity with every 360-era game (FM2, FM3, FM4, FH1, FH2-360) | `in progress` — FM2 measured at 6.04 / 2.0; **blocked on a decision** |
+| 2 | **G1** | Completely modular game features (look, HUD, physics, audio, rules …) | `not started`; the look slot is what G6 needs, so the two interleave |
+| 3 | **S6** | PI and car data sources | `in progress` — display solved and fixed; backend rating not built |
+| 4 | **G2** | Complete car and track list, three stages | `not started` |
+| 5 | **G3** | Best model per car | `not started` |
+| 6 | **G4** | Enhanced customisation | `not started` — **unblocked** this session |
+| 7 | **G5** | Optimisation (720p60 handheld, storage) | `not started` |
+
+---
+
+## 3. G6 — visual parity (priority 1)
+
+**Gate:** per game, aggregate **sum |ln| ≤ 2.0** and **every track ≤ 0.10**, against reference pictures frozen before the work.
+
+**Games in scope:** FM2, FM3, FM4, FH1, FH2 (Xbox 360). FM1 is original-Xbox and out of scope.
+
+### 3.1 The FM2 numbers, unchanged this session
+
+`python -I data/work/acceptance.py <prefix>` (~8 min, twelve tracks), frozen references in `screenshots/xenia_ref/g1_*.png`, pixels proven asphalt by the engine's own collision ray, frozen in `data/work/anchor_pixels.json`, binned by the reference's brightness.
+
+| track | median | bins dark/mid/bright | err |
+|---|---|---|---|
+| Tsukuba | 1.28 | 2.36 / 1.33 / 1.00 | 0.38 |
+| Laguna Seca | 1.57 | 4.62 / 1.25 / 1.07 | 0.61 |
+| Road Atlanta | 1.39 | 1.48 / 1.69 / 1.19 | 0.36 |
+| Silverstone GP | 0.60 | 3.89 / 0.62 / 0.46 | 0.87 |
+| Nordschleife | 0.77 | 1.38 / 0.75 / 0.38 | 0.52 |
+| Sebring | 1.21 | 1.73 / 1.33 / 0.69 | 0.41 |
+| Mugello | 0.86 | 1.07 / 0.87 / 0.76 | 0.16 |
+| Suzuka | 0.60 | 1.25 / 0.52 / 0.53 | 0.50 |
+| Sunset Infield | 0.53 | 0.74 / 0.54 / 0.34 | 0.67 |
+| Maple Valley | 2.15 | 3.25 / 2.15 / 0.48 | 0.89 |
+| New York | 0.48 | 1.00 / 0.74 / 0.12 | 0.80 |
+| TT King Cobra | 3.49 | 5.91 / 1.06 / 0.79 | 0.69 |
+
+**sum |ln(median)| = 6.04, sum of bin errors = 6.86.** Repeatability: per-track bins reproduce exactly; **the aggregate drifts ±0.5 with unchanged code**, so only same-build per-track A/B comparisons support a claim.
+
+### 3.2 What that measurement established (do not re-derive)
+
+- The road draws are named on all twelve tracks and **the game's own shader** can be evaluated at our exact pixels.
+- Our pre-post scene is **short of light** on nine of twelve tracks (0.40-0.87 of the reference). FM2's own tone-curve blend, pinned at its dark end (t ≈ 0.02) *because* of that shortfall, then lifts the shadows and compresses the highlights. That is the visible signature.
+- Making the road **albedo more faithful makes it worse** (tested twice, both buckets, reverted).
+- The **shadow machinery is not the lever** (six settings tested: distance, caster cull, decal colour, gate, floor, sun direction).
+
+### 3.3 What is blocking it
+
+`STATUS.md` §12 (old document, git history) offers three options: **accept** the measured state, adopt a **labelled calibration** (a per-track gain fitted to the reference — very likely reaches ≤ 2.0, but it is drawing the target, not reproducing the game), or **park** FM2 road parity.
+
+**G6 records two rules about this:**
+
+1. A fitted gain is a **calibration, not parity**. It must be labelled in the UI and the code, and it does not satisfy the gate.
+2. Parity is judged on the **Remaster renderer at shipped default/high quality**, not on a low-end tier.
+
+### 3.4 Not started for four of the five games
+
+FM3, FM4, FH1 and FH2 (360) have **no frozen references and no acceptance run at all**. Each begins by building the harness FM2 already has. That is the largest concrete piece of work inside G6.
+
+---
+
+## 4. S6 — the PI display (solved and fixed this session)
+
+### 4.1 The question, answered from the files
+
+**A car's PI is stored data, not computed at load.** Every game keeps `Data_Car.PerformanceIndex` (normalised 0..1, non-null on every row) and the class ladder in `CarClasses` (`MaxPerformanceIndex`, `MaxDisplayPerformanceIndex`, class letter). Cars with a stored PI: FM2 310, FM3 415, FM4 503, FH2 (360) 216.
+
+The ladders differ per game, which is why the ladder belongs to G1's menu-UI slot:
+
+| game | ladder (letter: max display PI) |
+|---|---|
+| FM2 | D:400 C:550 B:700 A:850 S:998 U/R4/R3/R2/R1:999 |
+| FM3 | F:200 E:275 D:350 C:425 B:500 A:600 S:700 R3:800 R2:900 R1:998 U:999 |
+| FM4 | F:200 E:275 D:350 C:425 B:500 A:600 S:700 R3:800 R2:875 R1:998 U:999 |
+| FH2 (360) | D:500 C:600 B:700 A:800 S1:900 S2:998 X:999 |
+
+### 4.2 The conversion rule, from eleven in-game readings
+
+```
+display = prev + floor(f * span) + 1
+prev  = previous class's MaxDisplayPerformanceIndex   (99 for the first class)
+span  = class max display - prev
+f     = (pi - class min) / (class max - class min)
 ```
 
-It shoots each track at the reference pose, then compares against `screenshots/xenia_ref/g1_*.png` on pixels that are:
-1. **proven asphalt** by the engine's own collision ray under that pixel (`surfaceTypes.xml` OffRoadness = 0),
-2. **neutral in both pictures** (absolute chroma < 0.12 -- a hue test, never brightness),
-3. **frozen** once per track in `data/work/anchor_pixels.json`, so an A/B difference is the render's and not the filter's pick,
-4. **binned by the reference's own brightness** into dark / mid / bright thirds, because a single median hides a track whose darks and brights fail in opposite directions.
+The scale bottoms at **100**. One constant for every game. **Eleven numeric readings across FM2, FM3 and FM4, all exact, plus the letter-only FM2 race badge:**
 
-`median` is the plan's acceptance statistic; `err` is the mean |ln| over the three bins. **Target: sum <= 2.0, every track <= 0.10.**
-
-**Reference set is frozen:** `data/work/reference_hashes.txt` holds the sha256 of all twelve pictures plus the commit they were scored on; the harness refuses to compare if one changes.
-
-**Repeatability, measured:** per-track bins reproduce exactly across runs (Silverstone 3.64/0.62/0.46 twice; 3.81 twice after a different build). The **aggregate sum drifts by about +-0.5 with unchanged code** (5.38 -> 5.97 -> 6.04 across the session), so only per-track, same-build A/B comparisons support a claim; a "total improved by 0.3" would not.
-
-## 3. Why 5.08 was retired
-
-`data/work/p0_audit_rev.txt` recomputes the old mask over nine threshold settings. It reproduces 5.08 exactly, and then:
-
-| symptom | evidence |
-|---|---|
-| the number moves up to **3.3x** when one threshold is nudged | Road Atlanta 0.35 .. 1.43, Maple 0.38 .. 1.40, Tsukuba 1.25 .. 2.82, Suzuka 0.34 .. 1.46 |
-| a large share of the "asphalt" is **the car** | 25 % of selected pixels on Tsukuba, 51 % on Laguna Seca, 54 % on Maple lie inside the car box |
-| the intersection is the **biased subset** | Tsukuba: 26,079 pixels qualify in ours but only 2,028 in Xenia; the 3,446 that survive are where the two happen to agree |
-| it **cannot report all twelve** | New York yields 24 common pixels (200 needed) |
-
-This is the same class of error as MODLOG 161 ("the road band was the HUD"). **No number measured before this rebuild should be quoted.**
-
-## 4. The numbers today
-
-### 4.1 Acceptance (current build, restored defaults)
-
-| track | median | bins dark/mid/bright | err | albedo (ours/game) | bucket |
-|---|---|---|---|---|---|
-| Tsukuba | 1.28 | 2.36 / 1.33 / 1.00 | 0.38 | 0.70 | A |
-| Laguna Seca | 1.57 | 4.62 / 1.25 / 1.07 | 0.61 | 0.42 | mixed |
-| Road Atlanta | 1.39 | 1.48 / 1.69 / 1.19 | 0.36 | 0.27 | A |
-| Silverstone GP | 0.60 | 3.89 / 0.62 / 0.46 | 0.87 | 0.90 | B |
-| Nordschleife | 0.77 | 1.38 / 0.75 / 0.38 | 0.52 | 0.49 | A |
-| Sebring | 1.21 | 1.73 / 1.33 / 0.69 | 0.41 | 1.11 | B |
-| Mugello | 0.86 | 1.07 / 0.87 / 0.76 | 0.16 | 0.48 | A |
-| Suzuka | 0.60 | 1.25 / 0.52 / 0.53 | 0.50 | 0.46 | A |
-| Sunset Infield | 0.53 | 0.74 / 0.54 / 0.34 | 0.67 | 0.70 | A |
-| Maple Valley | 2.15 | 3.25 / 2.15 / 0.48 | 0.89 | 0.29 | mixed |
-| New York | 0.48 | 1.00 / 0.74 / 0.12 | 0.80 | 0.20 | mixed |
-| TT King Cobra | 3.49 | 5.91 / 1.06 / 0.79 | 0.69 | 0.18 | mixed |
-
-**sum |ln(median)| = 6.04, sum of bin errors = 6.86.** Buckets: **A** = albedo low and the scene bins point the same way; **B** = albedo right, error elsewhere; **mixed** = albedo low *and* shadows too bright (something adds light the game does not).
-
-### 4.2 The tone-curve blend (W3, all twelve)
-
-The game blends two tone curves by the frame's average luminance against each track's `TrackLumLimits`: `t = saturate((avg - min)/(max - min))`, t=1 = light curve.
-
-| track | avg | min | max | t |
-|---|---|---|---|---|
-| Tsukuba | 0.2310 | 0.3333 | 1.4902 | 0.002 *(clamped low)* |
-| Laguna Seca | 0.2792 | 0.5882 | 0.8431 | 0.000 *(clamped low)* |
-| Road Atlanta | 0.3086 | 0.1569 | 1.6510 | 0.023 |
-| Silverstone GP | 0.4154 | 0.3725 | 0.9412 | 0.021 |
-| Nordschleife | 0.4956 | 0.0000 | 1.3725 | 0.109 |
-| Sebring | 0.5000 | 0.3686 | 1.0588 | 0.048 |
-| Mugello | 0.4234 | 0.0784 | 1.1608 | 0.105 |
-| Suzuka | 0.4523 | 0.4510 | 1.2157 | 0.003 |
-| Sunset Infield | 0.1831 | 0.2078 | 0.8275 | 0.027 *(clamped low)* |
-| Maple Valley | 0.2254 | 0.2314 | 1.0980 | 0.017 *(clamped low)* |
-| New York | 0.0560 | 0.0000 | 1.4941 | 0.014 |
-| TT King Cobra | 0.3188 | 0.3137 | 0.4902 | 0.258 |
-
-**t = 0.00-0.26, median ~0.02.** Our scene is dark enough that the game's own auto-exposure always picks the "brighten the mids" curve -- which is the measured cause of the shadow-lifting signature, and it means the curve is **downstream** of the scene error, not the cause.
-
-### 4.3 The material stages (albedo / light term / product, no post curve)
-
-| track | albedo | light term | product | product ÷ Xenia road |
-|---|---|---|---|---|
-| Silverstone GP | 0.0513 | 0.9911 | 0.0513 | 0.50 |
-| Sunset Infield | 0.1046 | 0.5906 | 0.0630 | 0.40 |
-| Maple Valley | 0.1221 | 0.3515 | 0.0545 | 1.43 |
-| Tsukuba | 0.1441 | 0.4621 | 0.0666 | 0.57 |
-| Laguna Seca | 0.0612 | 0.0762 | 0.0578 | 0.87 |
-| Road Atlanta | 0.1651 | 0.2623 | 0.0802 | 0.75 |
-| Nordschleife | 0.0802 | 0.6105 | 0.0513 | 0.56 |
-| Sebring | 0.6654 | 0.5841 | 0.4969 | 1.30 |
-| Mugello | 0.1981 | 0.5395 | 0.1095 | 0.66 |
-| Suzuka | 0.0262 | 0.1620 | 0.0144 | 0.47 |
-| New York | 0.0091 | 0.0116 | 0.0065 | 0.56 |
-| TT King Cobra | 0.0284 | 0.0356 | 0.0262 | 2.87 |
-
-**Reading:** the pre-post road is **too dark on nine tracks** (0.40-0.87) and **already too bright on three** (Sebring, Maple, TT). The tone curve then amplifies the shortfall into the opposite error in the final image -- which is why Tsukuba, Road Atlanta and Laguna end up *too bright* while their scene is *too dark*.
-
-**Caveat:** `product` and `albedo x light term` disagree by up to 65x on the darkest tracks (Road Atlanta 0.080 vs 0.043, Suzuka 0.014 vs 0.004, New York 0.007 vs 0.0001). Where they disagree the split between albedo and light term is **not** quotable; the `product ÷ Xenia` column is.
-
-### 4.4 Shadow coverage (Silverstone)
-
-`S = curve^-1(displayed) / unshadowed material`; coverage = share of road points with S < 0.6, depth = median S among those.
-
-| region | coverage | depth |
+| car | game | in-game |
 |---|---|---|
-| game, all road | 35 % | 0.42 |
-| ours, all road | 2 % | 0.51 |
-| game, **far road only** (y < 540) | **14 %** | 0.56 |
-| ours, **far road only** | **3 %** | 0.51 |
+| 2002 Skyline GT-R V-Spec II | FM2 | B 584 |
+| Honda Civic VTi | FM2 | D 211 |
+| 2004 Audi TT 3.2 quattro | FM2 | D 364 |
+| 2003 #12 Calsonic Skyline | FM2 | **R3, no number** |
+| 2002 Skyline GT-R V-Spec II | FM3 | C 401 |
+| Scion xD | FM3 | F 175 |
+| 2009 Citroen C4 VTS | FM3 | F 174 |
+| 2003 #12 Calsonic Skyline | FM3 | R2 825 |
+| 2002 Skyline GT-R V-Spec II | FM4 | A 503 |
+| 2003 #12 Calsonic Skyline | FM4 | R2 858 |
+| 2011 Ford Ka / 2011 Toyota Aygo | FM4 | F **100** (bottom of the scale) |
 
-**Coverage is the gap; depth already matches.** The near-car band (game 91 %, ours 0 %) is **contaminated** by the car body and its decal and is not used -- the reference there is 6 % of its unshadowed value, which the game's own shadow rule cannot produce.
+**Race classes are a per-game display difference:** FM2 shows the letter with no number (buy screen *and* race results), FM3 and FM4 show letter and number. Same car, three answers.
 
-## 5. What is proven (do not re-derive)
+**FM2's race classes cannot be separated by PI** — `R4/R3/R2/R1` all store normalised max 1.0 and display max 999. The letter must come from the stored `ClassID`.
+
+### 4.3 What changed in code (MODLOG 255-256)
+
+- `crates/fh1setup/src/cars.rs` — one shared `display_pi(bands, pi)` replaces two identical copies; clamps to the class maximum so a number can never leave its class.
+- `crates/fh1setup/src/fm2_cars.rs` — writes **no `pi`** for FM2's `R4/R3/R2/R1`.
+- `crates/fh1_engine`/`race/postrace.rs` — leaves the number field empty when `pi` is 0, so the class letter still shows.
+- **Gated** by three unit tests, including the eleven numeric readings: `cargo test -p fh1setup --bin fh1setup` → 16 passed.
+
+**Verified in the shipped artefact** (not just the tests): FM2's cars were re-imported (`310 cars imported, 0 skipped`) and the produced `imported/fm2/cars/index.json` carries **B 584, D 211, D 364, R3 with `pi: null`**, and **74 cars with no number, classes exactly R1-R4**.
+
+**Roster effect** (same rule over every stored PI): FM2 150 cars +1 / 159 unchanged / 1 −1; FM3 198 / 216 / 1; FM4 254 / 246 / 3. The five downward moves are all at the very bottom of the first class, and the in-game reading (Ford Ka = F 100) confirms 100 is right.
+
+### 4.4 Not done in S6
+
+- **FM3/FM4/FM6 were not re-imported**, so their installed numbers are still the old (one-point-low) ones.
+- Our own **results screen has not been seen** with an FM2 race car; the postrace change is compile-checked only.
+- **The backend rating** (one measured number per car, translated per game) is not built. The open question is whether stored per-game PI wins where the game has it or maps-only is used; the measurement that informs it exists — cross-game rank agreement is only **93.3 %-96.3 %**, so one monotone number cannot be exact, and the wrong-class count will not be zero.
+- No re-import was run for FM3/FM4/FM6, and no in-game reading exists for **upgraded** cars (the known gap: a tuned car's PI needs each game's per-part contribution model).
+
+---
+
+## 5. Part inventories (C5) — read, and G4 unblocked
+
+Verified from real imported models and from each disc's carbin sections (`cargo run -p fh1setup --example part_names -- <disc> <car>`):
+
+| game | parts | notable |
+|---|---|---|
+| FH1 | 50 nodes | four wheel nodes, separate calipers and rotors |
+| FM2 | 37-42 nodes | same canonical stems; **no calipers/rotors**; `exhausta/b/d` |
+| FM3 / FM4 | 61 sections each, **identical sets** | kit variants `a`-`f` **and** `race`; **one `wheel`** section, not four; no calipers |
+| FM6 | 162 nodes | doors, door cards, jambs, sill, roof, fenders, floor, **`enginebay`**, dash, gauges, pedals, trunk liner, roll cage, calipers/rotors, rim + tyre |
+
+**Three consequences recorded in `docs/ATTACHMENT.md`:** FM6 has a real `enginebay` node; wheel layout differs three ways, so wheel-swap code must handle all three shapes; caliper colour is FH1/FM6 only.
+
+**Still unread:** FM5 and FH2 (360); FM6 from only one car (`FAL_Atom_77`), so "not seen" there is not "absent".
+
+---
+
+## 6. Proven facts to not re-derive
 
 | fact | evidence |
 |---|---|
-| FM2's textures are exactly the disc's: BC4 byte-identical, BC1 value-identical; no gamma decode anywhere in the session | MODLOG 181, 219, 175, 179 |
-| The colour-space order is irrelevant (0.39/0.49/2.24 vs 0.41/0.49/2.24) | MODLOG 217 |
-| The material/remaster tables must be rebuilt after every import or materials keep stale flags | MODLOG 196 |
-| The road draw under the car, all twelve tracks (model / shader signature / material) | MODLOG 226, `p1_draws_acc.txt` |
-| The game's own shader can be evaluated at our exact road points (`FM2_PROBE_AT` + `FM2_PROBE_LERP`), and its outside lightmap multiply is not a double count | MODLOG 230, 234 |
-| FH1's grade (tonemap/LUT/vignette) is already off for FM2 tracks; the FM2 combine is the game's own | MODLOG 228 |
-| Our pose matches the reference: gradient NCC peaks at (0,0) on eight tracks, (0,-2)/(0,-4) on four | MODLOG 225 |
-| The shadow map is active at the grid (`sh` 0.47-0.62 next to the car) and the lightmap gate is already open there | MODLOG 237 |
+| FM2's textures are exactly the disc's (BC4 byte-identical, BC1 value-identical); no gamma decode | MODLOG 181, 219, 175, 179 |
+| The colour-space order is irrelevant | MODLOG 217 |
+| Material/remaster tables must be rebuilt after every import or materials keep stale flags | MODLOG 196 |
+| The road draw under the car, all twelve tracks | MODLOG 226 |
+| The game's own shader can be evaluated at our exact road points | MODLOG 230, 234 |
+| Our pose matches the reference (gradient NCC peak at 0,0 on eight tracks, (0,-2)/(0,-4) on four) | MODLOG 225 |
+| PI is stored, the ladders are stored, and the display conversion is the rule in §4.2 | MODLOG 247-256 |
+| Model parts are separate in FH1, FM2, FM3, FM4 and FM6 | MODLOG 256 |
 
-## 6. What was measured and rejected (do not repeat)
+## 7. Rejected — do not repeat
 
-| hypothesis | measurement | verdict |
-|---|---|---|
-| The bake should use the draw's own shader albedo (W1) | Maple 2.15 -> **3.62**; six A-bucket tracks 2.44 -> **3.36** (albedo more faithful: 0.29 -> 0.65) | rejected, reverted |
-| Gate the road's sun/specular term on the lightmap (W2.3) | shadow map already active, gate already open near the car | moot |
-| Use the game's `DropShadowColor` (black) for the car decal | Silverstone 3.64 -> 3.81, Maple 3.07 -> 3.21 | rejected, reverted |
-| Lightmap light floor 0 (the game has no floor) | 2.74 -> 2.76, dark bins unchanged | rejected (3rd confirmation) |
-| Shadow distance 600 / small-caster cull off | coverage unchanged (3 %), depth only (0.51 -> 0.19-0.21) | rejected |
-| Global sun-direction flip (`fx`) | coverage 3 % -> 10 %, but Nordschleife 0.54 -> 0.82 | rejected (trades tracks) |
-| A per-track sun-direction fix | the game's `0x825220f0` only copies the XML vector; the engine already does the same | nothing to fix |
-| Per-track gains / fitted tone tables | "drawing the target" | standing non-goal |
-| ~15 earlier hypotheses (mirrored lightmap, shadow reach, squared ShadowColor, post tuning, per-format decode, forced albedo, real varyings) | all measured | rejected, see MODLOG <=222 |
+From the previous STATUS, still valid: the draw's own shader albedo (W1), gating the sun term on the lightmap (W2.3), the game's own `DropShadowColor` for the car decal, lightmap light floor 0, shadow distance 600 / caster cull off, a global sun-direction flip, a per-track sun-direction fix, per-track fitted tone tables, and ~15 earlier hypotheses (see MODLOG ≤ 222).
 
-## 7. What remains unknown
+On the PI side: **do not** re-derive the conversion from first principles again — eleven in-game readings pin it, and three successive attempts to reason it out from the data alone were wrong by one point each (MODLOG 247-251).
 
-1. **Why the pre-post scene is short of light by ~1.5-2x.** The stage paints localise it to albedo and the light term, but on the tracks where the two paints disagree the split is unmeasurable (section 4.3 caveat).
-2. **Why our far-road shadow coverage is 3 % where the game's is 14 %** -- the caster set, not the range (section 4.4).
-3. **Whether the reference's road is darker than `albedo x lightmap` because of its display path** (the game's frame average is unknown to us; our estimate of it is what pins t at 0).
+---
 
-## 8. Tooling built for this (in `data/work/`, git-ignored)
+## 8. Open decisions
 
-- `acceptance.py <prefix>` -- the judged number for all twelve tracks; writes `acceptance_<prefix>.json`.
-- `p0_probe.py` -- the asphalt-anchored metric itself (frozen pixels, bins, pose check).
-- `p0_audit.py` -- why the old mask failed (threshold sweep, car share, asymmetry).
-- `p2_avg.py` -- the blend input t against each track's `TrackLumLimits`.
-- `p3_dbg.py` -- per-stage paints (albedo / light term / product).
-- `p3_alb.py` -- road albedo against the game's own shader, per track.
-- `p3_oracle.py` -- game shader vs engine vs Xenia at the same pixels.
-- `w2_shadow.py` -- shadow coverage and depth, ours vs the game.
-- `p1_draws.py` -- names the road draw from the engine's probe points (`FM2_UNDER`).
-- `compare.py` -- Xenia vs engine comparison sheets (`screenshots/compare_*.png`).
-- `reference_hashes.txt`, `anchor_pixels.json` -- the frozen reference and frozen pixel sets.
+1. **FM2 visual parity** (blocks G6): accept / labelled calibration / park.
+2. **PI mapping** (Q2): stored per-game PI wins where the game has it, or maps only. The rank-agreement measurement says the wrong-class count will not be zero.
+3. **Q3** 360 downgrade (user unsure); **Q4** engine-audio as a slot or a parameter; **Q5** track props; **Q6** wheel clipping; **Q7** unrateable cars; **Q8** upgrade ceiling; **Q9** spec-source scope; **Q10** storage gate; **Q11** attachment point list.
+4. **`README.md` advertises online free roam** while `AGENTS.md` rule 5 says single-player/offline only. Pre-existing, untouched, needs the user's call.
+5. **`docs/` is git-ignored**, so `GOALS.md` and `ATTACHMENT.md` exist on this machine only. Only the README table and MODLOG survive a clone.
 
-**Engine/importer changes made this session (committed):** the shot probe logs each pixel's surface id and off-roadness; `FM2_PROBE_AT` gained a height tolerance and diagnostics. Both are logging/diagnostic only.
+---
 
-**Environment:** ViGEmBus 1.22.0 installed (service running), `vgamepad` 0.2.0 built into `data/work/venv`, and a virtual Xbox 360 pad verified working (`data/work/vpad_test.py`) -- the 2026-11-01 emulator-input blocker is liftable, though the emulator route is no longer on the critical path. Instrumented Xenia (`data/work/xenia-build`, commit `828014b9`) and its texture dumps (`data/work/texdump4`) are unchanged.
+## 9. Not tested
 
-## 9. How to reproduce a measurement
+- **FM2 visual parity:** nothing changed; the number is 6.04.
+- **FM3/FM4/FH1/FH2 (360) visual parity:** no references, no measurement at all.
+- **Our engine's results screen** with an FM2 race car: compile-checked only.
+- **The PI fix in FM3/FM4/FM6 installs:** code fixed, those games not re-imported.
+- **Upgraded-car PI:** no model, no measurement.
+- **Bevy on Android/Adreno:** not tested; G5 leans on it.
+- **Dedupe and compression ratios** on our own content: not measured.
+- **Frame cost** beyond one HUD reading per circuit: not measured.
+- **A full lap or race on FM2 scenery by a person**; the emulator capture route with the virtual pad (installed and proven, never used to drive Xenia).
+
+---
+
+## 10. Reproducing the checks
 
 ```powershell
-# the judged number (twelve tracks, ~8 min)
+# FM2 visual parity (twelve tracks, ~8 min)
 python -I data/work/acceptance.py <prefix>
 
-# one variant on the frozen pixels
-python -I data/work/acceptance.py <prefix> --env FH1_FM2_POST_T=0.5 --tracks=maplevalley_00
+# the PI conversion against the eleven in-game readings
+cargo test -p fh1setup --bin fh1setup
 
-# the game's own shader at our road points (no reference image involved)
-python -I data/work/p3_alb.py --tracks=maplevalley_00 --per-bin=4
+# the produced FM2 car index (after a re-import)
+.\target\debug\fh1setup.exe import-fm2 data\work_fm2\disc --only cars
+python -I data/work/pi_verify.py
 
-# the blend input, all twelve
-python -I data/work/p2_avg.py
+# a car's part inventory, straight from a disc
+cargo run -p fh1setup --example part_names -- data/work_fm3_disc1/disc NIS_SkylineGTRVSpecII_02
 
-# comparison sheets
-python -I data/work/compare.py --tracks=tsukuba_00,silverstone_00,maplevalley_00 --out=three
+# the PI ladder and rank-agreement measurements
+python -I data/work/pi_bands.py
+python -I data/work/pi_rank.py
 ```
 
-After any import: `.\target\debug\fh1setup.exe "data/work/disc" --only remaster --force` (the stale-table trap in section 5).
+After any import: `.\target\debug\fh1setup.exe "data/work/disc" --only remaster --force` (the stale-table trap in §6).
 
-## 10. The goal after this: per-game visual profiles (plan v7)
+---
 
-The user's goal is FM2 parity *first*, with the findings reusable for the other 360 Forzas and a switch between visual styles. Today the FM2 style exists only as **sixteen `if track.id.starts_with("fm2/")` blocks** in `crates/fh1-engine/src/main.rs` (146-420) that set environment variables -- no second game can join, values cannot be listed, and inferred fits look identical to values read from the game's files.
+## 11. Where things are
 
-Plan v7 (`docs/DESIGN.md`) turns that into a named profile per game with a hard rule: **every field must be either read from that game's files or measured against the reference with a MODLOG entry naming it -- there is no third category.** Steps: v7.1 extract the FM2 profile with **no behaviour change** (gate: acceptance reproduces 6.04 / 6.86 exactly), v7.2 the `FH1_VISUAL_STYLE` switch, v7.3 FM2 parity inside the profile, v7.4 FM4 as the first other game.
+| path | what | tracked |
+|---|---|---|
+| `docs/GOALS.md` | the goals: G1-G6, S6/S7, conflicts, questions, priority order | no (git-ignored) |
+| `docs/ATTACHMENT.md` | G4.1 attachment schema + per-game part inventories | no |
+| `docs/DESIGN.md` | the older plan log (v6, v7); **not yet merged with the G1 slot list** | no |
+| `README.md` | goals table with the work order, and "what works / what doesn't" | **yes** |
+| `MODLOG.md` | 246-258 cover this session | **yes** |
+| `data/work/*.py` | acceptance, probes, PI scripts, comparison sheets | no |
+| `crates/fh1setup/examples/part_names.rs` | part inventory dumper (new) | **untracked** |
 
-## 11. Not tested
-
-- No rendered change was adopted this session: the tree's rendering is exactly the committed state.
-- The comparison sheets are visual artefacts; no claim in this document rests on them.
-- A full lap or race on FM2 scenery by a person; frame cost beyond one HUD reading per circuit.
-- The emulator capture route with the new virtual pad (installed and proven, not yet used to drive Xenia).
-
-## 12. The decision left to the user
-
-Acceptance 6.04 against 2.0, every cause named, no evidence-backed change left inside the plans:
-
-1. **Accept** the measured state with this document as the record.
-2. **Adopt a clearly labelled calibration** (a per-track gain fitted to the reference). It would very likely reach <= 2.0, but it is drawing the target, not reproducing the game -- and it conflicts with the "game data before guesswork" rule unless labelled as such everywhere.
-3. **Park** FM2 road parity and spend the effort on the profile/switch structure (plan v7) or on another area.
-
-## 13. Older material that still stands
-
-- **FH1 itself** (the engine's own game) works per the README: full Colorado map, 175 cars, races with AI, garage, the remaster renderer. Only regression-tested lately (a career race starts, runs and finishes).
-- **Xbox One family cars** (FM6 IDx, FM5 E21, FH2 F-Type, plus Fast7 GT-R, Rocket 69, FH2 R34): imported, load and drive; the user has driven four of them ("very rough but satisfy me for now"). Known gaps: normal/gloss/AO maps ignored, headlight models skipped, the launcher does not list those games, car names still come from media names. Full detail in the previous STATUS (git history) and MODLOG 97-136.
-- **Reference capture rig:** isolated Xenia install in `tools/xenia-test/` (git-ignored), `kernel_display_gamma_type = 1`, twelve longest layouts captured at the grid, capture via `PrintWindow` while unfocused (colour-faithful to 0.02 levels). The 47-entry lobby track list is mapped to our import ids.
-- **Imported races** work only through the dev hook `FH1_RACE=0`; they are not in the menus.
-- **Mistakes worth not repeating** (this session's additions): trusted a mask that changed answer by 3.3x; reported `FM2_PROBE_AT` as broken when a log filter had simply missed its output line (corrected in MODLOG 230); used a near-car band whose reference pixels were the car's own decal (MODLOG 237); and quoted an aggregate score without knowing it drifts +-0.5 with unchanged code (MODLOG 238).
+**Working tree state:** `MODLOG.md`, `README.md`, `crates/fh1setup/src/{cars,fm2_cars,fm4}.rs`, `crates/fh1-engine/src/race/postrace.rs` modified; `part_names.rs` new. **Nothing committed, nothing staged.**

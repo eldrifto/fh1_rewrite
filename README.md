@@ -85,6 +85,44 @@ Windows, systemd units included).
 | Radio station | , / . | D-pad left / right |
 | Pause | Esc | Start |
 
+## Goals
+
+Long-term goals, so the direction is visible rather than implied. **None of these are implemented**; the list is a plan, and
+progress is recorded in [`MODLOG.md`](MODLOG.md). The detailed version, with each goal's design, decisions and open questions,
+is a local working document (`docs/GOALS.md`, not committed).
+
+Order is the intended work order. The `G` numbers are stable ids, not a sequence.
+
+| order | | Goal | In one line |
+|---|---|---|---|
+| 1 | **G6** | Visual parity with the 360-era games | FM2, FM3, FM4, FH1 and FH2 look like the originals, measured against frozen reference pictures rather than judged by eye |
+| 2 | **G1** | Completely modular game features | Swap any part of a Forza game for another's: look, HUD, menus, physics, cameras, audio, AI, rules, and so on, independently |
+| 3 | **S6** | Performance index, per game | One backend rating per car, shown in each game's own class ladder and number |
+| 4 | **G2** | Complete car and track list | Every car and circuit from FM1 through FH6 in three stages, optionally limited to a game's era (e.g. a 2008-cutoff FM2 roster) |
+| 5 | **G3** | Best car model per car | Pick the better of each car's versions by measurement, not by eye, with every version still available |
+| 6 | **G4** | Enhanced customisation | Body kits, wheels, interiors, exhausts, lighting, stance, engine swaps and era-correct aero, using the games' own parts |
+| 7 | **G5** | Optimisation | 720p at 60 fps on Snapdragon 8 Gen 2 handhelds, and as small a footprint as possible |
+
+### G6 visual parity: what works and what does not
+
+Stated as a measurement rather than an impression. Twelve FM2 circuits, 1280×720, fixed poses, compared
+whole-frame against Xenia captures. The instrument is `data/work/frame_diff.py`; the history is in
+[`MODLOG.md`](MODLOG.md), and the decision below is `docs/DESIGN.md` § "Phase H".
+
+**What works.** FM2 circuits import, render and drive: geometry, textures, sky, lightmaps, cars, HUD and the
+game's own shadow rule on car paint. The frames are the right brightness — road, sky and car within ~1.0× the
+reference — and the per-vertex car lighting is now the game's own (MODLOG 314, measured on 12 of 12 tracks).
+
+**What does not.** The frame differs from the original by **30.5 mean absolute levels out of 255**, with
+**1.36 %** of pixels within ±2. That is a visible difference, not a subtle one. It is also uniform: sky 29.25,
+road 30.55, scenery 30.14, car 30.18.
+
+**The target this measurement supports** is not the 2.0 the plan originally set; that would require removing
+93 % of what remains, from mechanisms measured as unable to do it. The accepted ceiling for the current
+approach is **~30.5**, and three specific items are open with their unblocking conditions written down (car
+paint light units, the road's per-pixel detail, and the sky's per-track exposure). See `docs/DESIGN.md`
+"Phase H" for the table and the reasoning.
+
 ## How it works
 
 FH1 Rewrite is a new engine, not an emulator. The setup tool reads the game's own archives, models, textures,

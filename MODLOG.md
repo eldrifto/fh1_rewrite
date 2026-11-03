@@ -10,6 +10,3069 @@ Not committed right now (uncommitted in the fm3 worktree): the Suzuka road gain,
 
 ---
 
+## 2026-11-03 (336): P1 -- the game's SH diffuse replacing Bevy's ambient: p50 improves, saturation worsens; four attempts, stopping
+
+**What changed (gated off):** `FH1_RM_PAINT_GAME_DIFFUSE=1` removes Bevy's diffuse from body paint (base colour zeroed before `apply_pbr_lighting`) and adds `albedo x SH` instead -- the game's own diffuse -- with `FH1_RM_PAINT_DIFF_SH` scaling the SH term.
+
+**Result -- the closest p50 so far, at the cost of saturation:**
+
+| track | capture | p5 | p50 | p95 | sat | frame |
+|---|---|---|---|---|---|---|
+| Tsukuba | reference | 40 | 88 | 143 | 38.1 | -- |
+| | shipped | 61 | 105 | 141 | 45.4 | 25.75 |
+| | **game diffuse + lobes** | 82 | 114 | 212 | 21.7 | 29.29 |
+| Sebring | reference | 52 | 117 | 238 | 38.2 | -- |
+| | shipped | 91 | 131 | 195 | 54.8 | 33.74 |
+| | lobes only (335) | 94 | **149** | 208 | **35.6** | 35.79 |
+| | **game diffuse + lobes** | 92 | **138** | 201 | 24.6 | 35.23 |
+| Road Atlanta | reference | 0 | 99 | 211 | 26.4 | -- |
+| | shipped | 20 | 90 | 219 | 12.1 | 33.12 |
+| | **game diffuse + lobes** | 41 | 114 | 225 | 17.1 | 34.52 |
+
+**Sebring's `p50` moves from 149 to 138 against the reference's 117** -- the best fit of the four variants -- while **saturation falls from 35.6 to 24.6**, away from 38.2. The two effects pull in opposite directions, which means the remaining difference is not a single missing scale: replacing the diffuse changed the paint's *colour* balance as well as its level, and the lobe and diffuse are now interacting through a path neither was calibrated for.
+
+**Stopping P1 here.** Four variants have been measured, all in the same direction on `p50` and none matching on both axes at once:
+
+| variant | Sebring p50 (ref 117) | Sebring sat (ref 38.2) |
+|---|---|---|
+| shipped | 131 | 54.8 |
+| lobes, raw hemisphere | 148 | **37.9** |
+| lobes, per-vertex SH | 157 | 28.6 |
+| lobes, SH/pi | 149 | 35.6 |
+| **lobes + SH diffuse** | **138** | 24.6 |
+
+**What that table establishes, and it is the honest state of P1:** the game's terms are now known exactly (shader, constants, formula, and the settings provenance), and **the shipped paint is closer on any single axis than any of the game-faithful variants** -- because our paint is a *calibrated approximation* whose parameters were tuned against the reference, while the faithful version needs the whole lighting path (ambient, IBL, exposure) to be the game's at once. Doing that piecemeal moves one axis at a time, which is what this table shows.
+
+**Where P1 therefore ends:** with the shader extracted and the paint path's faithful form known but **not achieving parity piecewise**. The two recorded gaps remain: p95 155.3 vs 179.6 and saturation 0.85 (MODLOG 314). No fitted compensation is proposed.
+
+**Still broken / not tested:** a full game-faithful paint path (ambient + IBL + exposure together); every gate is off, so the shipped baseline is unchanged at **30.489 / 1.36 %**. Builds clean, zero shader errors. Not committed or staged.
+
+---
+
+## 2026-11-03 (335): P1 -- the paint's settings provenance FIXED (FM2's own Metallic.xml now reaches the car); the lobe tried with the real constants and three normalisations, all overshooting p50
+
+**What changed (shipped):** the provenance defect recorded in MODLOG 317 is now fixed in the source.
+- `crates/fh1setup/src/fm2_cars.rs` writes `fx/paint_settings.xml` per car from the disc's `Media/cars/ShaderSettings/<PaintType>.xml` (`Metallic.xml` for a metallic colour), verified on the Skyline: `SpecularAmount 0`, `SpecularAmount2 4.0`, `SpecularPower2 5.0`, `SpecularColor 2.0`.
+- `crates/fh1-remaster/src/car.rs::load_settings` chains it after the shared file and before the car's own — the game's order.
+
+**Measured effect on the shipped path: small and neutral, and it is not a no-op.** The frame metric against the reference barely moves (25.75 → 25.76, 33.74 → 33.77, 33.12 → 33.13), but the **pixel** difference against the frozen baseline is **0.104 / 0.156 / 0.135** on the three tracks — above the capture noise (0.02-0.06), so the image really does change slightly: the chain now also supplies `PaintScale`, `Fresnel*` and `SpecularColor` from FM2's file for the non-body techniques it defines. Its effect on the goal's own instrument is within 0.03 either way, which is why it is recorded as a correctness fix rather than a look change.
+
+**Result -- and this is why the numbers in MODLOG 332-334 could not be trusted:** every earlier lobe measurement read `SpecularAmount2` / `SpecularPower2` / `SpecularColor` from **FH1's** `Normal.xml`, not from the game's. With the real values the lobe is far stronger, and three normalisations were tried:
+
+| track | capture | p5 | p50 | p95 | sat | frame |
+|---|---|---|---|---|---|---|
+| Tsukuba | reference | 40 | 88 | 143 | 38.1 | -- |
+| | shipped | 61 | 105 | 141 | 45.4 | 25.75 |
+| | game constants, `SH` x1 | 94 | 115 | **255** | 13.2 | 32.01 |
+| | game constants, `SH`/pi | 83 | 113 | 216 | 21.6 | 29.20 |
+| Sebring | reference | 52 | 117 | 238 | 38.2 | -- |
+| | shipped | 91 | 131 | 195 | 54.8 | 33.74 |
+| | game constants, `SH` x1 | 99 | 162 | **255** | 21.1 | 38.29 |
+| | game constants, `SH`/pi | 94 | 149 | 208 | **35.6** | 35.79 |
+
+**`SH`/π is the closest: Sebring's saturation reaches 35.6 against 38.2**, and the justification is on the disc (`car_prt.rs::SCALE` -- "the numbers are transfer / pi"). But `p50` is +18 levels on Sebring and +8 on Tsukuba, and the frame gets worse on all three.
+
+**Three attempts, one conclusion.** The raw hemisphere, the per-vertex SH, and the same with the 1/π the transfer numbers carry all **raise `p50` as well as `p95`**. A specular cannot do that if the base is right -- a Phong lobe at power 5 adds almost nothing at grazing angles. So the excess is in the **diffuse**, exactly as MODLOG 334 predicted: our paint's diffuse is Bevy's ambient + sun **plus** the hemisphere fill, while the game's is the SH term alone. The lobe is being added on top of a base that is already too bright, and no normalisation of the lobe can fix that.
+
+**Stopping P1's lobe here**, on the project's two-attempt rule (three now, all in the same direction). What is established and usable:
+
+1. **The car body's shader, its constants and its formula are all extracted and correct** (MODLOG 330-331) -- nothing about the paint is unknown any more except the absolute level.
+2. **The PBR double-count is real**: with Bevy's specular off, saturation moves from 54.8 to 35.6-37.9 against the reference's 38.2, depending on the normalisation. That is a large, correctly-directed improvement and it is one gate away from being testable as a twelve-track change.
+3. **The next change is the diffuse, not the lobe**: make the SH term *replace* Bevy's ambient rather than add to it. That is what the game does, and it is the same instrument to measure.
+
+**Still broken / not tested:** the diffuse path; the lobe stays gated off (`FH1_RM_PAINT_SPEC2`, `FH1_RM_PAINT_GAME_SPEC`, `FH1_RM_PAINT_SPEC_SH`). Builds clean, zero shader errors. Not committed or staged.
+
+---
+
+## 2026-11-03 (334): P1 -- second attempt at the lobe's light term (the per-vertex SH) also overshoots; stopping here and recording why
+
+**What changed:** one experiment, reverted. The lobe's light term was switched from the raw track hemisphere to the game's **per-vertex SH irradiance** (`COLOR_0`, which `car_prt.rs` already computes for the shade rule of MODLOG 314), on the reasoning that `r3.z` in the body shader is a per-vertex SH value rather than a track constant.
+
+**Result -- worse than the raw hemisphere, on all three tracks measured:**
+
+| track | capture | p5 | p50 | p95 | saturation | frame |
+|---|---|---|---|---|---|---|
+| Tsukuba | reference | 40 | 88 | 143 | 38.1 | -- |
+| | shipped | 61 | 105 | 141 | 45.4 | 25.75 |
+| | raw hemisphere (333) | 79 | 113 | 197 | 24.1 | 28.74 |
+| | **per-vertex SH** | 85 | 113 | **232** | **18.5** | **29.95** |
+| Sebring | reference | 52 | 117 | 238 | 38.2 | -- |
+| | shipped | 91 | 131 | 195 | 54.8 | 33.74 |
+| | raw hemisphere (333) | 92 | 148 | 195 | **37.9** | 35.29 |
+| | **per-vertex SH** | 96 | **157** | **241** | 28.6 | **37.12** |
+| Road Atlanta | reference | 0 | 99 | 211 | 26.4 | -- |
+| | shipped | 20 | 90 | 219 | 12.1 | 33.12 |
+| | **per-vertex SH** | 27 | 111 | 224 | 11.1 | 33.76 |
+
+The per-vertex lit colour is **brighter** than the raw hemisphere (it includes the sun), so it pushes the lobe further the wrong way: Tsukuba's p95 reaches 232 against 143.
+
+**Reverted** to the raw-hemisphere variant of MODLOG 333 -- the one that produced Sebring's saturation of **37.9 against the reference's 38.2**. Verified afterwards: with both gates off the car body differs from the shipped baseline by **0.04 mean, 2.4 % of pixels**, i.e. nothing escaped.
+
+**Stopping here, per the project's own rule** (two real attempts on one problem): both candidate light terms -- the raw track hemisphere and the game's per-vertex SH -- overshoot the mid-tone, and the difference between them is *which* excess brightness they carry, not whether. Guessing a third would be fitting.
+
+**What is actually established, and it is worth keeping:**
+
+1. **The double-count is real and its removal is a win.** With Bevy's PBR specular off and the game's lobes as the only specular, Sebring's saturation lands on the reference (**37.9 vs 38.2**) where the shipped build reads 54.8. That is a game-sourced fix for one of MODLOG 314's two recorded regressions.
+2. **The remaining error is in the diffuse, not the specular.** Both attempts raise `p50` as well as `p95`, which means the *base* the lobe sits on is already too bright -- our paint's diffuse is Bevy's lighting plus the hemisphere fill, where the game's is the SH term alone. A lobe proportional to any SH-like quantity will compound on that.
+3. **So the next step is not a lobe parameter but the diffuse path**: the game's body shader outputs `SH` as its diffuse, and our paint should too, with the fill *replacing* Bevy's ambient rather than adding to it. That is a change to the paint's diffuse, and it is measurable with the same instrument.
+
+**Still broken / not tested:** the diffuse path above; the lobe stays gated off (`FH1_RM_PAINT_SPEC2` / `FH1_RM_PAINT_GAME_SPEC`), so the shipped baseline is unchanged at **30.489 / 1.36 %**. Builds clean, zero shader errors. Not committed or staged.
+
+---
+
+## 2026-11-03 (333): P1 -- the game's two lobes with Bevy's specular removed: saturation lands on the reference (37.9 vs 38.2), the mid-tone does not
+
+**What changed (gated off by default):** lobe 1 (`SpecularAmount` / `SpecularPower`) added next to lobe 2, and a switch `FH1_RM_PAINT_GAME_SPEC=1` that sets `metallic = 0`, `reflectance = 0`, `clearcoat = 0` for body paint -- removing Bevy's own specular so the game's two lobes are the only specular, which is what the body shader actually is (MODLOG 332 measured the double count).
+
+**Result:**
+
+| track | capture | p5 | p50 | p95 | **saturation** | frame |
+|---|---|---|---|---|---|---|
+| Tsukuba | reference | 40 | 88 | 143 | **38.1** | -- |
+| | shipped | 61 | 105 | 141 | 45.4 | 25.75 |
+| | **game spec** | 79 | 113 | 197 | **24.1** | 28.74 |
+| Sebring | reference | 52 | 117 | 238 | **38.2** | -- |
+| | shipped | 91 | 131 | 195 | 54.8 | 33.74 |
+| | **game spec** | 92 | **148** | 195 | **37.9** | 35.29 |
+
+**Sebring's saturation comes out at 37.9 against the reference's 38.2 -- the regression of MODLOG 314 (54.8) is gone, and it is fixed by a game-sourced mechanism rather than a constant.** That is the first time in this whole line of work that a measured car property has landed on the reference to within 1 %.
+
+**What still does not work: the mid-tone.** `p50` goes 131 -> 148 on Sebring and 105 -> 113 on Tsukuba, and Tsukuba's `p95` overshoots to 197 against 143. Two spans are now additive that the game does not have:
+1. our car's diffuse is Bevy's lighting **plus** the hemisphere fill, whereas the game's diffuse is the SH term alone;
+2. so adding a lobe proportional to the SH term compounds on a base that is already brighter than the game's.
+
+**The next hypothesis, and it is specific:** the lobe should be scaled by the same quantity that *replaces* part of the diffuse -- the game's per-vertex SH (`car_prt`'s transfer-modulated value, `uv_b`), not the raw track hemisphere. `car_prt.rs` already computes exactly that per vertex, and MODLOG 314 proved it can be used.
+
+**Still broken / not tested:** the mid-tone; the lobe stays gated off, so the shipped path is unchanged. Builds clean, zero shader errors. Not committed or staged.
+
+---
+
+## 2026-11-03 (332): P1 -- the game's second lobe implemented with the game's own SH input; it overshoots, and the reason is a double-counted specular
+
+**What changed (shipped off by default):** the unscaled SH plumbing and the lobe itself.
+- `car.rs`: `CarFill` gains `raw_top` / `raw_bottom` -- the game's own `HLTopColour` / `HLBottomColour` **before** the inferred `FH1_RM_CAR_FILL` scale -- and the paint material receives them.
+- `car_paint.rs`: `fill_raw_top` / `fill_raw_bottom` and `spec` on both the material and the uniform; the shader adds
+  `SpecularColor . SpecularAmount2 . pow(sat(N.H), SpecularPower2) . SH` with `SH = dot(lerp(raw_bottom, raw_top, 0.5+0.5 n.y), luma)`, which is the instruction sequence read in MODLOG 331.
+- **Gated:** `spec2` is zero unless `FH1_RM_PAINT_SPEC2` is set and not "0", so nothing changes until measured.
+
+**Result -- it does what the game says, and it is too strong:**
+
+| track | capture | p5 | p50 | p95 | saturation | frame |
+|---|---|---|---|---|---|---|
+| Tsukuba | reference | 40 | 88 | 143 | 38.1 | -- |
+| | shipped | 61 | 105 | **141** | **45.4** | 25.75 |
+| | **+ lobe (game formula)** | 78 | 113 | **198** | **21.7** | **28.57** |
+| Sebring | reference | 52 | 117 | 238 | 38.2 | -- |
+| | shipped | 91 | 131 | 195 | 54.8 | 33.74 |
+| | **+ lobe (game formula)** | 72 | 135 | **196** | **25.9** | **34.67** |
+
+**The diagnosis, and it is structural rather than a matter of scale.** Adding the game's lobe makes the **whole car** brighter (Tsukuba p5 61 -> 78) and takes saturation down by half. A power-5 lobe is extremely broad, so it adds light nearly everywhere -- and our pipeline **already produces a specular**: the paint is a Bevy PBR material with `metallic 0.3` / `roughness 0.55` / `reflectance 0.5` (or 0.2 for FM2), plus the cube reflection.
+
+**The game has no Bevy PBR.** Its body shader is: SH diffuse -> lobe1 (`SpecularAmount`, power 128) -> lobe2 (`SpecularAmount2`, power 10) -> cube. So the correct change is not "add the lobe" but **"replace the PBR specular with the game's two lobes"** -- which is a structural change to the paint path, not a term to switch on.
+
+**What that means for P1's stated gate** (p95 155.3 -> toward 179.6 with saturation held): the gate cannot be met by adding the lobe, and that is now measured rather than assumed. The honest next step is one of:
+1. **set `metallic = 0`, `reflectance = 0` and drive the paint's specular entirely from the two game lobes** (faithful, and the only version that can be called game-sourced), or
+2. leave the path as it is and accept the p95 / saturation costs recorded in MODLOG 314.
+
+Option 1 is a bounded change -- the constants are already in the material -- but it replaces the paint's specular response wholesale, so it has to be measured on twelve tracks before anything is claimed.
+
+**Still broken / not tested:** the replacement (option 1); the lobe stays off by default. Not committed or staged.
+
+**A verification that had to be done, and its result.** With the lobe gated off, three captures differed from the frozen baseline by 0.167 / 0.166 / 0.038 at frame level -- which looked like the new uniform fields had changed the shipped path. Region-splitting the worst one shows it is the **known horizon outlier** of MODLOG 321/326, not the paint:
+
+```
+run vs baseline, differing pixels 4.43 %
+  sky          2.30 %   mean 0.066
+  mid/horizon  6.84 %   mean 0.765   max 149      <- the bimodal outlier, as characterised
+  car/road     4.33 %   mean 0.060
+```
+
+and the decisive control -- the car body alone, which is where a lobe would act:
+
+| capture | car body mean delta | differing |
+|---|---|---|
+| gated off | **0.05** | 5.0 % |
+| lobe on | **22.52** | 76.1 % |
+
+**So the shipped path is unchanged (0.05, noise), and the lobe's effect is 450x larger than the noise it was being measured against.** The gating works.
+
+---
+
+## 2026-11-03 (331): P1 -- the body shader's specular formula read off the disassembly; the blowout is explained, and the missing input is named
+
+**What changed:** nothing (reading only). The derived dump was deleted after reading, per `AGENTS.md`.
+
+**The formula, from the extracted pixel shader.** Around instructions 84-97 of the `body` technique:
+
+```
+84  max r0.____, c0, c0
+85  tfetchCube r0.xwyz, r0.xyw, tf5                     // the car cube
+87  mad  r5.x___, r0.yyyy, c201.xxxx, c254.yyyy         // r5.x = cube . CubeMultiplier + 1.0
+88  dp3_sat r0._y__, r8.zxyy, c128.zxyy                 // sat(N . H)
+89  max ...            + log r0._y__, r0.y              // log2 of it
+90  max ...            + mulsc r5._y__, c191.x, r0.y    // x SpecularPower
+91  mul r0._y__, r0.yyyy, c182.xxxx                     // x SpecularPower2
+      + exp r6.x___, r5.y                               // pow(N.H, SpecularPower)
+92  mul r5._yzw, r5.xxxx, r0.xxzw
+      + exp r6._y__, r0.y                               // pow(N.H, SpecularPower2)
+93  mul r0._yz_, r3.zzzz, r6.xxyy                      // <- BOTH powers x r3.z
+94  max ...            + mulsc r5.x___, c190.x, r0.y    // SpecularAmount  x (power1 x r3.z)
+95  mul r5.xyzw, r5, r4.wwww                           // x damage/dirt modulation
+      + mulsc r0.x___, c181.x, r0.z                     // SpecularAmount2 x (power2 x r3.z)
+96  mul r6.xyz_, r5.xxxx, c180.yzxx                     // x SpecularColor
+```
+
+So, exactly:
+
+```
+lobe1 = SpecularColor . SpecularAmount  . pow(sat(N.H), SpecularPower ) . SH . damage
+lobe2 = SpecularColor . SpecularAmount2 . pow(sat(N.H), SpecularPower2) . SH . damage
+```
+
+**Two things this settles.**
+
+1. **The lobe is a Phong term times the SH lighting value, and nothing else.** There is no `1/pi`, no exposure, no light-colour factor: `r3.z` is the game's own SH irradiance, accumulated at instructions 155/157 (`adds_prev r3.__z_, r6.y`, `add r3.__z_, r3.zzzz, r6.zzzz`). The `c254.y` in instruction 87 is the constant 1.0 in the cube boost.
+2. **MODLOG 317's blowout is now explained rather than mysterious.** That implementation multiplied the lobe by *Bevy's directional light colour after exposure* -- a value orders of magnitude larger than a 0..1 SH irradiance -- so `SpecularAmount2 = 4.0` saturated the car. The formula was right; the light input was the wrong quantity. **The correction is not a scale factor: it is to multiply by the SH value the game multiplies by.**
+
+**What is missing to ship it, precisely.** Our material has the track's SH hemisphere, but only in its *fitted* form: `car.rs::update_car_fill` multiplies `HLTopColour` / `HLBottomColour` by `FH1_RM_CAR_FILL` (0.1, INFERRED) × `IBLAmbientScale` × `game_unit_scale`, and that scaled value is what reaches `paint.fill_top` / `fill_bottom`. Using it would import a fit into a game-sourced term.
+
+**Next step, and it is small:** carry the *unscaled* `HLTopColour` / `HLBottomColour` to the paint material (a second pair of vectors, or a `k` divisor alongside them), evaluate `SH = lerp(bottom, top, 0.5 + 0.5 n.y)` in the shader, and use `SpecularColor . SpecularAmount2 . pow(sat(N.H), SpecularPower2) . SH`. Then measure the car histogram (p95 155.3 against the reference's 179.6, saturation 0.85) on twelve tracks. **That is a game-sourced term end to end, with no fitted light level anywhere in it.**
+
+**Still broken / not tested:** the unscaled SH plumbing; the lobe itself; the sky container (a separate disassembler gap, MODLOG 330). Not committed or staged.
+
+---
+
+## 2026-11-03 (330): default.xex DECODED -- the car body shader is extracted with its constants and disassembly, and P1's missing piece is now readable
+
+**What changed:** nothing in the renderer. This is a successful decode, using tooling this project already had.
+
+**Result 1 -- the header, correctly parsed.** My first pass read the file-format record's encryption/compression as two `u8`. They are two `u16`, which `crates/fh1-shaders/src/xex.rs` documents. The corrected values:
+
+| field | value |
+|---|---|
+| magic | `XEX2`, big-endian throughout |
+| header size | `0x3000` |
+| optional headers | 15 |
+| **encryption** (u16 @ format+4) | **1 = AES** |
+| **compression** (u16 @ format+6) | **1 = basic** (verbatim blocks + zero fill) |
+| `image_size` (security+4) | **11,796,480** (11.80 MB) |
+| `load_address` (security+0x110) | **0x82000000** |
+
+The mis-read matters and is recorded: from `encryption = 0` I copied the blocks by hand and got 11.76 MB of data with **8.00 bits/byte entropy**, zero PE signatures and zero section names -- which I could easily have misread as "the shader is not in the executable". The payload is AES-encrypted; `xex.rs` says so and the file key lives at security+0x150, itself encrypted with the retail key.
+
+**Result 2 -- and the key is already on this machine.** `data/xex_key.txt` exists (the project expects it; `xex::retail_key()` reads it), so `fh1_shaders::xex::load` decrypts and decompresses without any new code. `xex::embedded_effects()` then yields the executable's effect blobs.
+
+**Result 3 -- the car body shader is in the executable, and here it is.** `fm2_fxlist` over the decoded image lists **8 distinct effects**, one of which is:
+
+```
+effect @82066f50 technique body            passes 1
+effect @82066f50 technique body_packed     ...
+effect @82066f50 technique body_2          ...
+```
+
+`fm2_fxdump <xex> body` prints that technique's passes with **both constant tables and the full microcode disassembly** (555 lines, VS and PS).
+
+**Result 4 -- the constants, and a correction to what the XML was taken to mean.** The shader's *defaults* differ from Metallic.xml's per-car overrides, which is exactly how the game's chain works:
+
+| constant | shader default | Metallic.xml `body` | Normal.xml `body` |
+|---|---|---|---|
+| `SpecularAmount` (c190) | **4.0** | 0.0 | 0.0 |
+| `SpecularAmount2` (c181) | **1.0** | **4.0** | 0 |
+| `SpecularPower` (c191) | 128 | 200 | 200 |
+| `SpecularPower2` (c182) | **10.0** | **5.0** | 0 |
+| `CubeMultiplier` (c201) | **2.2** | **12.0** | 12.0 |
+| `FresnelMin / Max / Scale` | 0 / 1 / 1 | 0.05 / 0.7 / 1.75 | same |
+| `ColorScale` / `ColorClamp` | 0.6 / 0.9 | 0.6 / 0.9 | 0.6 / 0.9 |
+
+So the earlier reading of the XML was right about the *values*, and the shader now confirms they are overrides of these defaults -- including that `CubeMultiplier`'s own default is **2.2**, not 12, which is why the "12" only applies to a paint whose XML sets it.
+
+**Result 5 -- and the multiplication is not hidden behind a normalisation constant.** Every one of these appears exactly once in the PS, used directly:
+
+```
++ mulsc r0.x___, c181.x, r0.z        // SpecularAmount2 x (something)
++ mulsc r5.x___, c190.x, r0.y        // SpecularAmount  x (something)
+  87  mad r5.x___, r0.yyyy, c201.xxxx, c254.yyyy   // CubeMultiplier x (something) + 1.0
+  91  mul r0._y__, r0.yyyy, c182.xxxx              // SpecularPower2 x (something)
+```
+
+**There is no `1/pi`, no `0.5`, no scale between them.** So P1's "light units" question is answerable by reading what feeds those registers -- the lighting term, which the VS passes in via the SH constants (`sh0..sh3`, `c36`-`c47`) and the track light. **That is now a reading task on a file we can print, not a blocker.**
+
+**Consequence for the plan -- P1 is unblocked.** Its recorded condition was "`default.xex` is decoded, or a stated light unit appears in the tunables". The first half is now met, and the shader that was missing is extracted with its constants and its code.
+
+P3 is unchanged and now clearly separable: the executable's embedded effects contain **no sky technique** (8 distinct effects, none matching "sky"), so the sky shader is still the track's `.sky.rmb` one whose microcode disassembles to 33 nops -- a *disassembler* gap in a different container, not the same problem.
+
+**Still broken / not tested:** the light units themselves (the next read); P3's sky container. The derived shader dump is game code and was **deleted** after reading, per `AGENTS.md`; it is reproducible with `fm2_fxdump`. Not committed or staged.
+
+---
+
+## 2026-11-03 (329): P3 terminal -- the sky's multiplier is set by the executable, and P3 now shares P1's single prerequisite
+
+**What changed:** one diagnostic correction (the material-block dump now uses the **0x14 (20-byte) stride** that `fm2_uv::spec_exponent` documents, with register labels). No renderer change.
+
+**Result 1 -- the block is now cleanly aligned, and it confirms the draw records.** With the correct stride the dump lines up exactly with `sky.json`:
+
+| track | block (labelled) | the draw record says |
+|---|---|---|
+| Tsukuba (draw 5) | `c1=[1,1,1,1]`, everything else zero | `c1 = 1.0` ✓ |
+| Suzuka (draw 0) | `c0=[1,1,1,1] c1=[2,2,2,2] c2=[1,1,1,1]`, rest zero | `c1 = 2.0`, `c2 = 1.0` ✓ |
+
+So the earlier 16-byte-stride dump was misaligned; at 0x14 the registers read off correctly and the values match the per-draw records.
+
+**Result 2 -- and the block ENDS at c2.** Nothing at or above register 100 exists in the sky model's constant block. **`c_skyMultiplier` (register 188) is therefore not in the model at all** -- it is a per-frame constant the game's material system supplies at runtime.
+
+**Result 3 -- and it is not in `TrackSettings` either.** The track file has a `skyGain` field, which is the obvious candidate for a per-track sky brightness. Measured across eleven maps:
+
+| map | `skyGain` | shipped inferred gain |
+|---|---|---|
+| Mugello / Silverstone | **0.00** | 1.40 / 0.91 |
+| Laguna Seca | 0.08 | 0.82 |
+| Maple Valley | 0.10 | 0.85 |
+| Nordschleife | 0.20 | 1.26 |
+| TT King Cobra | 0.25 | 1.00 |
+| Sebring / Suzuka | 0.30 | 0.96 / 1.20 |
+| Road Atlanta | 0.33 | 1.00 |
+| Tsukuba | 0.40 | 1.55 |
+| Sunset Infield | 0.45 | 1.06 |
+
+**Correlation 0.265**, and the ranges do not even overlap usefully (`skyGain` 0.00-0.45, inferred 0.82-1.55). This independently re-confirms MODLOG 90's note that the game's `skyGain` does not explain the per-track brightness.
+
+**P3 is therefore terminal in the same way as P1: the value is set by the executable.** The chain is now complete and evidence-backed:
+
+1. the draw records write only c0..c3 (measured on every imported map);
+2. the material block also ends at c2 (measured above);
+3. `c_skyMultiplier` lives at register 188, in the space the *game* fills per frame;
+4. the only per-track file value that could carry it, `skyGain`, correlates 0.265;
+5. the executable is not decodable (MODLOG 328: no PE at the declared offset, no shader containers).
+
+**Consequence for the plan -- the two remaining blockers now share one prerequisite.** P1 (car light units) and P3 (sky multiplier) both need the same thing: **decode `default.xex`'s container**. That is a single research task, and it is the highest-leverage remaining item because it would unblock two of the three content routes at once (the car is 10.4 % of the error, the sky 34.2 %).
+
+**Still broken / not tested:** the XEX container. The `skyGain` table is recorded so it is not re-checked. Diagnostics env-gated; install at the default environment. Not committed or staged.
+
+---
+
+## 2026-11-03 (328): P3 advanced -- the sky's multiplier is a MATERIAL constant and the importer never reads that block; P1 re-checked -- the executable carries no shader containers
+
+**What changed:** a diagnostic (`FM2_SKY_MAT`, print-only, added to the import fingerprint's deny-list) and `fm2_uv::section` made public. No renderer change. Install restored to the default environment (fingerprint empty).
+
+**P3 -- the split the earlier entries missed.** FM2 uses **two register spaces**, and `fm2_uv.rs` already documents it: draw-set constants are registers **< 100**, and the ones at **>= 100 come from the material block**. The sky shader's named constants sit in the second space:
+
+```
+c_globalSpecularLevel  Float4:104
+c_skyMultiplier        Float4:188
+```
+
+and the sky **model's draw record only ever writes c0..c3** (measured across every imported map: keys `c0` 179×, `c1` 107×, `c2` 78×, `c3` 45×, and nothing above 3).
+
+**So `c_skyMultiplier` is a material constant, and the sky importer never reads the material block** -- `fm2_sky.rs` parses the model with `fm2::parse_model` (draw stream only); the material parser `rmb::parse` handles the **FH1/FM4** format ("6 = FH1/FH2/FM4, 4 = FM3"), not FM2's. **The per-track sky multiplier is on the disc, in the sky model's material record, and is simply not imported.** That is a parser gap, not missing data -- a materially better state than "unmapped slot".
+
+**And the block is locatable.** The new dump finds it in `.data` by matching one of the draw's own non-zero constants and prints 40 float4s around it. Comparing two tracks:
+
+| track | the block (first 9 float4s from the match) |
+|---|---|
+| Tsukuba | 0,0,0,0 · 0,0,0,0 · 0,0,0,0 · 0,0,0,0 · **1,1,1,1** · 0,… |
+| Suzuka | 0,0,0,0 · 0,0,0,0 · 0,0,1 · 1,1,1,0 · **2,2,2,2** · 0,1,1,1 · 1,0,0,0 · 0,… |
+
+**Suzuka carries `[2,2,2,2]` where Tsukuba carries `[1,1,1,1]`** -- the same relative position, the same kind of value, and exactly the 2.0-vs-1.0 contrast MODLOG 320 found in the inferred gain table. **But this is suggestive, not conclusive**: the two blocks come from different draws, the alignment is not yet pinned to a register index, and the shader's instruction stream (which would say which register it multiplies by) is still 33 nops.
+
+**P3's blocker is therefore re-stated, and it is now narrower:** the data is present in the sky model's material block; what is missing is (a) an FM2 material-block reader in the importer and (b) the register alignment, which needs either a layout spec or a readable instruction stream.
+
+**P1 -- re-checked, and the last place is closed too.** The car shader was not in the car assets (MODLOG 320), so `default.xex` was the remaining possibility:
+
+| check | result |
+|---|---|
+| `default.xex`, 11.0 MB | module flags `0x01000000` (format bits 0), declared module offset `0x300000` |
+| bytes at the declared module offset | `3b 10 be 1c` -- **not a PE image** (`MZ`/`PE\0\0` absent where it should be) |
+| big-endian shader magic `0x102A1100`/`0x102A1101` | **0 occurrences** (little-endian form also 0) |
+| the car's `.carbin` (4.5 MB), same magic | **0 occurrences** |
+
+**So the executable does not carry container-formatted shaders**, and it is not in a form we can read directly (no PE at the declared offset). **P1's condition becomes precise: the car's shader cannot be obtained without first decoding `default.xex`'s container** -- which is a research task on the XEX format, not a data lookup.
+
+**Still broken / not tested:** the FM2 material-block reader; the register alignment; the XEX container. Diagnostics are env-gated and listed in the fingerprint deny-list. `fh1setup` builds, differential test 0.000000, baseline 30.489 / 1.36 %, install at the default environment. Not committed or staged.
+
+---
+
+## 2026-11-03 (327): plan v10 CLOSED -- the §8 exit recorded, the four-games decision taken, and P2's last condition excluded
+
+**What changed:** documentation, plus one measurement that closes P2's final route. `docs/DESIGN.md` gains **§10 "§8 exit: the plan is complete, and here is the honest accounting"**.
+
+**Result 1 -- P2's last remaining condition is EXCLUDED.** P2's only open route was "a further shader pass or uv layer the importer drops". Measured directly on both tracks that matter:
+
+| track | texture-slot counts | most non-null slots in any material |
+|---|---|---|
+| Road Atlanta | 4,348 materials with **8**, 19 with 1 | **5** |
+| Tsukuba | 1,859 materials with **8**, 13 with 1 | **5** |
+
+The material record carries **12 roles** (`ROLES = 12`), so a material using at most **5** slots cannot be truncated; and the mesh carries all three uv sets (`VERTEX_WORDS = 13: position, normal, uv0, uv1, uv2, colour`). **Nothing is dropped.** So the road's detail is not in a layer the importer discards either, which means the colour texture is now excluded on **five** axes: content, coverage, source resolution, mip chain, and dropped layers/uvs. P2 is therefore **exhausted within this approach** -- the only remaining route is executing the road shader per pixel at render time, which is the reproduction route MODLOG 289 measured at 4.3× too dark with every input the disc carries.
+
+**Result 2 -- the §8 exit is recorded, including the parts that are uncomfortable.**
+
+- **P0 did not meet its own gate.** The written gate was "two identical rebuilds within 0.009-0.020 on all twelve tracks". The measured behaviour is 0.0012 when runs converge and up to ~0.06 when one lands in the outlier mode, which MODLOG 326 characterised as sub-pixel edge rasterisation. The plan **substituted a 0.1 judgement threshold** rather than meeting it, and §10.1 states that as a redefinition: **P0 is "characterised", not "fixed"**.
+- **No renderer number moved from v10's work.** The only shipped renderer change remains MODLOG 314's car shadow rule (31.143 → 30.489, 12 of 12 tracks), which came from the previous plan. v10's yield is four closed routes with numbers and three blockers with conditions -- recorded plainly rather than presented as progress.
+
+**Result 3 -- the §8 decision on the other four games: DO NOT OPEN THEM NOW.** Three reasons, in order:
+
+1. **No surviving lever to port.** The one lesson this work produced is that *the mechanism using the game's own per-vertex or per-draw data moves a frame*, and everything else measured inert. FM2's own per-vertex lever has already been taken; four more games would multiply measurement without a second lever.
+2. **Each game's content route is blocked for structural reasons**, not effort: the car shader is absent from the car assets, the road's detail is absent from its texture on five axes, the sky's constant is named but unmapped. Nothing suggests the other discs organise their data differently in a way that removes those obstacles.
+3. **The instrument is portable and already built** -- deterministic capture, whole-frame metric with a hold-out, per-region residual, shader oracle. Opening a game later costs a re-freeze and a baseline, not a rebuild. **Deferring loses nothing.**
+
+**What would reopen that decision**, stated so it is not a matter of mood: a mechanism proven to move a 12-track mean by **≥ 1.0** on FM2 (the shipped rule moved it 0.65; nothing else moved it at all); **or** a source for any one blocked input (decompress `default.xex` for the car shader, the sky's slot→register map, a further road pass); **or** a decision to build the per-pixel reproduction renderer, which would make all three moot at once.
+
+**Plan status: complete.** P0 characterised (gate unmet, threshold substituted, stated), P1 blocked, P2 exhausted, P3 blocked -- each with its evidence in MODLOG and its condition in `docs/DESIGN.md` §3, and the four-games decision taken in §10.2.
+
+**Still broken / not tested:** the blocker conditions themselves; the P0 gate as originally written. Installed content is at the default environment, `import_env.txt` empty, baseline **30.489 / 1.36 %**, builds clean, differential test 0.000000. Not committed or staged.
+
+---
+
+## 2026-11-03 (326): plan v10 -- P2's no-mip condition EXCLUDED by a real import-side test; P0's bimodal variation is edge rasterisation, not a missing draw
+
+**What changed:** one diagnostic capability added at the importer: `FM2_ROAD_NOMIP=1` writes the baked road textures with **level 0 only** (`rgba_to_dds_level0` in `textures.rs`, threaded through `faces_to_dds`), applied at both road-bake write sites. It is **off by default** and is the exact test MODLOG 325 said could not be done engine-side.
+
+**P2 -- the no-mip test was run properly this time, and it is a clean negative.**
+
+| capture | road texture chain | road diff | fine-band detail | ratio to reference (10.59) |
+|---|---|---|---|---|
+| shipped | **9 levels** (87,556 B) | 33.86 | 6.54 | **0.62** |
+| `FM2_ROAD_NOMIP=1` | **1 level** (65,684 B) | 33.85 | 6.54 | **0.62** |
+
+The file evidence proves the knob fired: `ffff2000.dds` and `ffff2001.dds` came out with `mips=1` and 21,872 bytes smaller each, and the re-import at default restored `mips=9`. **The rendered road is unchanged to two decimals.**
+
+**So the road's missing fine detail is not the sampler's mip choice.** Combined with MODLOG 324 (108 per-texel bakes instead of 2, no change; 1024² instead of 256², no change), the road's colour texture is now excluded on **four** axes: content, coverage, source resolution, and mip chain.
+
+**P2's second unblocking condition is therefore closed** -- it is no longer "a mip-0 test is owed". What remains is the first: the detail must come from something the engine does not sample at all (a further shader pass or uv layer), which the shader oracle can answer per layer.
+
+**P0 -- the scenery-draw-coverage hypothesis is NOT supported.** Block analysis of an outlier against a converged run (16×16 blocks, shadows and motion blur off):
+
+```
+blocks with any difference : 639 of 3,600   (17.75 %)
+  fully different (>0.9)   : 2
+  edge-like  (0.1..0.9)    : 91
+  sparse     (<=0.1)       : 546
+```
+
+**A draw present in one run and absent in the other would produce blocks that are wholly different**; only **2 of 3,600** are. The difference is dominated by *sparse* blocks (546) with thin, edge-shaped structure -- which, together with the already-measured absence of any translation down to 1/50 px, reads as **sub-pixel edge rasterisation**, not draw coverage and not texture sampling.
+
+**P0 is closed as characterised:** a bimodal, edge-shaped, ≤0.06-mean variation that no texture, draw, or transform explains; its effect is below the plan's 0.1 judgement threshold, and it is recorded rather than chased further.
+
+**Install restored:** Road Atlanta re-imported at the default environment, remaster rebuilt, `import_env.txt` **empty**, baked road textures back to `mips=9`.
+
+**Still broken / not tested:** the exact mechanism of the edge rasterisation (not pursued: it does not affect any gate); P2's remaining condition (a further shader pass / uv layer). Not committed or staged.
+
+---
+
+## 2026-11-03 (325): plan v10 -- P0's first candidate EXCLUDED by construction; P0's second refined; P2's mip-0 test inconclusive
+
+**What changed:** nothing shipped. A `FH1_MIP0=<n>` sampler diagnostic was added to `mipgen.rs`, measured, and **removed again** (`FH1_MIP0` is absent from the tree; only the shipped `FH1_ANISO` claim of MODLOG 298 remains in that file).
+
+**P0 candidate 1 -- "the dome's texture sampling (mips/anisotropy on a 512x512 page)" -- is EXCLUDED, and not by measurement: there are no mips.** `fm2_sky.rs` builds the dome image with `Image::new(...)`, which is **level 0 only**, and the code says so:
+
+```rust
+// Level 0 only (the dome is viewed near 1:1).
+let img = Image::new(Extent3d { width: w, height: h, .. }, TextureDimension::D2, b.get(148..148 + len0)?.to_vec(), format, ..);
+```
+
+The DDS's stored levels are read but only level 0 is uploaded (`let _ = mips;`). **A texture with one level has no mip selection to vary**, so the mip hypothesis cannot explain a bimodal sky difference. This also means the earlier "mip chain full (1024x512, 11 mips)" note in MODLOG 295 is about the *file*, not about what the renderer samples.
+
+**P0 candidate 2 -- refined, and the shift family is excluded too.** A fine translation search of one run onto another over the sky band, at 0.02 px steps to +-0.20 px:
+
+```
+base 0.1789   best (+0.00, +0.00) -> 0.1789   gain 0.0000
+```
+
+**No translation at any scale down to 1/50 px.** So the bimodal difference is not the dome moving, not the camera moving, and not mip selection. What it *is*: sparse (1-3 % of pixels), large per-pixel deltas (up to 134), and concentrated at the horizon band (y 149-335, mid 3.50 % vs car/road 0.04 %). That pattern is "something is drawn in one run and not the other", which points at **scenery draw coverage** -- tile/LOD/streaming -- rather than at the sky dome at all. That is a third candidate, not one of the two the plan named.
+
+**P2's second unblocking condition -- the mip-0 test on the road texture -- was attempted and is INCONCLUSIVE.** Implemented as `FH1_MIP0=256` (pin `lod_max_clamp` to 0 and `mipmap_filter` to nearest for any 2-D 256x256 texture with a chain), built, measured on two tracks:
+
+| track | capture | road diff | fine-band detail | ratio |
+|---|---|---|---|---|
+| Road Atlanta | shipped | 33.86 | 6.54 | 0.62 |
+| | `FH1_MIP0=256` | 33.86 | 6.54 | 0.62 |
+| Tsukuba | shipped | 22.07 | 6.78 | 0.77 |
+| | `FH1_MIP0=256` | 22.07 | 6.78 | 0.77 |
+
+**Identical to the last digit, which cannot be read as "mips do not matter".** The override mutates the `Image` asset's sampler *after* the material has already bound its sampler into the bind group during scene load, so the change most likely never reaches the GPU. That is a plausible mechanism, not a demonstrated one, so the result is recorded as **inconclusive** rather than as a negative -- and the diagnostic was removed rather than left in as dead code.
+
+**Where that leaves the two open items:**
+
+| item | state |
+|---|---|
+| P0 candidate 1 (dome mips) | **excluded by construction** -- the dome is level 0 only |
+| P0 candidate 2 (transparent sort) | not tested, and the evidence now favours **scenery draw coverage** instead (sparse, large-delta, horizon-concentrated, no translation at 1/50 px) |
+| P2's mip-0 condition | attempted, **inconclusive** -- the sampler was mutated too late to reach the bind group; a real test needs the texture written **without a chain at import** (`bake_road_px`'s `rgba_to_dds` site), which is a different change |
+
+**Still broken / not tested:** the scenery-coverage hypothesis; P2's import-side no-mip test. `mipgen.rs` verified to contain only the MODLOG 298 change, the engine builds, differential test 0.000000. Not committed or staged.
+
+---
+
+## 2026-11-03 (324): plan v10 P2 BLOCKED -- the per-texel road bake runs (108 textures), at 16x the resolution, and changes nothing
+
+**What changed:** nothing shipped. `fm2_scenery.rs`'s `clamp(16, 256)` was raised to 1024 for one test and **restored**; the install was re-imported at the default environment and its fingerprint is empty again.
+
+**Why:** P2's gate is "fine-band ratio 0.74 -> >0.90". MODLOG 323 left its first experiment unrun; this entry runs the whole sequence and settles it.
+
+**The sequence, on Road Atlanta, same binary and pose:**
+
+| state | baked road textures written | road diff | fine-band detail | ratio to reference (10.59) |
+|---|---|---|---|---|
+| shipped | **2** | 33.86 | 6.54 | **0.62** |
+| `FM2_ROAD_PX=1` | 2 | 33.86 | 6.54 | 0.62 |
+| `+ FM2_SHADER_ROAD=1` (its precondition forced) | **108** (6 distinct contents) | 33.86 | 6.53 | **0.62** |
+| `+ FM2_ROAD_PX_DIM=1024` (16x the texel area) | 108 | 33.86 | 6.54 | **0.62** |
+
+**What each line establishes:**
+
+1. `FM2_ROAD_PX=1` alone does nothing because its `albedo` precondition is unmet — the baked count stays at 2.
+2. Forcing that precondition makes the per-texel bake **actually run**: **108** baked road textures where the shipped build writes **2**, with six distinct contents. The renderer's road band is nonetheless **byte-for-byte unchanged** (diff 33.86, detail 6.54 -> 6.53).
+3. Raising the bake to **1024x1024**, sixteen times the texel area of the default 256, changes it by **0.01 of detail**. Nothing.
+
+**So the road's fine detail is not produced by its colour texture at all** -- not its content, not which draws are on the per-texel path, and not its resolution. Every knob that acts on that texture is now measured and inert. This also closes MODLOG 299's resolution question for good: that test moved `FM2_ROAD_PX_DIM` while the path was **disabled**, so it was measuring the general bake and never this one.
+
+**P2 is closed as blocked, with its unblocking conditions:**
+
+| needs | because |
+|---|---|
+| the road's detail to be traced to something the engine does not sample -- a further shader pass or uv layer (the shader oracle, per layer, is the tool) | the colour texture is now excluded at every resolution and coverage |
+| **or** a demonstration that the renderer's screen-space sampling of the baked texture is the limit (a mip-0 / no-mip test on the road texture) | at 1024 the source carries 16x the texels and the screen does not show them, which points at the sampler's mip choice rather than the source |
+
+Note that the second is **not** the anisotropy test of MODLOG 298 (rejected there): that changed the filter, this would remove the mip chain from the road texture specifically.
+
+**Install restored and checked:** clamp back to `clamp(16, 256)` at `fm2_scenery.rs:288`, Road Atlanta re-imported at the default environment, remaster rebuilt, `import_env.txt` **empty**, and the baked-texture count back to **2**.
+
+**Plan status after this entry -- every project now meets plan §8:**
+
+| project | outcome |
+|---|---|
+| **P1** | blocked: the car's pixel shader is in no readable container (MODLOG 320) |
+| **P2** | blocked: the per-texel bake runs at 16x resolution and changes nothing (this entry) |
+| **P3** | blocked: `c_skyMultiplier` exists but its slot->register map is unknown and the microcode is 33 nops (MODLOG 322) |
+| **P0** | measured and usable: floor 0.001 when converged, up to ~0.06 worst case; gates set at 0.1 (MODLOG 321) |
+
+**Still broken / not tested:** the two P2 unblocking conditions; P0's bimodal sky variation. Not committed or staged.
+
+---
+
+## 2026-11-03 (323): plan v10 P2 started -- the per-texel road bake already exists and is switched off; MODLOG 299's conclusion corrected
+
+**What changed:** nothing shipped. One experiment (import with `FM2_ROAD_PX=1`, capture, measure) and one
+restore. The install's environment fingerprint is back to empty (`import_env.txt`).
+
+**The correction, and it matters.** Plan v10 and MODLOG 299 both assumed the per-texel road bake would have to
+be *built*. **It already exists**: `fm2_scenery.rs::bake_road_px` evaluates the draw's own pixel shader at every
+texel via `shader_eval_at`, with a per-item affine uv fit so tiling and atlas transforms follow the draw's own
+mapping. Three reasons it is not doing anything:
+
+| reason | detail |
+|---|---|
+| **it is off by default** | it runs only when `FM2_ROAD_PX` is set; unset = the old constant/grain heuristic |
+| **its resolution is capped** | `FM2_ROAD_PX_DIM` defaults to 256 and is clamped `16..=256` |
+| **it has a precondition** | `albedo` must be `Some`: set by `FM2_SHADER_ROAD=1` **or** by the draw's family having a gamma entry, and the evaluated colour must exceed 0.03 |
+
+**MODLOG 299 is therefore wrong** where it says *"`FM2_ROAD_PX_DIM` does nothing at all for this track, so
+Tsukuba's road does not take that path"*: the knob did nothing because **the path was disabled**, not because
+the draw does not use it. The resolution test in 299 was measuring the *general* bake, not this one.
+
+**The experiment -- enabling it on Road Atlanta changes nothing, for the reason above:**
+
+| | road diff | fine-band detail | ratio to reference (10.59) |
+|---|---|---|---|
+| shipped | 33.86 | 6.54 | **0.62** |
+| `FM2_ROAD_PX=1` | 33.86 | 6.54 | **0.62** |
+
+Identical to the last digit, so the bake did not run on that road: its `albedo` precondition is unmet there.
+The import itself did run and reported `baked 232 blend draws from their pixel shaders`, so the machinery is
+alive -- it simply is not reaching this draw.
+
+**What P2's next step is, precisely:** one track at a time, with the **fine-band ratio** as the gate (the mean
+alone cannot distinguish "more detail" from "different detail"):
+
+1. `FM2_SHADER_ROAD=1 FM2_ROAD_PX=1` on one track -- this forces the albedo evaluation, so the bake runs, but
+   it also switches the albedo heuristic; the ratio is the honest measure;
+2. if the ratio rises, lift the 256 clamp (a one-line change) and measure again;
+3. only then consider a wider bake.
+
+**Install restored and verified.** Re-imported Road Atlanta at the default environment and rebuilt the remaster
+tables; the fingerprint file is empty again and the importer's own warning fired as designed
+(`"envdc68c6e6" -> ""`). The capture comparison is **inconclusive at the precision the noise allows**:
+
+```
+restore1 vs restore2   : mean 0.0529   96.7 % identical
+restore1 vs baseline   : mean 0.0687   91.8 %
+restore2 vs baseline   : mean 0.0701   91.7 %
+```
+
+Both restore runs agree with *each other* about as well as they agree with the baseline, and all of it is
+inside the bimodal spread P0 measured (0.001 when converged, up to ~0.09 when not, MODLOG 321). So this is the
+known capture variation, not a content change -- but it is stated as inconclusive rather than as a pass,
+because at this precision a content change of that size could not be told apart from it.
+
+**Still broken / not tested:** P2's gate has not been run; the 256 clamp has not been lifted; P0's bimodal sky
+variation is still unidentified. Not committed or staged.
+
+---
+
+## 2026-11-03 (322): plan v10 P3 BLOCKED -- the sky constants are named but their slots do not map to registers, and the microcode does not disassemble
+
+**What changed:** one diagnostic improvement in `crates/fh1setup/src/fm2_uv.rs`: the `FM2_DUMP_SKY_PS` print now shows each pixel-shader constant's **register set and register number** alongside its name (previously only the name). No renderer change.
+
+**Why:** P3's open question was "what does the sky model's per-draw `c1` mean?". MODLOG 320 applied it as a brightness, which helped seven tracks and destroyed TT King Cobra (+15.69). The plan (§8) requires either a shipped mechanism or a recorded blocker for each project, and P3 had neither.
+
+**Result 1 -- the sky shader's constants have names, and they are not where the model writes.** Tsukuba's five dome draws all share one pixel shader (`ps_3_0`, container `0x684`):
+
+```
+constants ["c_globalSpecularLevel Float4:104", "c_skyMultiplier Float4:188", "s_sampler0 Sampler:0"]
+```
+
+**`c_skyMultiplier` exists** -- a sky brightness multiplier, exactly the quantity the per-track exposure difference needs. But its register is **188**, and `c_globalSpecularLevel`'s is **104**, while the model's per-draw constants are keyed **0, 1, 2, 3**. So:
+
+> the `c1` in `sky.json` is **not** register 1 -- it is a slot index in the model's own constant record, and nothing in our tooling maps that slot to the shader's register.
+
+**That is the explanation for MODLOG 320's result**: applying slot 1 as a brightness was right on tracks whose slot 1 happened to be the multiplier (the `c1 = 2.0` tracks) and wrong wherever the slot means something else. It was never a justified mapping.
+
+**Result 2 -- and the shader body cannot be read.** Dumping the draw's microcode produces **33 `nop` instructions and zero real ones**:
+
+```
+[fm2 sky] draw 0: pixel container at 0x684, target ps_3_0, constants [...]
+[fm2 sky]   float defs [(252, [0,0,0,0]), ..., (255, [0,0,0,0])]
+   0: nop   1: nop   ... 32: nop
+```
+
+So the formula (`tex * c_skyMultiplier`? a lerp? a clamp?) is **not readable** with the current container parse/disassembler, even though the same tooling translates and validates 201,910 track and car shaders.
+
+**Result 3 -- different tracks use different sky shaders**, which is why no single slot rule could work. Suzuka's draw 0 reports a completely different set:
+
+```
+constants ["c_constant0", "c_constant1", "c_flareConst", "c_sunSize", "s_sampler0"]
+```
+
+That is a sun/flare shader, not the dome. A rule keyed on "slot 1" therefore cannot be correct across tracks by construction.
+
+**P3 is closed as blocked, with its unblocking conditions stated:**
+
+| needs | because |
+|---|---|
+| the sky pixel shader's microcode to **disassemble** (the container parse yields only nops for these small shaders, or their encoding differs) | the formula decides whether the constant multiplies, lerps or clamps |
+| or the model's **constant-slot → shader-register map** | to know which slot is `c_skyMultiplier` (register 188) rather than guessing order |
+
+**What survives for a future session:** the shader names are known (`c_skyMultiplier` at 188, `c_globalSpecularLevel` at 104), the per-draw slots are recorded in `sky.json` (read by `data/work/p1_sky_constants.py`), and the correlation found in MODLOG 320 stands -- the tracks where the inferred gain was essential are the ones whose slots carry `2.0`. **The next step is a tooling fix (disassembly of the sky container), not a measurement.**
+
+**Still broken / not tested:** the sky microcode; the slot map. P2 has not been started. Not committed or staged.
+
+---
+
+## 2026-11-03 (321): plan v10 P0 -- the non-determinism bisected: two sources, one bimodal and confined to the sky, and a usable floor
+
+**What changed:** nothing (diagnostic only). Every test below is the **same binary** and the same pose file.
+
+**What P0 was asked to do:** find why two captures differ by 0.0509 against the 0.009-0.020 floor, and get back to that floor on all twelve tracks.
+
+**Result 1 -- it is NOT the shipped car change.** Three runs with the shadow rule on and three with it off (`FH1_FM2_CAR_SHADE=0`):
+
+| configuration | run1-run2 | run1-run3 | run2-run3 |
+|---|---|---|---|
+| shipped change **on** | 0.0612 | **0.0074** | 0.0596 |
+| shipped change **off** | 0.0525 | 0.0266 | 0.0621 |
+
+**The same spread with the feature off**, so the change is not the cause. Note the first row: one pair is at 0.0074 -- already **bimodal**, not a continuous noise floor.
+
+**Result 2 -- it is not a sub-pixel shift, and the car is bit-identical.** Best translation of one run onto another over a +-0.5 px search: **dx 0.0, dy 0.0, gain 0.0000**; over a +-3 px search on the sky band alone: **gain 0.0000**. Region split of a typical pair:
+
+| region | differing | mean delta | max |
+|---|---|---|---|
+| sky | 1.12 % | 0.056 | 88 |
+| mid (horizon / treeline) | 3.50 % | 0.263 | **134** |
+| **car / road** | **0.04 %** | **0.000** | **10** |
+| bottom | 0.02 % | 0.000 | 1 |
+
+**The car and road are effectively identical; the whole difference is in y 149-335 -- the sky and the distant horizon.** That rules out the camera (it would move everything), the car pose, and the physics step.
+
+**Result 3 -- it is bimodal**: with shadows and motion blur off, **run1 vs run3 = 0.0012** (essentially identical) while run2 differs from both by 0.0598. So the process usually reproduces itself exactly and occasionally lands in a different state.
+
+**Result 4 -- shadows are one of the two sources.** Turning the shadow maps off halves the spread: ~0.06 -> 0.027-0.035.
+
+**Result 5 -- four candidates tested and excluded:**
+
+| knob | effect on the spread | verdict |
+|---|---|---|
+| `FH1_MIPGEN_ASYNC=0` | 0.046-0.090 | worse, **not** the cause |
+| `FH1_RM_SHADOWS=0` | 0.027-0.035 | **partial** -- halves it |
+| `FH1_RM_MOTION_BLUR=0` | with shadows off: 0.0012 / 0.0598 | **not** the cause |
+| `FH1_FM2_SKY_LAYERS=0` | 0.026-0.062 | **not** the cause |
+
+**Where P0 stands, and what it means for the plan.** The residual has **two** sources: the shadow map's per-frame state (worth about half, and expected -- the cascade cache refreshes on camera move and age), and a **bimodal sky/horizon variation** that is not a shift, not the dome's blended layers, not mip generation, and not anything in the car or road. The second is still unidentified, and the honest next candidates are the sky dome's texture sampling (mips/anisotropy on a 512x512 page under a per-frame derivative) and the transparent-pass sort order.
+
+**And the practical conclusion, which is what the plan needed:** the floor is **not** a single number. **Identical runs reproduce to 0.001; the worst case is ~0.06**, and it is confined to the sky band where the effects P3 is chasing are 1 to 15 levels. So:
+
+- the plan's P3 and P2 gates are judged at **>= 0.1** on the region they target, which is 2x the worst observed noise and well under every effect currently in play;
+- **`0.009-0.020` is withdrawn as the project's noise figure** and replaced by "0.001 when the run converges, up to ~0.06 when it does not";
+- P0 stays open with its two named candidates, but it no longer blocks judgement.
+
+**Still broken / not tested:** the bimodal sky variation (two candidates named, neither tested); the shadow-map contribution was not itself reduced, only measured. Not committed or staged.
+
+---
+
+## 2026-11-03 (320): plan v10 first actions -- P1 blocked by data, P3's constants measured and rejected as a brightness, and the capture floor has degraded
+
+**What changed:** nothing shipped. `fm2_sky.rs` was modified for P3's test and **restored to HEAD** (`git diff` empty). No other source change.
+
+**P1 -- the car body pixel shader is not on the disc in any container we can read.** Plan v10's first step was to extend the shader runner to open a `.carbin`. That is impossible, and the reason is data rather than effort:
+
+| place tried | result |
+|---|---|
+| the car's `.carbin` (4.5 MB, `NIS_SkylineGTRVSpecII_02`) | **no shader section at all** -- no `.gpu`, `.data`, `shdr`, `fxobj`; header is geometry (`00 00 00 02` then bounds) |
+| the car's `fx/` folder in the FM2 zip | **does not exist** -- the zip holds the carbin, textures and physics only |
+| the `.fxcar` files in the imported car | **FH1's**, not FM2's -- magic `FH1FXCAR`, copied in by the launcher as donor effects |
+| the track bundle (`bin.zip`) | carries only the **six track families** (`h_blnd2_ao`, `h_blnd2_ao_lm`, `h_diff_1`, `h_diff_1_lm`, `h_diff_opac_1`, `h_diff_opac_1_lm`) |
+| `default.xex` | no `0x102A1100`/`0x102A1101` containers found -- **inconclusive**, the XEX is compressed, so a raw scan cannot settle it |
+
+**So the game→renderer light-unit conversion cannot be derived from the paint's shader**, and the fallback of fitting a scale is refused. **P1 is closed as blocked**, with its condition sharpened: the unit is derivable only if the car shader is found (XEX decompression is the remaining place it could be) or if a stated light unit appears in the tunables.
+
+**P3 -- the sky's per-draw constants are real, vary per track, and are NOT a brightness.** New instrument `data/work/p1_sky_constants.py` reads `sky.json`'s `constants` for every draw of every imported map. The engine reads **none** of them (no accessor exists). What they contain:
+
+| map | c1 on the dome draws | inferred gain (shipped) |
+|---|---|---|
+| Tsukuba, Laguna, Sebring, Sunset, New York | **none** (only `c0 = 0`) | 1.55 / 0.82 / 0.96 / 1.06 / -- |
+| Nordschleife | **2.00 / 1.80** | 1.26 |
+| Suzuka, Mugello, Silverstone, Maple Valley | **2.00** | 1.20 / 1.40 / 0.91 / 0.85 |
+| Road Atlanta | **1.00–1.04** | -- |
+| TT King Cobra | **0.54** (and 2.00 on one draw) | -- |
+
+Tested by applying each draw's own `c1` as a brightness with the inferred table disabled (`FH1_FM2_SKY_GAIN=1 FH1_FM2_SKY_CONST=1`), sky band, twelve tracks:
+
+| track | shipped | gain off | gain off + game c1 |
+|---|---|---|---|
+| Suzuka | 25.66 | 44.30 | **18.84** |
+| Maple Valley | 54.41 | 49.86 | **49.82** |
+| Laguna Seca | 33.93 | 30.57 | **30.57** |
+| Tsukuba | 25.70 | 23.77 | **23.74** |
+| Silverstone | 32.43 | 30.94 | 30.95 |
+| Sebring | 22.55 | 21.05 | **21.17** |
+| Nordschleife | 26.25 | 42.88 | **24.98** |
+| Road Atlanta | 32.79 | 32.79 | 32.79 |
+| Mugello | 40.49 | 45.89 | **40.49** |
+| Sunset Infield | 31.57 | 32.33 | 32.34 |
+| New York | 16.09 | 16.09 | 16.09 |
+| **TT King Cobra** | **9.16** | 9.16 | **24.85** |
+
+**Seven tracks improve, several by a lot; TT King Cobra is destroyed (+15.69) and Sunset regresses.** Whole frame 30.489 -> 30.456, but **hold-out 28.808 -> 30.126** (TT is a hold-out track). By the plan's own rule that is a **fit, not progress**, and it is rejected.
+
+**What it does establish, and it is worth keeping:** the three tracks where the inferred gain was previously *essential* (Nordschleife, Suzuka, Mugello) are exactly the three whose draws set `c1 = 2.00`, and the five where the gain was *unnecessary* (Tsukuba, Laguna, Sebring, Sunset, New York) are exactly the ones that set **no** `c1`. The correspondence is not proportional (Suzuka's gain was 1.20, not 2.0) and TT breaks it (0.54), so **`c1` is not a brightness** -- but it is the first quantity found that tracks the per-track error, and the next question is now specific: *what does the sky model's `c1` mean?* That is answerable by the same shader-oracle route if a sky pixel shader can be read, and by the draws' vertex shaders otherwise.
+
+**P0 -- and the capture floor has degraded, which affects how any of this can be judged.** Two captures of the **same binary, same pose** now differ by:
+
+```
+run A vs run B : mean 0.051   identical 97.5 %
+run B vs baseline : mean 0.086   identical 95.8 %
+```
+
+That is **2.5-5x the 0.009-0.020 floor this project has used since MODLOG 260**. It does not invalidate this entry's conclusions -- P3's per-track deltas are 1 to 15 levels, and the shipped change was 0.65 -- but **a claim below ~0.1 is currently unprovable**, and the plan's P0 item (find the residual non-determinism) is now ahead of the others rather than behind them.
+
+**Where the plan stands:** P1 blocked (recorded, with its one remaining place to look); P3's first step done and its lead narrowed to the meaning of one constant; P2 untouched. **Revised order: P0, then P3, then P2** -- the instrument must be able to resolve the effects P3 and P2 are chasing.
+
+**Still broken / not tested:** what `c1` means; whether the XEX holds the car shader; the degraded capture floor. Not committed or staged.
+
+---
+
+## 2026-11-03 (319): plan v10 written -- mechanism-level parity, and an honest ceiling
+
+**What changed:** a new plan, **v10**, appended to `docs/DESIGN.md` ("Plan (2026-11-03, version 10): mechanism-level parity, and an honest ceiling"). It supersedes v9. No code change.
+
+**Why:** all eight of v9's phases ran and all have an outcome, so v9 has no work left to direct. What replaces it has to be built from the result rather than from the original hopes — and the result says something v9's structure could not have anticipated: the error is **uniform** (sky 29.25, road 30.55, scenery 30.14, car 30.18), so no single lever could ever move it, and the **only** change that did move it (MODLOG 314) drew its numbers from the game's own per-vertex data.
+
+**What v10 says, in short:**
+
+- **The goal is restated as two rules, neither of which is "2.0":** (1) do not regress the frozen baseline (30.489 / 1.36 %), judged on the same binary via a kill switch with the hold-out falling alongside the fit set; (2) admit only changes whose values come from the disc or from a documented conversion. **The ceiling stays ~30.5** unless a blocked item reopens, and the basis for that number is written down so it can be argued with.
+- **A closed list of fifteen rejected mechanisms**, each with the number that closes it, so a future session does not spend itself re-testing. This is the part of the plan I expect to be used most.
+- **Three projects, not knobs**, each with its first measurable step and gate:
+  - **P1 the car paint's light units** — the conversion is not on the disc; two independent car terms fail the same way. First step: extend the shader runner to open a `.carbin`, so the oracle can answer "what does the game output for this n·l, n·v and cube fetch". Gate: p95 155.3 → toward 179.6 with saturation held. Carries the **provenance defect** from 317 (FM2 cars reading the FH1 install's `Normal.xml`), which is written, measured harmless, and load-bearing the moment the lobe is retried.
+  - **P3 the sky's per-track exposure** — and it finally has a concrete lead: `sky.json` records each draw's pixel-shader `constants` and **the engine reads none of them** (no accessor exists; the only mention is a comment calling the glow level INFERRED). The first per-track quantity in the sky path that has not been tried.
+  - **P2 the road's per-pixel detail** — extend `bake_road_px` to evaluate the game's pixel shader per texel. Gate: fine-band 0.74 → > 0.90 *and* the region falls.
+- **P0 the instrument** (0.1664 Sunset, ~0.08 drift) is scheduled but not blocking: two of the three projects should exceed it, and any smaller claim is labelled unprovable rather than shipped.
+- **Order by expected gain ÷ cost:** P1 → P3 → P2, with the reasoning for each position.
+- **An exit condition**, so the plan can finish: each project ends either as a shipped mechanism with a twelve-track same-binary A/B, or as a recorded blocker with its unblocking condition — and only then does the other-four-games question open, on the strength of the one lesson this session produced.
+
+**What is deliberately absent:** any promise of 2.0, any per-track table, and any constant that would be chosen because the metric liked it. The plan's §9 says so in one line.
+
+**Still broken / not tested:** the plan is untested by construction — its first action is P1, and nothing in it has yet been run. Not committed or staged.
+
+---
+
+## 2026-11-03 (318): plan v9 Phase H finished -- the decision: accept ~30.5 as the content ceiling, with three named conditions for reopening it
+
+**What changed:** documentation only. `docs/DESIGN.md` gains a **"Phase H (2026-11-03): the decision"** section (per-region residual, per-phase outcome table, the target, the decision, and what the plan got right and wrong); `README.md` gains a **"G6 visual parity: what works and what does not"** subsection under Goals, with the measured numbers. New instrument `data/work/p1_residual.py` (per-region residual and each region's share of the frame's error).
+
+**Why:** plan v9 §8 said the one number it deliberately withheld was the final target, to be set in Phase H from what content work could not remove. That number now exists, so the phase's second half -- "then decide" -- is executed rather than left open.
+
+**Result 1 -- the per-region residual at the shipped state** (`base` prefix, 12 tracks):
+
+| region | mean |d| | within +-2 | share of the error |
+|---|---|---|---|
+| sky | 29.25 | 1.75 % | **34.2 %** |
+| road | 30.55 | 1.39 % | **28.0 %** |
+| scenery at the sides | 30.14 | 1.23 % | 25.6 % |
+| car | 30.18 | 0.88 % | 10.4 % |
+
+**The error is uniform: 29.2-30.6 in every region.** That is the single most important fact in the whole plan, and it is why no phase could ever have been won by a single lever.
+
+**Result 2 -- the decision.** **Accept ~30.5 as the content ceiling for this approach; stop fitting to go lower.** 2.0 is refused by arithmetic: it would require removing **28.5 of the remaining 30.5 (93 %)** from items measured as unable to deliver it. The four fits already attempted are recorded in the same table with their measured worth (1.72 of 32.06 for a global tone fit; 1.7-7.2 per track for the light-term gamma; helps five tracks and hurts four for the sky gain; -0.67 but destroys the highlight for the cube reflection).
+
+**Result 3 -- three items stay open, each with its unblocking condition written down:**
+
+| item | measured state | reopens if |
+|---|---|---|
+| car paint light units | p95 155.3 vs 179.6; saturation 0.85 vs 1.00 | a source for the game-to-renderer light-unit conversion is found |
+| road per-pixel detail | fine-band energy 0.74 | the road bake evaluates the game's pixel shader per texel at usable resolution |
+| sky per-track exposure | unidentified after two phases and five hypotheses | a per-track source is found (page binding and sun azimuth both excluded) |
+
+**Result 4 -- and what the plan got wrong, recorded so it is not repeated.** The work order was chosen on the theory that a uniform error implies a global sampling cause. It does not: the error is uniform because **every region carries a different content defect of about the same size**. The phase that moved the number (G) succeeded for a reason unrelated to its position -- it was the first change sourced from the game's own per-vertex data. That is the lesson carried into the other four games: look for the mechanism that uses the game's own per-vertex or per-draw data first; tone, filtering and sampling never moved the number.
+
+**State of the plan: closed with a decision, not an open phase.** A-H all have an outcome; one shipped mechanism; a frozen baseline of 30.489 / 1.36 %; and a written target with three conditions rather than an unattainable number.
+
+**Still broken / not tested:** the three open items above; the residual non-determinism (0.1664 Sunset, ~0.08 build drift) means changes below ~0.1 are unmeasurable. Nothing committed or staged.
+
+---
+
+## 2026-11-03 (317): plan v9 Phase G -- the second specular lobe implemented from the game's own settings, measured, and withheld: its unit is not on the disc
+
+**What changed:** nothing shipped. Implemented, measured, reverted. `car_paint.rs` and `car_prt.rs` now contain **only** the MODLOG 314 change (`git diff --stat`: 18 insertions, 6 deletions -- the shipped shadow rule); `car.rs` is identical to HEAD; the reverted build matches the shipped baseline at **0.0137 / 98.4 %**.
+
+**What was built, and the real defect it uncovered.**
+
+1. **FM2 cars were reading FH1's paint settings.** `car::load_settings` chains `assets/cars/shared/ShaderSettings/Normal.xml` (the FH1 install's) with the car's own `fx/ShaderSettings.xml`. The FM2 disc keeps the body shader's numbers in `Media/cars/ShaderSettings/<PaintType>.xml` -- `Metallic.xml` for a metallic paint, `Normal.xml` otherwise -- and **the importer never copied it**, so an FM2 car's paint settings came from the FH1 install. The car's own `fx/ShaderSettings.xml` carries only per-technique tweaks (`headlight_paint`), not the `body`.
+   Fixed in the experiment by writing that file to `<car>/fx/paint_settings.xml` at import (310 cars written) and chaining it after the shared file, before the car's own -- the game's order. **This fix is correct and should be kept whenever the paint path is next touched**; it is reverted here only because it is presently a no-op without the lobe.
+2. **The lobe itself**: `specular2(settings, "body")` reads `SpecularAmount2` / `SpecularPower2` into a new `CarPaint.spec` uniform field, and the shader adds a broad Blinn-Phong term `light.color x pow(n·h, power) x shadow` scaled by the amount, `RM_CAR_SPEC_UNIT` and `RM_CAR_SPEC_GS` (the same conversion the track shader's specular uses).
+
+**Result -- the lobe works, and it blows the car out.**
+
+| track | capture | p5 | p50 | p95 | saturation | frame |
+|---|---|---|---|---|---|---|
+| Tsukuba | reference | 40 | 88 | 143 | 38.1 | -- |
+| | shipped (no lobe) | 61 | 105 | **141** | **45.4** | 25.75 |
+| | **lobe, game amount** | 105 | 132 | **255** | **7.6** | **35.82** |
+| | lobe x unit 0.32 | 99 | 119 | **255** | 9.8 | 33.72 |
+| Sebring | reference | 52 | 117 | 238 | 38.2 | -- |
+| | shipped (no lobe) | 91 | 131 | 195 | 54.8 | 33.74 |
+| | **lobe, game amount** | 107 | 179 | **255** | **11.4** | **41.03** |
+| | lobe x unit 0.32 | 105 | 168 | **255** | 15.4 | 39.73 |
+
+**p95 saturates at 255 and saturation collapses from 45 to 10** -- a white blowout, not a highlight. The project's own game-units conversion for specular (`FH1_RM_FM2_SPEC_UNIT = 0.32`, calibrated on Road Atlanta for the **track** shader) reduces it only from 35.8 to 33.7 on the frame metric; it is nowhere near the right order for the car.
+
+**Why it is withheld, stated plainly.** `SpecularAmount2 4.0` is a multiplier on **the game's** light. Our light is Bevy's directional light after exposure, in different units, and **the conversion between them is not on the disc**. That is the identical blocker that stopped the game's own car light in MODLOG 313 -- `car_prt.rs` documents its gain as *"INFERRED, not read"*, and MODLOG 314 showed it over-brightens. Two independent car terms now fail the same way, which makes this a property of the car path rather than of either term: **FM2's car lighting constants are in units we have no source for.**
+
+Choosing a scale that minimises the metric would be a **fit**, and this plan refuses fits for the same arithmetic reason recorded in MODLOG 291 and 310. So the lobe stays unimplemented, and the finding that matters is the provenance defect in step 1 plus the confirmation that the missing term is *not* the reason the highlight is short -- the highlight already matches (p95 141 against 143 on Tsukuba).
+
+**Consequences for Phase G's open costs.** The p95 and saturation regressions of MODLOG 314 cannot be repaired by adding the game's second lobe: at the game's numbers it destroys the image, and at a fitted number it would be calibration. They stay recorded as open, with the cause now known to be a units problem rather than a missing term.
+
+**Still broken / not tested:** the units conversion for FM2 car lighting (unknown, two terms blocked on it); the importer still holds 310 `paint_settings.xml` files written during the experiment -- inert, re-created by any future import. Not committed or staged.
+
+---
+
+## 2026-11-03 (316): plan v9 Phase C closed -- no page swap anywhere; the missing caps are invisible; the dome is unlit. Phase H opened with the measured residual
+
+**What changed:** nothing. Two measurements and one document conclusion.
+
+**Part 1 -- Phase C candidate 1: is each track's sky dome page the one its own data names?**
+
+New instrument `data/work/p1_sky_pages.py`: for every imported FM2 map it takes each sky draw's bound texture id from `scenery/sky.json` and checks it against the DDS files the importer actually wrote -- reporting **missing** pages, **duplicate** pages (two draws reading one) and **orphan** pages (present but bound by nothing, which is the other half of a swap).
+
+Across the **32 imported maps with a sky** (12 circuits plus their sectors and variants):
+
+| result | count |
+|---|---|
+| maps with a sky | **32** |
+| **page swaps (draw A reading what draw B should)** | **0** |
+| **duplicate pages** | **0** |
+| **orphan pages** | **0** |
+| maps where a draw's page was never written | **3** |
+
+**The three:** Tsukuba (`0x6ce`, draw 0), Silverstone (`0x9cd`, draw 0) and TT King Cobra (`0x645`, draw 1). The importer's own comment explains it: *"A 1 x 1 entry is the placeholder of a texture the game fills at run time (Tsukuba's cap): nothing to draw."* The page is a 1 x 1 runtime placeholder, so it is skipped -- and `fm2_sky.rs` line 93 then **skips the whole draw** whose texture is absent. For Tsukuba that draw is `di == 0`, which the engine's own rule treats as the **zenith cap** (`cap = di == 0`).
+
+**Measured, and it is invisible.** Substituting a stand-in cap through `FH1_FM2_SKY_TEXDIR` (a copy of a sector page, so the draw actually renders):
+
+```
+fm2 sky: 6 draws (1 caps)     (shipped: 5 draws, 0 caps)
+frame difference: mean 0.0050   differing pixels in the top 30 % of the frame: 0.01 %
+```
+
+**0.005 mean.** The zenith cap is above and behind the chase camera at the measured pose, so its absence changes essentially nothing. **Candidate 1 is excluded**: there is no page swap, and the only missing pages are invisible from the spot every measurement in this plan uses.
+
+**Part 2 -- Phase C candidate 2: the sun azimuth the dome is lit from.**
+
+**It cannot be a mechanism: the dome is not lit.** `fm2_sky.rs` builds its material with `unlit: true` (line 187), as it must -- FM2's sky is a painted panorama, not a shaded dome. There is no sun term in the sky's shading for an azimuth to be wrong in. The sun's *position* affects only the disc and the glow card, and MODLOG 296 measured those at **0.00 to -0.09**.
+
+**So Phase C closes with both of its named candidates excluded by measurement**, and the sky's per-track, sign-flipping brightness error is **still unidentified** -- exactly where Phase B stopped (MODLOG 295/296). What remains is the per-track `FH1_FM2_SKY_GAIN` table in `main.rs:313`, which is INFERRED (MODLOG 90 recorded that the game's own `skyGain` and tone curves do not explain the values), and which MODLOG 295 measured as helping five tracks and hurting four, two of them by more than 16 points. **It stays as it is: it is wrong on half the tracks, and no mechanism has been found to replace it.**
+
+**Part 3 -- Phase H opened: what the residual is, and what the target can honestly be.**
+
+The plan's target was `mean |Δ| <= 2.0` with `>= 95 %` within ±2, set provisionally in plan v9 and deliberately left to be revised here. **The measurement refuses it.**
+
+| quantity | measured |
+|---|---|
+| shipped whole-frame mean (12 tracks) | **30.489** |
+| shipped within ±2 | **1.36 %** |
+| shipped hold-out mean | 28.808 |
+| start of this work (MODLOG 304) | 31.065 / 1.33 % |
+| **improvement from the one shipped mechanism** | **-0.576 (-1.85 %)** |
+| measurement floor (capture noise, MODLOG 260) | 0.009-0.020 |
+| Xenia's own repeat-capture noise | 0.177 |
+| build-to-build drift | ~0.08 |
+| pose + tone absorbed by the best global fits | 0.9 + 1.72 |
+
+**Reaching 2.0 would require removing 28.5 of the remaining 30.5, i.e. 93 % of what is left**, from mechanisms that are individually measured as unable to do it:
+
+| remaining item | measured gain available | status |
+|---|---|---|
+| car: second specular lobe (`Metallic.xml` SpecularAmount2 4.0 / Power2 5.0) | not yet measured | **implementable from game data** |
+| road: per-pixel shader detail (fine-band energy 0.74) | 2-9 per track if the detail matched (MODLOG 297) | **blocked**: needs the game's pixel shader per pixel |
+| shadow depth (light term 0.45 vs the game's 0.25) | refused as a fit (exponents 1.7-7.2 per track) | **blocked** |
+| sky: per-track exposure | unidentified after two phases | **blocked** |
+| car: p95 / saturation costs of the shipped rule | inseparable from its gain (MODLOG 315) | **accepted cost** |
+
+**The target this measurement supports, stated as a number and as a condition:**
+
+- **Not reachable: 2.0.** It was set before anything had been measured, and 93 % of the residual would have to come from four items that are blocked or refused.
+- **Reachable and worth aiming at: `mean |Δ| <= 25` with `>= 3 %` within ±2, per track**, on the evidence that (a) one game-data mechanism already bought 4.38 in the car region alone, (b) the second specular lobe is the same kind of item and is still unimplemented, and (c) the road's 2-9 points are available only if the shader-level bake is built, which is a project rather than a fix.
+- **The honest ceiling for content work: somewhere near 25-28**, because the blocked items are exactly the ones whose size is largest. The plan should say so rather than imply 2.0 is a matter of more effort.
+
+**Still broken / not tested:** the three blocked items; the second specular lobe is read from the game's settings but not implemented; the residual non-determinism (0.1664 Sunset, ~0.08 build drift) means improvements below ~0.1 are not measurable. Not committed or staged.
+
+---
+
+## 2026-11-03 (315): plan v9 -- the car shadow cannot be scoped to the diffuse (it loses the whole gain); Phase C opened, and the sky has no global colour error
+
+**What changed:** nothing shipped by the end of this entry. The scoping experiment was applied, measured and **reverted**; the shipped state remains MODLOG 314. Verified: the reverted build matches the shipped baseline at **0.0154 / 99.4 %** (Tsukuba) and **0.0146 / 99.6 %** (Sebring), i.e. capture noise.
+
+**Part 1 -- the fix MODLOG 314's regression asked for, and why it fails.**
+
+MODLOG 314 shipped the game's shadow rule and recorded two costs: the car's p95 moved away from the reference (161.2 -> 155.3 against 179.6) and saturation fell to 0.85. Both are consistent with the shadow multiplier scaling the **whole pixel**, cube reflection included. So the hypothesis was: apply `mix(shade, 1, sun_visibility)` to the paint only, and add the reflection afterwards, leaving the cube to its own `env_vis` occlusion.
+
+Implemented by accumulating `refl` and adding it after the shadow term. Measured, same binary:
+
+| track | reference p5/p50/p95 | shipped 314 | diffuse-only |
+|---|---|---|---|
+| Tsukuba | 34 / 85 / 132 | 57 / 102 / 128 -- frame **24.97** | 63 / 103 / **132** -- frame **25.23** |
+| Sebring | 48 / 107 / 236 | 85 / 117 / 193 -- frame **32.23** | 86 / 120 / 193 -- frame **32.39** |
+
+**The p95 returned exactly to the reference on Tsukuba (132)** -- and **the entire gain disappeared**: 24.97 -> 25.23 is back to the pre-change 25.22 (MODLOG 314), and Sebring 32.23 -> 32.39. p5 went back up with it (57 -> 63).
+
+**So the two effects cannot be separated this way, and the reason is informative: on the car's dark side the cube reflection _is_ the light.** That side faces away from the sun, so the diffuse term is near zero there and the reflection is essentially the whole pixel; darkening the diffuse alone does nothing where the problem is. MODLOG 312 measured the same thing from the other side (turning the reflection off moved p5 66 -> 31, alone).
+
+**And the un-scoped placement is the more faithful one.** `car_prt.rs` describes the game's rule as the multiplier *"the game puts on a car pixel the sun does not reach"* -- a pixel, not a diffuse lobe. So MODLOG 314's whole-pixel placement matches the game's own description, and 315's "cleaner" split was the less faithful one. The p95 and saturation costs are therefore **the game's rule doing its job**, not a bug to route around.
+
+**Reverted.** The costs stand recorded in MODLOG 314 as open, with no known fix that preserves the gain.
+
+**Part 2 -- Phase C opened (the first attention it has had in any plan version).**
+
+Phase B measured the sky's brightness, contrast, orientation, glow and mip chain. It never measured its **colour**, and a colour error would be a texture-pipeline fault (an sRGB decode of the dome), which is Phase C's subject. Mean RGB of the sky band, ours against the reference, twelve tracks:
+
+| | mean channel offset (ours - reference) |
+|---|---|
+| R | **-2.9** |
+| G | -0.7 |
+| B | +1.5 |
+
+**No global colour error.** But the per-track spread is an order of magnitude larger than the mean: Tsukuba +5.6/+10.1/**+17.1**, Sebring -5.9/-8.4/**-19.4**, Suzuka -20.7/-19.3/-12.8, Road Atlanta +12.1/+14.7/+15.0. The signs flip from track to track.
+
+**That is the same signature Phase B ended on** (MODLOG 296: mean correct on average, error flipping sign between tracks, narrowable only to "a per-track exposure difference with no identified source"). Phase C's first measurement therefore **independently confirms that conclusion by a different statistic** -- colour rather than contrast -- and rules out a global dome-decode error as the cause.
+
+**What that leaves for Phase C.** Two candidates remain, both testable without a per-track fit: (a) the dome's **uv/texture assignment** -- whether each track's sky draws bind the dome page they should (a swap would be per-track and sign-flipping); (b) the **sun position** the dome is lit/mapped against, since `fm2_sky` lights the dome from the engine sun and a wrong azimuth would brighten one side per track. Both are per-track *in cause* while being global *in mechanism*, which is the only kind of explanation left after twelve tracks of this signature.
+
+**Still broken / not tested:** the shading costs of MODLOG 314 stand; Phase C's two candidates are not yet measured; the residual build-to-build drift (~0.08) and the 0.1664 Sunset non-determinism remain. `fh1setup` builds, differential test 0.000000. Not committed or staged.
+
+---
+
+## 2026-11-03 (314): plan v9 Phase G -- SHIPPED: the game's own car shadow rule, decoupled from the inferred PRT light; whole frame 31.143 -> 30.489 on every track
+
+**What changed (shipped, in source):**
+
+- `crates/fh1-remaster/src/car_prt.rs` -- `shade()` no longer requires `gain() > 0`. It applies when the map is an FM2 map (the track's `<SHLighting>` is present, the same condition `gain()` uses) and `FH1_FM2_CAR_SHADE != 0`. `attach()` runs when **either** the additive light or the shadow rule needs the transfer numbers.
+- `crates/fh1-remaster/src/car_paint.rs` -- the game's shadow term `out.color *= mix(shade, 1, uv_b.x)` no longer requires `prt_on`; only `paint.prt.y > 0`. The cube reflection's environment occlusion `env_vis` reads `UV_1.y` when the FM2 rule is active (`prt_on || prt.y > 0`), and stays 1.0 for every other game, whose cars have their own UV_1 that is not a visibility.
+
+**Why:** MODLOG 313 concluded the car's dark end was blocked by "missing vertex streams". **That conclusion was wrong and is corrected here.** The attributes are not missing -- `car_prt::attach` inserts `COLOR_0` and `UV_1` into the car mesh at runtime from `prt.bin`, and `car_prt::update` fills them with the per-vertex sun and environment visibility derived from the track's SH light. The whole pipeline was implemented. It was simply **gated on `gain()`**, i.e. on the *additive* PRT light, whose level `car_prt.rs` documents as *"INFERRED, not read"* -- and which measurements show over-brightens (MODLOG 313: Tsukuba p95 132 -> 166). So the game's shadow rule could only run while the feature that ruins the car was also running. The fix was two gates, not an importer.
+
+**Tested how:** the same binary, `FH1_FM2_CAR_SHADE=0` (old behaviour) against the shipped build, twelve tracks, `FH1_SHOT` gate, locked pose.
+
+**Result 1 -- the whole-frame metric falls on all twelve tracks, with no exceptions:**
+
+| track | shadow rule off | shipped | delta |
+|---|---|---|---|
+| Tsukuba | 26.020 | 25.754 | -0.266 |
+| Laguna Seca | 29.960 | 29.350 | **-0.610** |
+| Road Atlanta | 34.526 | 33.124 | **-1.401** |
+| Silverstone | 28.256 | 27.580 | -0.677 |
+| Nordschleife | 35.149 | 34.519 | -0.630 |
+| Sebring | 34.094 | 33.745 | -0.349 |
+| Mugello | 31.203 | 31.074 | -0.129 |
+| Suzuka | 28.595 | 28.205 | -0.390 |
+| Sunset Infield | 34.538 | 33.417 | **-1.121** |
+| Maple Valley | 40.576 | 39.048 | **-1.528** |
+| New York | 27.201 | 26.891 | -0.311 |
+| TT King Cobra | 23.603 | 23.161 | -0.442 |
+
+```
+all       mean|d| 31.143 -> 30.489   (-0.654)   within2 1.34 -> 1.36 %
+fit       mean|d| 32.015 -> 31.329   (-0.686)
+hold-out  mean|d| 29.400 -> 28.808   (-0.592)
+```
+
+**The hold-out falls as far as the fit set, so this is not a fit.** Every track improves; the worst three gains are on the three largest errors (Maple Valley -1.53, Road Atlanta -1.40, Sunset -1.12).
+
+**Result 2 -- the car region improves on every axis but one:**
+
+| car region | shadow rule off | shipped | change |
+|---|---|---|---|
+| mean abs difference | 34.57 | **30.18** | **-4.38** |
+| brightness | 1.13 | **1.01** | -0.12 |
+| contrast | 0.74 | 0.80 | +0.06 |
+| correlation | 0.57 | 0.65 | +0.08 |
+| within +-2 | 0.70 % | 0.88 % | +0.18 pp |
+| lower third brightness | 1.24 | **1.02** | -0.22 |
+| **saturation** | 1.00 | **0.85** | **-0.15** |
+
+**Brightness is now 1.01 and the lower third 1.02 -- both essentially exact.** The one regression is saturation: the car is now 15 % *less* coloured than the reference, where before it matched. That is consistent with the shadow term multiplying the whole pixel (including the livery), so it desaturates the shadowed side. Recorded as a real, measured cost with a plausible cause.
+
+**Result 3 -- and it keeps the highlight, which the cube-reflection change could not.** Tsukuba p5 66 -> **57** (reference 34) while p95 stays 132 -> **128** (reference 132); Sebring p50 121 -> **118** (reference 107) with p95 unchanged at 193. Compare MODLOG 312's cube-off, which fixed p5 to 31 but destroyed p95 to 117. **The game's own rule moves both ends the right way**, which is what the plan's Phase G gate asked for.
+
+**The formula, for the record.** `shade = ShadowColor^2.2` (Tsukuba 0.34^2.2 = 0.093), applied as `mix(shade, 1, sun_visibility)` per vertex, where the visibility is the sun term of the vertex's 16 radiance-transfer numbers over the track's SH light, clamped to 0..1. Every input is game data: `ShadowColor` from `TrackSettings.xml`, the transfer numbers from the carbin's vertex tail via `prt.bin`, the SH light from the track's `<SHLighting>`. The 2.2 is the documented display-to-linear conversion for a value the game multiplies in display space.
+
+**Baseline re-frozen** (`data/work/frame_diff_baseline.json`, prefix `base`, twelve tracks):
+
+```
+all 30.489 / 1.36 %    fit 31.329 / 1.11 %    hold-out 28.808 / 1.86 %
+```
+
+`data/work/car_baseline.json` re-frozen to match. **Reproducibility note:** with the shadow rule *off*, this build reads 31.143 against the previously frozen 31.065 -- a 0.078 drift, i.e. the residual non-determinism of MODLOG 304 showing up between builds, not an effect of any change. The before/after table above is measured on one binary, so it is unaffected.
+
+**Still broken / not tested:** the saturation regression has no fix yet; the shade gamma (2.2) was not swept, because choosing it by metric would be a fit; the second specular lobe from `Metallic.xml` (MODLOG 313) is still unimplemented and is the remaining candidate for the highlight. Not committed or staged.
+
+---
+
+## 2026-11-03 (313): plan v9 Phase G -- the game's own car settings say the highlight IS the cube; its own car light exists but its inputs are not imported
+
+**What changed:** nothing shipped. `car_paint.rs` and `car_prt.rs` were modified and restored; both are **verified identical to HEAD** (`git diff --stat` empty). Every test was env-only.
+
+**Why:** MODLOG 312 measured a trade -- the environment cube reflection supplies the car's *entire* highlight (p95 exactly matching at 132) and also its excessive dark-end lift -- and the next step was to settle it from the game's own car shader rather than by a strength sweep.
+
+**The oracle: what was reachable.** The FM2 **car body pixel shader** is not: it lives in `<car>.carbin`, and `fm2_ps_gpu` reads track archives (`.rmb.bin` models), not carbins -- extending it is its own project. But the car shader's **settings** are plain readable XML in the disc (`Media/cars/ShaderSettings/*.xml`), and they answer the question directly.
+
+**Result 1 -- the game's `body` technique has NO sun specular. The highlight is the cube.**
+
+| `body` parameter | Normal.xml | Metallic.xml |
+|---|---|---|
+| PaintColor / PaintScale | 1,1,1 / 1.0 | 1,1,1 / 0.6 |
+| **SpecularAmount** | **0.0** | **0.0** |
+| SpecularPower | 200 | 200 |
+| SpecularColor | 2.25 | 2.0 |
+| **SpecularAmount2 / Power2** | **0 / 0** | **4.0 / 5.0** |
+| **CubeMultiplier** | **12.0** | **12.0** |
+| FresnelMin / Max / Scale / Power | 0.05 / 0.7 / 1.75 / 5 | same |
+| ColorScale / ColorClamp | 0.6 / 0.9 | 0.6 / 0.9 |
+| SHLowerScale / SHUpperScale / SHTransition | 1 / 1 / 0.5 | same |
+
+**A normal (non-metallic) paint has no sun specular at all** -- its only highlight is the cube reflection, boosted by `CubeMultiplier 12` on the fetch's alpha. That is exactly what MODLOG 312 measured from the other direction (p95 132 against the reference's 132 at full strength, 117 with the reflection off). **So turning the reflection down is now refused on game data, not just on a trade**: it would delete the game's only highlight term.
+
+**And it names the missing term.** Metallic paint (`Metallic.xml`, which is what this Skyline is -- `Combo_Colors.Metallic`) adds a **broad second specular lobe: SpecularAmount2 4.0 at SpecularPower2 5.0**, on top of the cube. Our paint implements one specular (through Bevy's PBR) and no second lobe, so the highlight has to come from the cube alone. **That is the term that would let the cube's ambient contribution be reduced without losing the highlight** -- and unlike a strength sweep it is a number from the disc.
+
+**Result 2 -- the game's own car light is implemented and off by default; enabling it makes the car worse.**
+
+`car_prt::gain()` returns 0 unless `FH1_FM2_CAR_PRT` is set, and **no code sets it**. With `FH1_FM2_CAR_PRT=1` (the game's SH light from the track's `<SHLighting>` plus `prt.bin`'s per-vertex transfer numbers):
+
+| track | | p5 | p50 | p95 | frame |
+|---|---|---|---|---|---|
+| Tsukuba | base | 66 | 104 | 132 | 25.22 |
+| | **PRT on** | **69** | **109** | **166** | **26.20** |
+| | reference | 34 | 85 | 132 | -- |
+| Sebring | base | 87 | 121 | 193 | 32.57 |
+| | **PRT on** | 87 | **132** | 201 | 32.52 |
+| | reference | 48 | 107 | 236 | -- |
+
+It **adds brightness rather than contrast** -- p95 overshoots to 166 and the frame gets worse by 0.98 on Tsukuba. `car_prt.rs`'s own doc says why: *"the paint's overall level is INFERRED, not read"*. So the implementation is right in structure and wrong in scale, and the scale is not on the disc.
+
+**Result 3 -- the game's shadow rule cannot run, and that is a data gap, not a bug.** The paint shader already contains the body shader's rule (`out.color *= mix(shade, 1, uv_b.x)`, the `lerp(ShadowColour, 1, visibility)`), but only under `VERTEX_UVS_B` and only when `prt_on`. I decoupled it from the PRT light (so the shadow rule could apply alone) and measured **no change at all** -- Tsukuba 25.21 against 25.22, Sebring identical. Reverted. The reason is structural:
+
+```
+imported car glTF vertex attributes: ['NORMAL', 'POSITION', 'TEXCOORD_0']
+```
+
+**There is no `TEXCOORD_1` and no `COLOR_0`.** So:
+
+| game mechanism | shader gate | defined for FM2 cars? | consequence |
+|---|---|---|---|
+| body self-shadow `lerp(ShadowColour, 1, visibility)` | `VERTEX_UVS_B` | **no** | the rule is compiled out |
+| the game's lit car colour (SH x transfer) | `VERTEX_COLORS` | **no** | `prt_on` is always false |
+
+That single fact explains all three measurements in this entry: the hemisphere fill is nearly inert (Bevy's IBL dominates), PRT adds light through a different path and overshoots, and no paint constant can deepen the darks, because the two terms that would are **not in the mesh**.
+
+**The data itself does exist.** `prt.bin` is imported for this car (802,540 bytes; 16 `i16` transfer numbers per vertex at 32 bytes/vertex, read by `car_prt.rs`), so the coefficients are on disk -- they are simply not delivered to the shader as vertex attributes. The gap is in the mesh, not the data.
+
+**Phase G status, stated plainly.** The gate ("car region falls; the paint's colour distribution approaches the reference's") **cannot be met by a shader constant**: every paint term was measured (fill, clearcoat, reflectance, PRT) and none moves the dark end without wrecking the highlight; the game's own numbers say the highlight is the cube, so the cube cannot be reduced; and the terms that would deepen the darks need vertex streams that the importer does not write. The **next step is an importer task** -- write the transfer visibility as `TEXCOORD_1` and the lit colour as `COLOR_0` from `prt.bin` and the carbin's vertex tail -- which is the same class of work as the track vertex layout already done (MODLOG 265-268). Only after that can the game's car lighting be enabled with the game's own inputs instead of an inferred level.
+
+**A note on reproducibility:** the verification capture after restoring both files is **0.0267 mean / 99.2 % identical** against the frozen baseline -- above the 0.009-0.020 capture noise, consistent with the residual non-determinism noted in MODLOG 304 (0.1664 on Sunset Infield). It is not a source change (`git diff` is empty).
+
+**Still broken / not tested:** the carbin's body pixel shader was not executed (the runner cannot open carbins); the second specular lobe is read from the settings but not implemented; one track for the decoupling test. Not committed or staged.
+
+---
+
+## 2026-11-03 (312): plan v9 Phase G -- the environment cube reflection is what lifts the car's dark end; turning it down moves the whole-frame metric 31.065 -> 30.399 but costs the car's highlight
+
+**What changed:** nothing shipped. `crates/fh1-remaster/src/car_paint.rs` was modified and restored twice during the experiments and is **verified identical to HEAD** (`git diff --stat` empty). All tests were env-only.
+
+**Why:** MODLOG 311 measured the car's histogram: median right (1.08), darks 2.18x too light (p5 43.4 against 19.9), highlights 10 % too dim (p95 0.90). Phase G's next step was to find which term does that, one at a time.
+
+**Terms tested, one at a time, on Tsukuba + Sebring (`FH1_SHOT` gate, pose lock):**
+
+| term | knob | effect on the car |
+|---|---|---|
+| hemisphere fill | `FH1_RM_CAR_FILL` 0.0 -> 0.8 | **nearly inert**: Tsukuba p5 63 -> 70 over the whole range (3 points of a 29-point gap); Sebring **non-monotone** (0.0/0.05/0.1/0.2 all give p5 87, 0.4 gives 66, 0.8 gives 87) |
+| clearcoat | `FH1_RM_PAINT_CLEARCOAT` 0.6 / 1.0 | p95 193 -> 194 (Sebring), 132 -> 131 (Tsukuba); frame <= 0.08 |
+| reflectance | `FH1_RM_PAINT_REFLECTANCE` 0.4 | p95 132 -> 135 (Tsukuba), frame **worse** 25.31 |
+| the game's own car light | `FH1_FM2_CAR_PRT=0` | **exactly nothing**: 87 / 121 / 193 on Sebring, identical to base -- this car is not lit by the vertex-colour path |
+| **env cube reflection** | `FH1_FM2_CAR_REFL=0` | **the term.** Tsukuba p5 **66 -> 31** (reference 34), p50 104 -> 98; Sebring p50 121 -> **106** (reference 107) |
+
+**The reflection does the whole job.** Sweep, Tsukuba / Sebring frame means:
+
+| strength | Tsukuba p5 | p95 | frame | Sebring p50 | frame |
+|---|---|---|---|---|---|
+| 1.0 (shipped) | 66 | **132** | 25.22 | 121 | 32.57 |
+| 0.5 | 58 | 120 | 24.93 | 115 | 32.37 |
+| 0.25 | 55 | 118 | **24.82** | 110 | 32.28 |
+| 0.0 | 31 | 117 | 24.85 | 106 | **32.20** |
+| reference | 34 | 132 | -- | 107 | -- |
+
+**At full strength the car's highlight matches the reference exactly (p95 132 against 132); at reduced strength the dark end matches and the highlight is lost.** One term is supplying both, and the game has them as separate terms.
+
+**Whole-frame result, all twelve tracks, reflection off:**
+
+```
+all       mean|d| 31.065 -> 30.399   (-0.666)
+fit       mean|d| 32.022 -> 31.180   (-0.842)
+hold-out  mean|d| 29.150 -> 28.835   (-0.315)
+```
+
+Per track, 10 of 12 improve: Laguna **-1.42**, Road Atlanta **-1.26**, Maple Valley **-1.76**, Sunset -0.98, Suzuka -0.62, Silverstone -0.61, New York -0.55, Nordschleife -0.53, TT -0.77, Tsukuba -0.31. Two get worse: **Sebring +0.57**, Mugello +0.04.
+
+**Car region, all twelve tracks (the Phase G gate):**
+
+| | base | reflection off | change |
+|---|---|---|---|
+| mean abs difference | 33.97 | **29.36** | **-4.61** |
+| brightness | 1.11 | 0.96 | -0.15 |
+| contrast | 0.74 | 0.76 | +0.03 |
+| saturation | 0.97 | **1.22** | **+0.25** |
+| correlation | 0.59 | 0.66 | +0.07 |
+| within +-2 | 0.69 % | 1.03 % | +0.34 pp |
+| lower third brightness | 1.23 | 1.02 | -0.21 |
+
+**So the gate is met on the difference (-4.61, a 13.6 % cut) and on brightness, but violated on saturation (1.22) and on the highlight.** The reflection was also desaturating the car -- it is the grey-blue sky the paint mirrors -- so removing it overshoots colour.
+
+**Two principled repairs attempted and both failed, for informative reasons:**
+
+1. **Weight the reflection by the paint's own occlusion** (`mix(1, diffuse_occlusion, k)`): **a no-op**. `pbr_input.diffuse_occlusion` is **1.0 on the car** -- the car has no occlusion signal to weight by. Verified identical to base (Tsukuba 25.21 against 25.22). Reverted.
+2. **Split the game's own two factors** -- scale only the ambient `rgb^2`, keep the alpha glare `(1 + a * CubeMultiplier)`: **also behaves exactly like turning it off** (Tsukuba ambient 0.0: p5 31, p95 117, frame 24.84, against reflection-off 24.85 / 117 / 24.85). So the highlight is the cube's **colour**, not its alpha glare; there is no split at this level. Reverted.
+
+**A process failure worth recording.** The first build of the occlusion variant **failed to compile** (`error: inconsistent type passed as argument #2 to mix`) and Bevy silently **rendered with the fallback material** -- producing two plausible-looking captures (Tsukuba p50 116, frame 32.34) that I measured before noticing. A shader compile failure does not stop the capture. Every shader change from now on must be checked for `failed to process shader` in the log; the numbers from those two captures were discarded.
+
+**Why this is not shipped.** The change is a **trade**, not a fix: it cuts the car region by 4.61 and the whole frame by 0.67, and buys back the dark end and the lower third, but it removes a highlight that currently matches the reference exactly, and it overshoots saturation by 25 %. Picking 0.25 because it minimises Tsukuba's frame mean would be a fitted constant -- refused for the same reason as the global gamma in MODLOG 310. The strength is not the root question: **the game has a separate highlight term that we do not**, and the cube's ambient contribution needs to be established from the game's own car pixel shader (the shader oracle, MODLOG 230/234) rather than chosen.
+
+**Where Phase G stands:** one renderer change has now moved the frozen number, and it is the *right kind* of change for the first time -- it names a term (the game cube reflection), a mechanism (a constant environment contribution to paint that the sun never reaches), and pays for it with a measured loss. The next step is the oracle: evaluate the game's car body pixel shader for a fixed set of n·l, n·v and fetch values and read off what fraction of the cube the game adds and where its highlight comes from.
+
+**Still broken / not tested:** two tracks for the term sweep, twelve for the aggregate; the saturation overshoot is unexplained beyond "the cube was desaturating the car". Not committed or staged.
+
+---
+
+## 2026-11-03 (311): plan v9 Phase G opened -- the car is 1.10x the reference's brightness with 0.72x its contrast, and no region's contrast is right
+
+**What changed:** two new instruments, no renderer change.
+- `data/work/p1_car_metric.py`: the car band's brightness / contrast / saturation / correlation / within-+-2, plus the band's lower third separately (wheels, sill and the shadow under the car behave differently from paint).
+- `data/work/p1_region_contrast.py`: the same contrast question asked of **every** region at once, at full resolution and high-passed, so a region whose content differs cannot be mistaken for a region whose contrast is wrong.
+
+**Why:** Phase F closed in MODLOG 310 with no defensible constant. Phase G had received no attention in the whole plan and is the largest single region (33.5 mean in MODLOG 290). Before choosing a fix, the phase needs to know *which* of four plausible faults the car has: brightness, contrast (shading compressed), saturation (paint/colour space), or agreement (content misplaced).
+
+**Result 1 -- the car's fault is contrast, with brightness close:**
+
+| track | diff | bright | contrast | satur | corr | within +-2 |
+|---|---|---|---|---|---|---|
+| Tsukuba | 27.88 | 1.23 | 0.74 | 1.23 | 0.603 | 0.9 % |
+| Laguna Seca | 29.99 | 1.36 | 0.88 | 0.87 | 0.600 | 0.1 % |
+| Road Atlanta | 48.39 | 1.31 | 0.92 | 0.58 | 0.733 | 0.2 % |
+| Silverstone | 24.75 | 1.05 | 0.73 | 0.78 | 0.762 | 1.1 % |
+| Nordschleife | 28.72 | 1.22 | 0.86 | 1.08 | 0.614 | 0.8 % |
+| Sebring | 52.22 | 1.05 | **0.50** | 1.49 | 0.617 | 0.1 % |
+| Mugello | 28.00 | 1.01 | 0.73 | 1.10 | 0.593 | 1.9 % |
+| Suzuka | 28.36 | 1.11 | 0.98 | 0.87 | 0.605 | 0.7 % |
+| Sunset Infield | 36.39 | 0.96 | 0.68 | 1.12 | 0.415 | 0.2 % |
+| Maple Valley | 43.47 | 1.18 | 0.74 | 1.09 | 0.657 | 0.6 % |
+| New York | 25.15 | 0.82 | **0.51** | 0.62 | **0.276** | 1.4 % |
+| TT King Cobra | 34.26 | 1.07 | 0.58 | 0.85 | 0.641 | 0.3 % |
+| **mean** | **33.97** | **1.11** | **0.74** | **0.97** | **0.593** | **0.7 %** |
+
+**Brightness is within 11 %, saturation within 3 %, and the contrast is 74 %** -- so the car is not painted the wrong colour and is not the wrong size in a crude sense; its **shading is compressed**. The lower third of the band is worse on brightness (**1.23**) and similar on contrast (0.80), which is the missing shadow under the car that Phase F measured, not a separate fault.
+
+Correlation 0.593 with brightness 1.11 is the signature of a surface that is lit *similarly on average* but whose light and dark do not match the game's.
+
+**Result 2 -- and no region's contrast is right, but they are not the same factor:**
+
+| region | sd ours / sd ref | brightness | high-pass o/r |
+|---|---|---|---|
+| sky | 0.83 | 1.01 | 0.96 |
+| road | 0.81 | 1.01 | 0.87 |
+| **car** | **0.72** | **1.10** | **0.66** |
+| top strip | 0.96 | 0.96 | 1.11 |
+
+Three things this settles:
+
+1. **There is no single global contrast error.** The factors run 0.72 to 0.96, and the high-pass column runs 0.66 to 1.11 -- the top strip is actually *sharper* than the reference while the car is much flatter. A global tone curve would have to help some regions and hurt others, so it is refused for the same reason as the global gamma in MODLOG 310.
+2. **The faults have different characters.** The sky's full-resolution contrast is short (0.83) but its fine detail is intact (0.96): its *broad gradients* are compressed, not its detail. The road is short at both (0.81 / 0.87). The car is short at both (0.72 / 0.66): genuinely flattened shading at every scale. These are three different defects that happened to land in the same plan.
+3. **Brightness is already right for sky and road (1.01) and only the car is bright (1.10).** So the car's error is not inherited from the world's lighting.
+
+**Result 3 -- and the compression has a precise shape: both ends are wrong, in opposite directions.** The luminance distribution of the car body (upper band, paint rather than wheels/sill), percentiles averaged over twelve tracks:
+
+| | p5 | p25 | p50 | p75 | p95 |
+|---|---|---|---|---|---|
+| ours | 43.4 | 62.8 | 83.2 | 107.8 | 161.2 |
+| reference | 19.9 | 37.2 | 76.8 | 116.1 | 179.6 |
+| **ratio ours/reference** | **2.18** | **1.68** | 1.08 | 0.93 | **0.90** |
+
+**The median is right (1.08), the shadows are more than twice too light (2.18) and the highlights are 10 % too dim (0.90).** That is a response range that is too narrow around a correct midpoint -- the dark side of the paint does not go dark enough and the bright side does not go bright enough. It is *not* an overall brightness error (that would shift all five percentiles the same way), and it is *not* a colour error (saturation is 0.97).
+
+Note how this differs from the road: the road's bright end *matched* (p95 124 against 125, MODLOG 309) with only the dark end short. The car is short at **both** ends. So the car's defect is not the world's missing shadow repeated -- it has its own highlight deficit on top.
+
+**What that sets for Phase G's next step**, now specific: the paint path needs a wider response, i.e. (a) the dark side of the car is receiving too much ambient/bounce, and (b) the specular/clearcoat highlight is too weak. Those are two different terms in `car_paint.rs`, and each is separately measurable -- the ambient one by the p5 ratio, the highlight by the p95 ratio -- which is why the gate can be judged on this table rather than on the frame.
+
+**Still broken / not tested:** the car band is a fixed rectangle, so on tracks where the car sits off-centre (New York's correlation 0.276 suggests exactly that) the "car" region includes background; the region table's `top strip` is the scoreboard and upper scenery, not the HUD (the metric's own `hud` label is the bottom 6 % of the frame, which is road -- MODLOG 293). Not committed or staged.
+
+---
+
+## 2026-11-03 (310): plan v9 Phase F CLOSED -- the broad shadow is present, the depth is not, and no global constant can supply it
+
+**What changed:** new `data/work/p1_lm_spatial.py` (low-frequency correlation of our light term against the reference) and `data/work/p1_shadow_vs_settings.py` (shadow/lit ratio against each track's own `TrackSettings`). No renderer change.
+
+**Why:** MODLOG 309 left two possible faults that look identical at full resolution: our light term might have the right **shape** with too little **depth** (a scale could fix it), or it might lack the game's shadow **structure** entirely (no scale could). It also left one number unexplained: our term is 0.45 of lit where the reference is 0.25.
+
+**Result 1 -- the structure IS there. It is a depth fault.** Correlating our debug-3 light term against the reference's luminance over the road band, at increasing blur radii (at a large radius only the broad pattern survives):
+
+| track | r=0 | r=4 | r=8 | r=16 | r=32 |
+|---|---|---|---|---|---|
+| Tsukuba | 0.674 | 0.773 | 0.816 | 0.861 | **0.894** |
+| Laguna Seca | 0.734 | 0.790 | 0.827 | 0.871 | **0.905** |
+| Road Atlanta | 0.815 | 0.867 | 0.896 | 0.931 | **0.963** |
+| Silverstone | 0.635 | 0.694 | 0.721 | 0.750 | 0.772 |
+| Nordschleife | 0.612 | 0.689 | 0.750 | 0.809 | 0.838 |
+| Sebring | 0.719 | 0.814 | 0.863 | 0.911 | **0.950** |
+| **mean (6)** | **0.698** | 0.771 | 0.812 | 0.855 | **0.887** |
+
+Correlation **rises monotonically with smoothing and reaches 0.887**. Our light term darkens where the game's frame darkens; it just does not darken *enough*. So the importer is not losing the shadow's shape, and "the importer samples the wrong part of the atlas" is ruled out for the third time, now on shape rather than on statistics.
+
+**Result 2 -- and no single global constant can supply the missing depth.** The shadow/lit ratio per track, ours against the reference, and the exponent `g` that would map one to the other (`ours^g = ref`):
+
+| track | ours d/l | ref d/l | factor | implied g |
+|---|---|---|---|---|
+| Tsukuba | 0.45 | 0.25 | 1.77 | 1.71 |
+| Laguna Seca | 0.68 | 0.25 | 2.71 | 3.62 |
+| Road Atlanta | 0.41 | 0.09 | 4.73 | 2.74 |
+| Silverstone | 0.36 | 0.16 | 2.21 | 1.77 |
+| Nordschleife | 0.41 | 0.14 | 2.93 | 2.20 |
+| Sebring | 0.81 | 0.33 | 2.46 | 5.18 |
+| Mugello | 0.54 | 0.24 | 2.25 | 2.33 |
+| Suzuka | 0.57 | 0.29 | 2.02 | 2.26 |
+| Sunset Infield | 0.82 | 0.24 | 3.40 | 7.19 |
+| Maple Valley | 0.35 | 0.08 | 4.58 | 2.45 |
+| New York | 0.44 | 0.14 | 3.10 | 2.38 |
+| TT King Cobra | 0.44 | 0.19 | 2.37 | 2.05 |
+
+**The implied exponent ranges 1.71 to 7.19, sd 1.56, and the multiplicative factor ranges 1.77 to 4.73.** A single global gain of ~2.8 would leave Tsukuba's shadows ~35 % too light and Road Atlanta's ~40 % too dark. So **a global contrast correction is refused on arithmetic**, exactly as the per-track tone table was in MODLOG 291 -- it would be a fit wearing a global constant's clothes.
+
+**Result 3 -- the game's dark road is darker than its own `ShadowColor`, so the depth is in the bake, not the shadow rule:**
+
+| | mean | sd |
+|---|---|---|
+| reference dark/lit divided by the track's `ShadowColor` | **0.59** | 0.30 |
+| ours divided by the same | 1.55 | 0.60 |
+| correlation(reference dark/lit, `ShadowColor`) | **0.362** | -- |
+
+The game's shadowed road sits at about **0.6x its own ShadowColor**, i.e. below the floor its own road rule could produce (`lit = min(1-(1-ShadowColor)*S, lerp)` bottoms out at `ShadowColor`). The extra darkness is therefore in the **baked lightmap**, and it is per-track because each track's bake is different.
+
+**Where Phase F ends -- five mechanisms excluded, one deficit characterised, one fix refused:**
+
+| candidate | verdict |
+|---|---|
+| shadow map misses the occluders | no -- sh ~= 0.62 there (309) |
+| resolution / filtering / penumbra | no -- 2048 vs 4096, gaussian vs hard change nothing (309) |
+| lightmap crop selects the wrong atlas region | no -- 97 % of 1139 crops carry the page's structure (309), and the light term's **shape** correlates 0.887 with the reference (here) |
+| car `DropShadowColor` decal | no -- worse on mask and frame (309) |
+| lightmap bias / floor | no -- the floor never binds (307, 308) |
+| *global* contrast correction | **refused** -- needs exponents 1.7-7.2 per track (here) |
+| **the bake's own depth, per track** | **the remaining deficit**: reference sits at 0.6x its `ShadowColor`, ours at 1.55x |
+
+**Consequence for the plan, stated plainly.** Phase F cannot be closed by a renderer constant: the depth deficit is real, is in the baked light, and varies per track by 2.7x. Closing it needs the game's own per-pixel light term, which is the shader-oracle route (the FM2 pixel shader reproduces the Xenia pixel exactly, MODLOG 230/234) -- and the road bake already evaluates it per texel (`bake_road_px`). That is a **content** project, not a shader constant, and it belongs with Phase C/D's texture pipeline rather than with shadows.
+
+**Phase F is therefore closed** with its instrument built, five mechanisms excluded, and the deficit measured and located. The plan moves to **Phase G (the car)**, which is the largest single region (33.5 mean in MODLOG 290) and has received no attention at all.
+
+**Still broken / not tested:** six tracks for the spatial correlation; twelve for the ratio table but with a mask defined by the reference's darkest 10 %, which mixes road shadow with dark scenery. Not committed or staged.
+
+---
+
+## 2026-11-03 (309): plan v9 Phase F -- our light term says 0.42 where the game's says 0.25, and the game's deep shadow is broad while ours is only under the car
+
+**What changed:** two diagnostic instruments, no renderer change.
+- `data/work/p1_lightmap_stats.py`: decodes the importer's lightmap DDS tiles (BC3) and reports mean/sd/min/max per channel, plus a coarse text map, so a tile can be checked for shadow content without a picture.
+- `crates/fh1setup/src/fm2_scenery.rs`: `FM2_LM_STATS=1` prints, per lightmap tile, the crop's statistics against its **whole source page** and the page texel it starts at. It is a print-only knob and is on the import fingerprint's diagnostic deny-list (`install.rs`), so it cannot change content.
+
+**Why:** MODLOG 308 established that the lightmap formula cannot darken our shadow pixels (the floor never binds) and concluded the deficit must be in the **lightmap content**. The next measurement was to read that content.
+
+**Result 1 -- the lightmap tile under the road is nearly flat, cut from a page full of structure.** Material 192 (the draw under pixel 640,620 on Tsukuba) binds `textures/00000096.dds` to its lightmap slot:
+
+```
+lm 00000096 page 0x25e 512x512 tile su=-0.0625 sv=+0.0312 ou=+0.5781 ov=+0.5156
+  -> crop 32x16 at (296,264)
+  | crop mean 139.9 sd 1.6  [113..141]
+  | page mean  58.7 sd 61.9 [0..253]
+```
+
+The **page** has a spread of 61.9 and a full 0-253 range. The **crop** has a spread of 1.6 -- a smooth gradient. So that road draw receives essentially one light value across its whole width.
+
+**But the crop machinery is not broken generally**, which matters because it rules out the attractive explanation:
+
+| measure | value |
+|---|---|
+| lightmap tiles cropped (Tsukuba) | **1139** |
+| tiles whose crop sd < 3 (flat) | **32 (2.8 %)** |
+| tiles whose crop sd < 1 | 15 (1.3 %) |
+| crop sd, mean / median / max | 31.8 / 31.5 / 68.5 |
+| source page sd, mean | 56.3 |
+| crops per page | 110, spread over the page (x 8..495, y 8..488) |
+
+Crops are spread across the full page and 97 % of them carry the page's structure. **The flat tile is an outlier, not evidence of a wrong crop** -- and the code's negative-scale handling was already verified against a Sebring page dump (MODLOG-era note in `convert_lightmaps`).
+
+**Result 2 -- and this is the direct answer to the question MODLOG 308 posed.** Sampling the shader's own intermediates with `FH1_RM_FM2_DBG` (2 = lightmap sample, 3 = light term `lm*(light-dark)+dark`, 4 = albedo x term) on Tsukuba, at the reference's dark pixels vs the lit road:
+
+| capture | at reference's dark px | lit road | ratio |
+|---|---|---|---|
+| debug 2 (lightmap sample) | 73.2 | 160.7 | **0.46** |
+| debug 3 (light term) | 71.6 | 157.7 | **0.45** |
+| debug 4 (albedo x term) | 31.0 | 70.1 | 0.44 |
+| final render | 45.3 | 100.9 | 0.45 |
+| **reference** | **21.9** | **86.5** | **0.25** |
+
+**Our baked light term is 0.45 of lit where the game needs 0.25**, and the dynamic shadow barely registers on top of it (0.45 -> 0.45). Over the whole road band the same story with the tails:
+
+| | mean | sd | p5 | p95 | dark/lit |
+|---|---|---|---|---|---|
+| ours, light term | 149.9 | 62.3 | 54.0 | 207.0 | 0.42 |
+| ours, final render | 96.5 | 33.6 | **32.0** | **124.0** | 0.49 |
+| reference | 80.9 | 36.8 | **20.0** | **125.0** | **0.25** |
+
+**The bright end already matches (p95 124 against 125). The dark end does not (p5 32 against 20).** That is the signature of a missing multiplicative shadow, not a brightness or tone error.
+
+**Result 3 -- the shadow map is not the cause, and this time it is tested properly.** With `FH1_RM_FM2_SHADOW_DBG=1` (red = `sh^3`, 0 = shadowed, 1 = lit):
+
+```
+road band, mean sh^3 overall            167.3   (sh ~= 0.65)
+at the reference's dark pixels           59.5   (sh ~= 0.62)
+at the reference's lit pixels           177.5   (sh ~= 0.89)
+```
+
+So our shadow map **does** see the same occluders, just weakly. Then the two knobs that would explain a weak core:
+
+| configuration | mask | lit road | ratio | frame |
+|---|---|---|---|---|
+| default (gaussian, 2048, 2 cascades) | 45.3 | 100.9 | 0.45 | 25.22 |
+| hard, 2048 | 45.6 | 100.9 | 0.45 | 25.23 |
+| hard, 4096 | 45.5 | 100.9 | 0.45 | 25.22 |
+| gaussian, 4096 | 45.5 | 100.9 | 0.45 | 25.24 |
+
+**Resolution x2 and every filter move the metric by <= 0.3 and the dark/lit ratio by 0.00.** The shadow's softness is not what limits it, so this is not a penumbra or filtering problem.
+
+**Result 4 -- the shadow is in the wrong PLACE, not just the wrong depth.** Locating each frame's own darkest pixels inside the lower band:
+
+| | darkest 1 % centroid | y range | x range |
+|---|---|---|---|
+| ours | **(675, 683)** | 655..704 | 525..795 |
+| reference | **(852, 562)** | 343..704 | 135..1240 |
+
+Ours is a compact patch immediately under/right of the car -- the **contact shadow**. The reference's is spread across most of the frame at mid-height, from x 135 to 1240: **broad cast shadow from scenery**. Measured against the car rectangle, 30 % of the mask is within 40 px and 55 % within 100 px, so the mask is dominated by the region around the car, and there the game has a shadow we do not.
+
+That also corrects a reading of the earlier numbers: our frame *does* contain near-black (`our own` 1st percentile of the lower band is **1.0**), but at the reference's dark pixels we render **60.7 on average among its darkest 1 %**. We have black, just not where the game has it.
+
+**Result 5 -- the car's `DropShadowColor` decal is still not the lever.** Tsukuba's TrackSettings has `ShadowColor` **0.34** and `DropShadowColor` **0.00** (black). Setting the projected decal colour (`FH1_RM_FM2_PROJ_COL`) to the game's value:
+
+| capture | mask | frame |
+|---|---|---|
+| base (0.34 = ShadowColor) | 45.3 | 25.22 |
+| 0.15 | 44.4 | 25.31 |
+| **0.00 (the game's DropShadowColor)** | 44.1 | **25.43** |
+
+It darkens the mask by 1.2 and makes the frame **worse** by 0.21 -- reproducing MODLOG 4079's rejection, now on the masked shadow metric as well. The car's own shadow is not where the 31-point gap is.
+
+**What Phase F has established, and what it has excluded:**
+
+| candidate | verdict |
+|---|---|
+| the shadow map misses the occluders entirely | **no** -- sh ~= 0.62 at the reference's dark pixels |
+| shadow resolution / filtering / penumbra | **no** -- 2048 vs 4096 and gaussian vs hard change nothing (<= 0.3) |
+| the lightmap crop selects the wrong atlas region | **no** -- 97 % of 1139 crops carry the page's structure; the flat road tile is a genuine outlier |
+| the car's `DropShadowColor` decal | **no** -- worse on both the mask and the frame |
+| **the baked lightmap's own contrast** | **the measured deficit**: 0.42 where the game needs 0.25, with the bright end already correct |
+
+**Where that leaves it.** The game's road darkening is broad and scene-wide and lives in baked light; ours is a compact dark patch under the car plus a lightmap that modulates a smooth 0.42. The next question is therefore not "which shadow knob" but **whether the low-frequency shadow in the reference's road is present in our lightmap at all** -- measured by correlating our debug-3 light term against the reference's luminance spatially (currently **0.674** over the road band), and, if it is missing, where the importer loses it.
+
+**Still broken / not tested:** one track measured in depth (Tsukuba); the spatial correlation is a single number on one track; the scenery-shadow-caster path (`.pvs` record flag) was read about but not measured. Not committed or staged. Installed content restored and verified (**0.0230 / 99.2 % identical** against the frozen baseline).
+
+---
+
+## 2026-11-03 (308): plan v9 Phase F -- the lightmap floor does not bind, so the lightmap itself says those pixels are lit
+
+**What changed:** nothing in the source. `FH1_RM_LM_LIGHT_FLOOR` was set through the environment (0.02; the shipped FM2 value stays 0.06), so there is nothing to revert.
+
+**Why:** MODLOG 307 found that the blend family (`h_blnd2_ao_lm` -- Laguna Seca, Road Atlanta, Tsukuba, Sunset Infield, i.e. most of the +31.4 halo) ignores `FH1_RM_LM_LIGHT_BIAS`. Reading the shader shows why: the gain/bias pair is only the **fallback** (line 1090-1091), used when a material has no per-track light colours. The blend family **does** carry them (`fh1setup/src/remaster.rs:304-308` sets `FLAG_LM_LIGHT` and `p1 = dark`, `p3 = light - dark`), so it takes the branch
+
+```wgsl
+col = col * max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR)) * RM_LM_LIGHT_EXPOSURE;
+```
+
+Here `lm` is the sampled lightmap and the clamp is a floor. So the only global knob on that path is **the floor**, and the shipped FM2 value is **0.06**.
+
+**Tested how:** captured the four blend-family tracks at `FH1_RM_LM_LIGHT_FLOOR=0.02` (a third of the shipped value; *not* the rejected 0, which turned lightmap-dark surfaces blue on New York, MODLOG 84), judged on the MODLOG 306 shadow mask and the frozen frame baseline.
+
+**Result -- the floor does essentially nothing:**
+
+| track | reference | shadow cores base / floor 0.02 | frame mean base -> floor 0.02 |
+|---|---|---|---|
+| Tsukuba | 21.9 | 45.3 / **45.3** | 25.22 -> 24.99 (-0.23) |
+| Laguna Seca | 23.6 | 71.1 / **71.1** | 28.80 -> 28.75 (-0.05) |
+| Road Atlanta | 10.5 | 57.6 / **57.6** | 33.60 -> 33.58 (-0.02) |
+| Sunset Infield | 23.9 | 69.9 / 68.7 | 32.71 -> 32.11 (-0.60) |
+
+**Three tracks show a change of exactly 0.0 in the shadow cores** even though the floor was cut to a third. A clamp only matters when it binds, so **it is not binding**: in our shadow pixels the expression `lm * (light - dark) + dark` is already far above 0.02.
+
+**That is the finding, and it is more useful than the knob test.** Lowering the floor cannot darken those pixels because **our lightmap sample there is not low** -- our lightmap says those surfaces are lit. The game's shadow cores are dark because its lightmap (or its shadow term) is low there, and ours is not.
+
+So the road's shadow deficit is **not** in the lighting formula, the bias or the floor. It is in **the lightmap content**: the sampled value at the shadowed pixels is too high. That is consistent with everything else measured: the dynamic shadow map contributes 0-9 (MODLOG 306), the bias reaches only the fallback family (307), and the floor does not bind (here).
+
+**The next measurement is therefore specific:** sample our lightmap at the pixels where the reference is dark, and compare the value against what the game's own `lerp(dark, light, lm)` would have to be to produce the reference's luminance. If our `lm` is high where the game's must be low, the lightmap crop/scale is wrong -- the importer takes a 32x32 crop of an atlas tile (`convert_lightmaps`, `FM2_LM_TLMC`, `FM2_LM_FLOOR`), which is exactly the kind of step that can select the wrong part of a page.
+
+**Still broken / not tested:** the lightmap sample itself was not read; four tracks only; the shadow mask is the reference's darkest 10 % and may include dark content rather than shadow. Not committed or staged.
+
+---
+
+## 2026-11-03 (307): plan v9 Phase F -- the lightmap bias is a real lever but only 21 % of the shadow gap, and only on one material path
+
+**What changed:** nothing in the source. `FH1_RM_LM_LIGHT_BIAS` was set through the environment only (default stays 0.5), so there is nothing to revert.
+
+**Why:** MODLOG 306 showed our shadow cores 2.6x too light and that the dynamic shadow map contributes almost nothing, so the darkness must come from the baked lightmap. Reading the material shader found the formula that drives it:
+
+```rust
+// material.rs: RM_LM_LIGHT_GAIN (3.0), RM_LM_LIGHT_BIAS (0.5), ... -> albedo x (lightmap * gain + bias)
+```
+
+**A bias of 0.5 means a fully shadowed surface is still lit at half brightness.** That is a floor no shadow can get under, and it is not the knob the project rejected earlier (that was the lightmap *light floor* at 0, `FH1_RM_LM_LIGHT_FLOOR`, MODLOG 84).
+
+**Tested how:** captured Sebring (+62.1 halo), Laguna Seca (+47.5) and Road Atlanta (+47.1) at `FH1_RM_LM_LIGHT_BIAS` = 0.05 and 0.0, judged on the MODLOG 306 shadow mask and on the frozen frame baseline.
+
+**Result -- a genuine effect, on one path only:**
+
+| track | shadow cores: ref / bias 0.5 / bias 0.05 | frame mean: base -> bias 0.05 |
+|---|---|---|
+| Sebring | 47.9 / 110.0 / **96.9** | 32.57 -> **31.88 (-0.69)** |
+| Laguna Seca | 23.6 / 71.1 / **71.1** | 28.80 -> 28.80 (0.00) |
+| Road Atlanta | 10.5 / 57.6 / **57.6** | 33.60 -> 33.60 (-0.01) |
+
+**And it saturates.** On Sebring, `BIAS=0.05` and `BIAS=0.0` give **identical** results (96.9 cores, 31.88 frame), so nothing below 0.05 can help: the remaining brightness is not the bias.
+
+**What that establishes, in three parts:**
+1. The bias is worth **13.1 of a 62.1 gap on Sebring (21 %)**, and **-0.69 on the frame metric** -- the largest single effect any tested knob has produced this session, but far from closing it.
+2. **Laguna Seca and Road Atlanta do not respond at all** (0.00 and -0.01). They are drawn with `h_blnd2_ao_lm` (MODLOG 305), which takes a different lighting path, so the same constant is not wired to their maths. A change that only reaches one material family cannot fix a region-wide finding.
+3. **The remaining ~80 % is not the bias.** With the bias removed the Sebring core is still 96.9 against 47.9, so the surface is simply too bright there -- its albedo, its ambient, or the blend path's own lighting.
+
+**So Phase F's first hypothesis is half-confirmed and insufficient.** It is the right family of knob (baked lightmap lighting), but not the right single parameter, and it is not shared between the two road material families.
+
+**Not applied**, deliberately: a 0.69 frame gain on one track against 0.00 on two others would be a per-material fit, and the plan refuses those. The next step is to find why `h_blnd2_ao_lm` ignores the bias -- that family covers Laguna, Road Atlanta, Tsukuba and Sunset, i.e. most of the halo -- and to look at what else scales the road's brightness besides the lightmap term.
+
+**Still broken / not tested:** the blend path's lighting maths was not read; only three tracks were captured; the shadow mask is the reference's darkest 10 % and may include dark content rather than shadow. Not committed or staged.
+
+---
+
+## 2026-11-03 (306): plan v9 Phase F -- the shadow-region instrument, and the finding that dynamic shadows are not what darkens the game's road
+
+**What changed:** new `data/work/p1_shadow_metric.py` -- the masked shadow-region measurement Phase F's gate needs. It uses the **reference's own darkest 10 %** (of the lower frame, car and gauges excluded) as the mask, so the selection cannot be steered by our render, and reports three numbers per track: our mean luminance inside that mask, the reference's, and the **halo** (ours minus reference; positive = our shadows are too light).
+
+**Why:** the frame-wide metric cannot see shadows. A shadow 20 levels too light over 5 % of the frame moves the whole-frame mean by 1, which is well inside the noise of every other effect being chased. Phase F needs its own instrument before it can test anything.
+
+**Result 1 -- a large, one-signed signal, on every track:**
+
+| track | shadow pixels | ours | reference | halo | dark p5 |
+|---|---|---|---|---|---|
+| Tsukuba | 10.0 % | 45.3 | 21.9 | **+23.4** | -12.0 |
+| Laguna Seca | 10.5 % | 71.1 | 23.6 | **+47.5** | +11.0 |
+| Road Atlanta | 10.0 % | 57.6 | 10.5 | **+47.1** | +23.0 |
+| Silverstone | 10.8 % | 30.1 | 14.9 | +15.1 | +2.0 |
+| Nordschleife | 10.9 % | 33.0 | 11.0 | +22.0 | +6.0 |
+| Sebring | 10.2 % | 110.0 | 47.9 | **+62.1** | +2.0 |
+| Mugello | 10.4 % | 51.5 | 24.1 | +27.4 | -9.0 |
+| Suzuka | 10.1 % | 48.1 | 22.8 | +25.2 | -13.0 |
+| Sunset Infield | 10.2 % | 69.9 | 23.9 | **+46.0** | -10.0 |
+| Maple Valley | 10.6 % | 33.8 | 7.7 | +26.1 | +4.0 |
+| New York | 10.0 % | 19.3 | 9.1 | +10.1 | -5.0 |
+| TT King Cobra | 10.5 % | 44.4 | 19.4 | +25.0 | -6.0 |
+| **mean** | **10.3 %** | **51.2** | **19.7** | **+31.4** | -0.6 |
+
+**Our shadows are 2.6x too light, on all twelve tracks, with no exception.** This is the first region where the error is large *and* consistent in sign -- unlike the frame-wide metric, which is flat across regions (MODLOG 290), and unlike the road detail, which is per-track.
+
+Note the contrast with `dark p5`, which is only -0.6 on average: the *darkest* pixels of our frame are about right, but the *shadow cores inside the reference's mask* are far too bright. So we are not uniformly too dark or too light -- we specifically fail to darken where the game has shadow.
+
+**Result 2 -- and the shadows are not coming from the shadow map.** `FH1_RM_SHADOWS=0` disables sun/moon shadow maps. Re-capturing two tracks with them off:
+
+| track | reference | ours, shadows on | ours, shadows off | the shadow map contributes |
+|---|---|---|---|---|
+| Tsukuba | 21.9 | 45.3 | 54.3 | **9.0** |
+| Sebring | 47.9 | 110.0 | 110.8 | **0.8** |
+
+**The entire dynamic shadow system accounts for ~9 of the 23-point gap on Tsukuba and ~1 of the 62-point gap on Sebring.** Turning it off barely moves the picture, which means the game's shadow cores are **not** reproduced by our shadow maps at all -- they are almost certainly baked into the lightmap, and our lightmap is not dark enough there.
+
+**What that means for Phase F.** The plan expected this phase to be about cascades, resolution and dither. The measurement says those are the wrong subject: the dynamic shadow system already has almost no influence on the region in question. The lever is the **baked lightmap's darkness**, which is where the engine already carries an inferred constant (`FH1_RM_LM_LIGHT_FLOOR=0.06`, set for FM2 in `main.rs`) and where the importer carries another (`FM2_LM_FLOOR`).
+
+**Caution recorded before the next test:** a lightmap light floor of **0** is already on the rejected list (`STATUS.md` §7, MODLOG 84: it turned lightmap-dark surfaces blue on New York). The next test must be a *different* knob -- a lightmap brightness/gain, or the importer's `FM2_LM_FLOOR` -- and it must be judged on the shadow mask above, not on the frame.
+
+**Still broken / not tested:** no renderer change yet; the shadow mask is the reference's darkest 10 % and may include genuinely dark *content* (tyres, barriers) rather than shadow; two tracks only for the shadow-off test. Not committed or staged.
+
+---
+
+## 2026-11-03 (305): plan v9 Phase E CLOSED -- the two-layer road material already exists on every road checked; the detail is shader-generated
+
+**What changed:** nothing. This is the pixel-level confirmation on the second worst track and, with it, the rejection of Phase E's last hypothesis.
+
+**Why:** MODLOG 301-302 rejected the flat-grey hypothesis on Tsukuba and Sebring. Phase E's remaining proposal was to *implement* a two-layer road material. Before writing one, the same pixel-level check on Road Atlanta (detail ratio 0.63, second worst) shows whether a layer is actually missing.
+
+**Tested how:** engine ground probe at the shot pose, then the importer's `FM2_UNDER` at that point, then the material record.
+
+**Result -- Road Atlanta's road is already two-layer:**
+
+pixel 640,620 -> world `[47.55, 835.38, 831.701]`, surface 0, offroad 0.00 -> `model 349`, **material 893**, `h_blnd2_ao_lm.fx`, `blend true`.
+
+| slot | id | what |
+|---|---|---|
+| 0 | `0x202` | **real colour texture** |
+| 1 | `0xffff3002` | **darkened copy of a colour** (the `0x3000` wear family) |
+| 2 | `0x226` | real |
+| 5 | `0xffff0002` | generated white (AO slot) |
+| 7 | `0x225` | real (lightmap) |
+
+That is exactly the material Phase E proposed to build: a colour layer blended with a darkened second layer plus a lightmap. **It already exists and is in use on the track with the second worst detail ratio.**
+
+**So the two-layer hypothesis is rejected on all three tracks checked, each by a different route:**
+
+| track | detail ratio | road material under the pixel | two-layer? | flat grey? |
+|---|---|---|---|---|
+| Tsukuba | 0.76 | `h_blnd2_ao_lm`, real colour at slot 2 | **yes** | no |
+| Sebring | 0.57 | `h_diff_1_lm`, `0xffff6000` = scaled copy of a real texture | no | no |
+| Road Atlanta | 0.63 | `h_blnd2_ao_lm`, real colour + darkened copy + lightmap | **yes** | no |
+
+**Phase E is therefore closed with four mechanisms excluded and none confirmed:** sampling (298), bake resolution (299), flat-grey placeholder (301, 302), and now "the second layer is missing" (this entry). Every one was a plausible, measurable cause; every one was measured and did not hold.
+
+**What that leaves, stated honestly:** the road's fine detail in FM2 is produced **per pixel by the game's pixel shader** -- palette terms, a wear mask, a lightmap and several texture fetches combined in 204 dwords of microcode (MODLOG 230/234 evaluated that shader and it reproduces the Xenia pixel). A texture-based approximation, whatever layers it has, carries a *sample* of that result, not the result. The importer already samples it as well as a texture can.
+
+**So the road's 0.74 detail ratio is a property of the chosen approach, not a defect to fix.** Closing it requires executing the shader per pixel -- the reproduction route -- which MODLOG 289 closed for the FM2 road because the lighting term's constants are not on the disc.
+
+**Consequence for the plan:** Phase E cannot be completed by content or material changes, and the plan should record that rather than keep proposing them. The honest options for the road region are (a) accept it, or (b) revisit the reproduction route if a source for the vertex constants is ever found.
+
+**Restored and verified:** Road Atlanta re-imported and the remaster rebuilt; the capture returns to **0.0158 / 98.6 % identical** against the frozen baseline, i.e. at the noise floor.
+
+**Still broken / not tested:** the other nine tracks' road materials were not checked individually; the reasoning rests on three, chosen as the worst by the detail metric. Not committed or staged.
+
+---
+
+## 2026-11-03 (304): plan v9 prerequisite -- the remaster step was NON-DETERMINISTIC (HashMap iteration); fixed, and MODLOG 303's diagnosis corrected
+
+**What changed:** `crates/fh1setup/src/remaster.rs` -- the lightmap slot was chosen with
+
+```rust
+fam.roles.iter().find(|(_, &role)| role == LM)   // roles: HashMap<u32, usize>
+```
+
+`HashMap` iteration order is **randomised per process**, so whenever a family bound more than one lightmap slot the chosen slot changed between runs. It is now `filter(...).map(...).min()`, so the lowest slot always wins.
+
+**Why:** MODLOG 302-303 blamed the **import environment** for a 2.5 mean change on Sebring. That was wrong, and this entry is the correction.
+
+**Tested how:** rebuild the remaster tables twice with identical input and identical environment, capture the same two tracks each time, compare.
+
+**Before the fix:**
+
+| track | rebuild #1 vs #2 | identical |
+|---|---|---|
+| Mugello | **0.7919** | 43.0 % |
+| Sunset Infield | **2.9542** | 40.4 % |
+
+**After the fix:**
+
+| track | rebuild A vs B | identical |
+|---|---|---|
+| Mugello | **0.0056** | 99.6 % |
+| Sunset Infield | **0.1664** | 97.9 % |
+
+**So the irregularity was never the environment -- it was the remaster step itself.** Two rebuilds of the same input produced materially different output, which is why captures could not be compared across an import.
+
+**Corrections to MODLOG 303, with the measurements that overturn it:**
+
+| 303 said | actually |
+|---|---|
+| re-importing Sebring changed it by 2.52 mean | **Sebring re-imported is 0.0176 / 99.3 % identical to its baseline** -- the map import was fine all along |
+| the stored install was built with a different environment | the install was fine; **the remaster rebuild was non-deterministic** |
+| the env fingerprint is the fix | it is a **useful guard for a different failure mode** (different knobs, same code), but it was not this one |
+
+Two tracks did genuinely change -- Mugello 0.796 and Sunset Infield 2.955 -- and those were the ones whose material tables the rebuild scrambled, not the ones I had re-imported.
+
+**The environment guard is kept.** It addresses a real, separate hazard (an install built with different `FM2_*` knobs cannot be reproduced from the repository), and it now prints a warning rather than staying silent. It was simply not the cause here, and saying so is more useful than leaving the record to imply it was.
+
+**Baseline re-frozen against the current install** (`data/work/frame_diff_baseline.json`, prefix `base`, twelve tracks):
+
+```
+all       mean|d| 31.065   mean within2   1.33%
+fit       mean|d| 32.022   mean within2   1.08%
+hold-out  mean|d| 29.150   mean within2   1.83%
+```
+
+compare with the pre-fix baseline of 30.991 / 1.33 % -- **within 0.07**, so no phase's conclusions change, and the numbers now correspond to content that is actually on disk and reproducible.
+
+**Residual, recorded not hidden:** Sunset Infield still differs by 0.1664 between two identical rebuilds, eight times the 0.009-0.020 capture noise. So a smaller second source of non-determinism remains. The other `HashMap` in the file (`families`) is only a cache and a warning list and cannot explain it.
+
+**Still broken / not tested:** the residual 0.166 source; whether the map importer has its own smaller non-determinism (two imports agreed to 0.0417). Not committed or staged.
+
+---
+
+## 2026-11-03 (303): plan v9 prerequisite -- the import environment is now fingerprinted, and the stored install was built with a different one
+
+**What changed:**
+- `crates/fh1setup/src/install.rs`: new `pub fn env_fingerprint()` -- a hash of every **set** `FM2_*` / `FH1_*` variable except a short deny-list of read-only diagnostics, so a new knob cannot be forgotten. It is folded into `pipeline_hash`, which previously covered only the group name and its version string.
+- `crates/fh1setup/src/fm2.rs`: the FM2 map import does **not** go through the group pipeline hash at all, so it now writes `imported/fm2/import_env.txt` and prints a **WARNING** when the environment differs from the one that produced the maps already on disk.
+
+**Why:** MODLOG 302 measured that re-importing Sebring changed its render by **mean 2.5036 / 29.4 % of pixels**, against a 0.009-0.020 capture noise floor. Nothing recorded what produced the stored install, so the change could not be explained -- and an unexplained 2.5 makes every content-regenerating phase unjudgeable.
+
+**Tested how, and the cause is settled:**
+
+| comparison | mean difference | identical |
+|---|---|---|
+| two re-imports with the **same** environment | **0.0417** | 99.0 % |
+| re-import vs the **stored baseline** (unknown earlier environment) | **2.5224** | 29.4 % |
+
+**So the importer is deterministic given its environment, and the stored install was built with a different one.** The 2.5 was not nondeterminism and not my source edits (`git diff` on `fm2_scenery.rs` is empty): it was an unrecorded configuration.
+
+**Evidence the guard works:**
+
+```
+import with FM2_WEAR_DARK=0.3 -> import_env.txt: "env2b6d7783"
+import with FM2_WEAR_DARK=0.5 -> [fm2] WARNING: these maps were built with a different environment
+                                 ("env2b6d7783" -> "envb66716f8"); captures taken before and after this
+                                 import are not comparable
+import at default             -> [fm2] WARNING: ... ("envb66716f8" -> ""); ...
+                                 import_env.txt now empty (= defaults)
+```
+
+**The cost, stated plainly:** the stored install no longer matches the images the whole plan is measured against. Specifically, **Sebring's installed content is now the default-environment version, 2.52 mean away from `screenshots/det_sebring_00.png`**, and the configuration that produced that baseline is not recoverable from the repository. Tsukuba is near-restored (0.0579). The twelve `det_*.png` baselines remain valid *as pictures*, but at least one of them no longer corresponds to anything on disk.
+
+**What that means for the plan:** the instrument and the install are now out of step, so the next step is not Phase E but **re-capturing the twelve-track baseline against the current install** and re-freezing `frame_diff_baseline.json`. From then on every import prints which environment produced it, so this cannot happen silently again.
+
+**Still broken / not tested:** the deny-list is hand-written and may misclassify a knob as diagnostic; a knob that only affects one group still changes the hash for all; `FH1_*` variables used by the *engine* (not the importer) are included even though they do not change imported content. Not committed or staged.
+
+---
+
+## 2026-11-03 (302): plan v9 Phase E -- Sebring's road is not flat grey either, and re-importing a track changes it by 2.5 mean
+
+**What changed:** nothing in source. This is the pixel-level confirmation MODLOG 301 asked for, on the track with the worst detail ratio.
+
+**Why:** MODLOG 301 found Tsukuba's road under the car is a blend draw, not one of the 53 flat-grey materials, so the bake proposal did not apply there. The next step was to confirm on a track that is actually smooth in the metric -- Sebring, ratio **0.57**, the worst.
+
+**Tested how:** engine ground probe at the shot pose (`FH1_SHOT_PROBE_PX`) for the world point under pixel 640,620, then the importer's `FM2_UNDER` at that point, then the material records.
+
+**Result 1 -- the road point, proven asphalt:** `[-232.82, -0.71, 211.318]`, surface 35, offroad 0.00.
+
+**Result 2 -- two draws paint it, neither flat grey:**
+
+```
+under: model 75 ... material 617  "h_diff_1.fx"     colours [(204, 4)]          masks []
+under: model 49 ... material 1021 "h_diff_1_lm.fx"  colours [(0xffff6000, 4)]    ...
+```
+
+| material | shader | slot 0 | uses `0xffff0001`? |
+|---|---|---|---|
+| 617 | `h_diff_1` | `0x000000cc` (real) | **no** |
+| 1021 | `h_diff_1_lm` | `0xffff6000` (generated) | **no** |
+
+**Result 3 -- "generated" does not mean "placeholder", and this corrects MODLOG 300's reading.** The `0xffff_xxxx` families are different things:
+
+| family | what it is (from `fm2_scenery.rs`) |
+|---|---|
+| `0x2000` | baked road pixels (`baked_new`) |
+| `0x3000` | darkened copy of a colour, for the wear blend (`dark_new`) |
+| **`0x6000`** | **a scaled copy of a real texture** (`scaled_new`, `px = lin(tex) * sc`) |
+| `0x9000` | masks / cut-out bakes |
+| `0xffff0001` / `0xffff0002` | the flat grey and the white (the only true placeholders) |
+
+So Sebring's road colour is a **scaled copy of a real colour texture**, which carries full detail. The flat-grey mechanism is **rejected on both tracks checked**, and the 53-material bake proposal is not the road's problem on either.
+
+**Result 4 -- a correlation worth noting but not a mechanism:** materials whose slot 0 is a generated image -- Tsukuba **9.3 %**, Road Atlanta **8.4 %**, Sebring **24.8 %** -- and Sebring has by far the worst detail ratio (0.57). Suggestive, not causal, and Road Atlanta's 8.4 % with a 0.63 ratio does not fit it cleanly.
+
+**Result 5 -- and this is the one that matters more than the phase: re-importing a track CHANGES it.**
+
+```
+Sebring, re-imported with default env + remaster rebuilt, vs the stored baseline:
+  mean |difference| 2.5036    identical pixels 29.4 %
+```
+
+That is **not** capture noise (0.009-0.020) and not the 0.0579 seen on Tsukuba. It is a material change to the installed content, larger than most effects this plan is chasing. The likely cause is that the stored install was built with **non-default import settings** that are not recorded anywhere the importer can read back, so a re-import with defaults produces different content.
+
+**Consequences, stated plainly:**
+1. Every A/B in this session compares against captures of an install whose **import configuration is unknown**. The comparisons are still valid as same-install A/Bs, but the *baseline* is not reproducible from the repository.
+2. The flat-grey bake route is **closed for both tracks checked**, so Phase E has no measured mechanism yet -- three candidate mechanisms have now been excluded (flat grey, sampling, resolution).
+3. **A prerequisite for any further phase work is pinning the import environment** so a re-import reproduces the stored install. That is S7's "reproducible, resumable, incremental import" requirement, and it is now blocking rather than theoretical.
+
+**The importer source is confirmed clean**, so the change is not a leftover edit: `git diff -- crates/fh1setup/src/fm2_scenery.rs` is **empty** (`git status` shows it as modified only because its timestamp moved; there is no content difference against HEAD). The difference therefore comes from the import/remaster *environment*, not from the code.
+
+
+**Still broken / not tested:** what configuration produced the stored install; the other 52 flat-grey materials; whether the generated-image share correlates with detail across more tracks. Not committed or staged.
+
+---
+
+## 2026-11-03 (301): plan v9 Phase E -- the road under the car is a BLEND draw, not one of the 53 flat-grey materials; the premise is inverted
+
+**What changed:** nothing. This is the confirmation step MODLOG 300 named as untested, and it **contradicts the plan's next step** for this track.
+
+**Why:** MODLOG 300 found 53 road-surface materials drawn with the generated flat-grey placeholder and proposed routing them through the road bake. The step required confirming the road *under a captured pixel* is one of them before changing anything.
+
+**Tested how:** the engine's ground probe at the shot pose (`FH1_SHOT_PROBE_PX`) gave the world point under pixel 640,620 on Tsukuba: **`[-58.49, 18.52, -99.399]`, surface 0, offroad 0.00** -- proven asphalt by the same collision ray the acceptance metric uses. The importer's `FM2_UNDER` then named the draw at that point.
+
+**Result -- it is not a flat-grey draw:**
+
+```
+[fm2] under: model 50 ps_sig 19026bd2593921ac tris 16 cands [(150,12,660),(130,4,78),(144,20,90),(145,4,91),(130,4,78)] material 192 "shaders/track/h_blnd2_ao_lm.fx" blend true
+```
+
+Material 192 is a **blend draw with real colour textures**, not `h_diff_1_lm` on `0xffff0001`:
+
+| slot | id | file | what |
+|---|---|---|---|
+| 0 | `0xffff2002` | `textures/ffff2002.dds` | generated (lightmap page) |
+| 1 | `0xffff3002` | `textures/ffff3002.dds` | generated (lightmap page) |
+| 2 | 130 | `textures/00000082.dds` | **real colour texture** |
+| 5 | `0xffff0002` | `textures/ffff0002.dds` | generated white (AO slot) |
+| 7 | 150 | `textures/00000096.dds` | real (lightmap or second colour) |
+
+**So the flat-grey mechanism does not explain Tsukuba's road**, and routing the 53 materials through the bake would fix something that is not what the measurement is about on this track. Recording that rather than implementing it: the plan's proposed next step was based on a material count, not on the pixel.
+
+**What the table does say about this draw, and it is worth noting:** a blend whose two layers are **generated lightmap pages** (`ffff2002`, `ffff3002`) rather than two road colour textures. If those pages are low-frequency by construction, the blend cannot carry fine detail either -- which would produce the same symptom by a different mechanism. That is a hypothesis, not a measurement.
+
+**Two things this changes for the plan:**
+1. The flat-grey bake proposal is **not** justified by this track. It may still be right for the other 52 materials, but that must be established per pixel, not per material count.
+2. The next measurement should be the same confirmation on a track whose road *is* smooth in the metric -- Sebring (0.57) and Road Atlanta (0.63) are the worst, and one of them is the right place to look.
+
+**A reproducibility observation, recorded because it affects every A/B:** re-importing Tsukuba and rebuilding the remaster tables leaves the capture **0.0579 mean / 97.8 % identical** against the baseline -- above the 0.009-0.020 capture noise, so the import-and-rebuild path is **near-reproducible but not bit-exact**. Small, but it is larger than the effect sizes some phases are chasing, and it should be settled before any fine-grained A/B (S7's "reproducible import" requirement).
+
+**Still broken / not tested:** whether the generated blend layers are low-frequency. The other 52 flat-grey materials. The import's non-bit-exactness. Not committed or staged.
+
+---
+
+## 2026-11-03 (300): plan v9 Phase E -- the road is painted with a FLAT GREY placeholder; that is the missing detail
+
+**What changed:** nothing. This identifies the mechanism Phase D and E were hunting, from the imported material table rather than by another capture.
+
+**Why:** MODLOG 297-299 rejected sampling (`aniso`), bake resolution, and post-sharpening, and left "missing detail layers" as an inference. The next step was a two-layer road material. Before writing one, the material table can say what the road is actually drawn with.
+
+**Tested how:** inspecting `materials.json` of the imported Tsukuba map (1872 materials) for the generated placeholder textures the importer substitutes when a draw has no colour texture.
+
+**Result -- the road surface is a flat grey texture:**
+
+```
+  53 materials : 0xffff0001 (the generated FLAT GREY) + h_diff_1_lm.fx
+ 252 materials : 0xffff0002 (generated white) + h_blnd2_ao_lm.fx
+```
+
+`0xffff0001` is `ASPHALT` in `fm2_scenery.rs`: *"File id of the generated flat grey texture"*. The importer's own docs explain why it is used: *"a draw with only a lightmap (roads: their colour is a shader constant) gets a flat grey"*.
+
+**So the road under the car is a single flat grey texel repeated across the whole surface, multiplied by the lightmap.** A flat colour has *no high-frequency content at all*. That is the measured 0.76 detail ratio, and it explains every negative result so far:
+
+| hypothesis | why it could not work |
+|---|---|
+| anisotropic filtering (298) | there is no texture detail for anisotropy to preserve |
+| bake resolution x4 (299) | the flat grey is generated at any size; resolution does not create detail |
+| post-sharpening (297) | sharpening a constant produces a constant |
+
+**And it explains the per-track spread.** Tracks whose roads have real colour textures (Nordschleife 0.93, Laguna 0.92) sit near the reference; tracks whose road falls into the flat-grey path (Sebring 0.57, Road Atlanta 0.63) do not.
+
+**This is the finding the phase needed: the deficit is not a rendering fault at all -- it is content that was never imported.** In FM2 the road's colour comes out of the pixel shader (per-pixel, from several textures and constants); the importer replaces that with one flat value.
+
+**Next step, now specific and already half-built:** the importer has a **road bake** that evaluates the game's own pixel shader per texel (`bake_road_px`, `FM2_ROAD_PX*`, `FM2_BAKE_SIGS` -- "road paint baked from the game's own pixel shaders"). If those 53 materials can be routed through it at a decent resolution, the road gets the game's real per-pixel colour instead of grey, and the detail energy becomes measurable against the reference. That is a target of **53 materials on one track**, not a renderer redesign.
+
+**Still broken / not tested:** whether the road *under the car* is one of those 53 (the material table says 53 exist; the engine's ground probe would name the one under a pixel). The bake path's applicability to a lightmap-only draw is untested. Not committed or staged.
+
+---
+
+## 2026-11-03 (299): plan v9 Phase E -- bake resolution REJECTED (x4 resolution buys 0.03 of detail); the importer's one-texture road is the remaining explanation
+
+**What changed:** `crates/fh1setup/src/fm2_scenery.rs` -- the two bake-size clamps were raised from 256 to 1024 to test whether the road's missing fine detail is a *resolution* limit. **Both were reverted**; the file is back to `clamp(16, 256)` in both places and the installed Tsukuba map was re-imported and re-measured to prove it.
+
+**Why:** MODLOG 298 ruled out anisotropic sampling and concluded the road's 0.74 detail deficit must be content, naming "missing detail layers" as the hypothesis. But before changing any material, there is a cheaper version of the same question: the importer's road colour is **baked** into a texture clamped at **256x256 for an entire road draw** (`FM2_ROAD_PX_DIM`, default 256, `clamp(16, 256)`; and the general bake at `FM2_BAKE_PX_PER_M`, default 6 px/m, same clamp). A road strip tens of metres long in 256 px is a plausible resolution ceiling.
+
+**Tested how:** raised both clamps to 1024, re-imported Tsukuba, rebuilt the remaster tables, captured, measured the road band. Then reverted, re-imported at the default and captured again.
+
+**Result -- rejected, and the two knobs separated cleanly:**
+
+| state | road diff | detail energy (r<=1) | ratio to reference (8.77) |
+|---|---|---|---|
+| baseline (shipped) | 23.19 | 6.70 | **0.76** |
+| general bake at 1024 | 23.30 | 6.89 | **0.79** |
+| ... plus `FM2_ROAD_PX_DIM=1024` | 23.30 | 6.89 | 0.79 |
+| reverted (verified) | 23.19 | 6.70 | 0.76 |
+
+**Quadrupling the bake resolution — 65536 texels to 1048576, sixteen times the area — moves the detail ratio by 0.03 and makes the road slightly worse (+0.11).** `FM2_ROAD_PX_DIM` does nothing at all for this track, so Tsukuba's road does not take that path.
+
+**So the road's detail deficit is not a resolution limit either.** Three cheap explanations are now measured and rejected: anisotropic sampling (MODLOG 298), bake resolution (this entry), and post-sharpening (MODLOG 297). What is left is the explanation MODLOG 298 inferred and this entry could not disprove: the importer draws each road draw with **one colour texture on a plain diffuse shader** (its own module docs), so the mask / wear / decal layers that carry the game's fine road detail are simply not drawn.
+
+**A process failure worth recording.** Raising the general bake's clamp silently changed the *shipped* path -- the 6 px/m bake over a 117 m span is 702 px, which `next_power_of_two` rounds to 1024, so widening the clamp from 256 to 1024 changed every map, not just the experimental one. It showed up as a **0.2002 mean difference against the baseline**, ten times the 0.009-0.020 capture noise, which is what made it visible. After reverting both clamps and re-importing, the capture returns to **0.0210** mean / 99.1 % identical pixels -- at the noise floor, so the revert is complete.
+
+**Where Phase E stands:** the cheap tests are exhausted. The remaining step is a real change -- give one road draw a **two-layer material** (colour x wear mask, or colour + baked road) and measure whether the fine-band energy rises toward 1.0. That is a material-design change in `fh1-remaster` driven by the importer's layer data, not a knob, and it is the first thing in this plan that would touch how a surface is drawn rather than how it is sampled.
+
+**Still broken / not tested:** the multi-layer claim is still inferred. One track (Tsukuba) for the resolution test. Not committed or staged.
+
+---
+
+## 2026-11-03 (298): plan v9 Phase D -- anisotropic filtering REJECTED: it makes the road worse and does not add detail
+
+**What changed:** `crates/fh1-engine/src/mipgen.rs` gained an `FH1_ANISO=<n>` knob (default **1 = off**) that raises the sampler anisotropy of compressed / already-mipmapped textures -- the ones that never reach `build_chain` and so keep Bevy's default trilinear sampler. It is left in place **off by default**, with the measurement that rejected it written next to it, so the next person does not repeat it.
+
+**Why:** MODLOG 297 measured our road carrying **0.74** of the reference's fine-band detail energy, worst on the tracks with the worst error, and named the leading suspect: the road is a grazing-angle surface and those textures get no anisotropic filtering.
+
+**Tested how:** captured six tracks with `FH1_ANISO` unset (the shipped path, `det_*`) and with `FH1_ANISO=16` (`aniso_*`), same deterministic capture and locked pose, then measured the road band's difference and its fine-band energy.
+
+**Result -- rejected:**
+
+| track | road, default | road, aniso 16 | delta | detail energy default -> aniso (ref) |
+|---|---|---|---|---|
+| Tsukuba | 23.19 | 23.19 | 0.00 | 6.7 -> 6.7 (8.8) |
+| Laguna Seca | 24.82 | **32.63** | **+7.82** | 6.5 -> 6.4 (7.1) |
+| Road Atlanta | 39.41 | **49.73** | **+10.32** | 6.7 -> 6.8 (10.6) |
+| Silverstone | 28.83 | 28.83 | -0.00 | 7.6 -> 7.6 (10.5) |
+| Nordschleife | 27.42 | 27.42 | +0.00 | 8.2 -> 8.2 (8.8) |
+| Sebring | 40.54 | **43.44** | **+2.91** | 6.5 -> 6.5 (11.3) |
+| **mean** | **30.70** | **34.21** | **+3.51** | **7.03 -> 7.04** (ref 9.51) |
+
+**The change makes the road worse on every track that moved, and moves the detail energy by 0.01.** It does not even do the thing it was predicted to do: the fine-band energy is unchanged at 0.74 of the reference's. So whatever makes our road smoother, it is **not** the sampler's anisotropy.
+
+**A failure worth recording honestly:** the first build of this change crashed the engine with a GPU validation error ("Quitting the application due to Validation RenderError") because anisotropy was set on non-filterable formats. It was fixed by restricting to colour formats. The knob now defaults to 1, so the shipped path is unchanged -- verified by re-capturing Tsukuba with the reverted build: **mean difference 0.0208** from the baseline capture, which is the measured capture noise (0.009-0.020), not an image change.
+
+**Where that leaves Phase D.** The detail deficit is real (0.74) and cannot be closed by:
+- sharpening (best unsharp amount **0.0**, MODLOG 297 -- amplifying our detail does not mean matching theirs);
+- anisotropic sampling (**this entry** -- worse, no energy gain).
+
+So the road's smoothness is **not a sampling or reconstruction artefact**. The remaining explanation is **missing detail layers in the content**: the importer draws each FM2 road draw with a single diffuse texture on a plain diffuse shader (`fm2_scenery.rs`'s own module docs), so the mask/wear/decal layers that carry the fine detail in the game's road are not drawn at all. A missing layer *looks* smooth.
+
+**That moves the problem from Phase D (texture pipeline) to Phase E (road geometry and detail)**, and it agrees with an independent number from MODLOG 297: blurring the reference toward our smoothness recovers 2-9 points, i.e. the fine grain is worth that much *if* it were the game's grain rather than ours.
+
+**Still broken / not tested:** six tracks. The multi-layer hypothesis is inferred from the importer's documented approximation and from two failed sampling fixes, not yet measured directly -- the measurement would be to draw a road draw's extra layers and see whether the fine-band energy rises toward 1.0. Not committed or staged.
+
+---
+
+## 2026-11-03 (297): plan v9 Phase D -- the road is measurably smoother than the game's: fine detail 0.74, and reconstruction loss is 8-22 % of its error
+
+**What changed:** new `data/work/p1_detail_energy.py`. No renderer change.
+
+**Why:** Phase D asks whether the road region's ~32 is *reconstruction loss* (our road is smoother -- mips, filtering, anisotropic sampling, source resolution) or *content difference* (same detail in different places -- missing geometry, decals, different tarmac). They produce the same per-pixel error and need opposite fixes.
+
+**Tested how:** the road band (`x 0.04-0.66`, `y 0.56-0.94`, car and gauges excluded), six tracks. Detail energy = the standard deviation of the image minus a Gaussian blur of radius r, so each band measures the detail finer than r.
+
+**Result 1 -- our road carries 74 % of the reference's fine detail:**
+
+| band | ours | reference | ratio |
+|---|---|---|---|
+| r <= 1 px | 7.03 | 9.51 | **0.74** |
+| r <= 2 px | 11.76 | 14.55 | 0.81 |
+| r <= 4 px | 16.02 | 19.13 | 0.84 |
+
+The deficit is **largest at the finest band and shrinks with radius**, which is the signature of lost high-frequency detail rather than a missing object (a missing object would show equally at all radii).
+
+**It also tracks the error**: the tracks with the worst road difference are the smoothest -- Sebring ratio **0.57** (road diff 40.5), Road Atlanta 0.63 (39.4), against Laguna 0.92 (24.8) and Nordschleife 0.93 (27.4).
+
+**Result 2 -- sharpening cannot repair it.** Unsharp-masking our road until its fine-band energy reaches the reference's leaves the difference unchanged (best amount **0.0** on all six tracks). That is expected: the reference's detail is in *different places*, so amplifying ours adds detail that still does not match. It also means the fix has to come from sampling the same texels the game sampled, not from post-processing.
+
+**Result 3 -- the reconstruction part is measurable, and it is 8-22 % of the road error.** Blurring the **reference** toward our smoothness and re-measuring:
+
+| track | base | best (radius) | gain |
+|---|---|---|---|
+| Tsukuba | 25.34 | 23.30 (r=4) | 2.04 |
+| Laguna Seca | 26.90 | 24.73 (r=8) | 2.17 |
+| Road Atlanta | 42.81 | 38.57 (r=8) | **4.25** |
+| Silverstone | 28.43 | 25.79 (r=8) | 2.64 |
+| Nordschleife | 27.61 | 23.99 (r=8) | 3.62 |
+| Sebring | 41.87 | 32.60 (r=8) | **9.26** |
+
+**If our road carried the reference's detail, the road region would improve by roughly 2-9 per track -- about 8-22 % of its error, and more on the tracks that are worst.** The remainder is content that does not align at any blur, which sharper sampling cannot fix.
+
+**What that sets for Phase D:** raise the road's fine-band energy from **0.74 toward 1.0**. The expected prize is bounded at those 2-9 points, and the honest target is the measured ratio, not a guess.
+
+**The leading suspect, and it is testable next:** the road is viewed at a grazing angle, where a trilinear sampler must pick a coarse mip. If the imported scenery's DDS textures are sampled **without anisotropic filtering**, the road blurs with distance exactly as measured. The mip generator sets "trilinear + 16x anisotropic" for the images it builds (`mipgen.rs`), which raises the question of whether the game's own DDS textures -- which take the other path -- get the same sampler. That is a configuration question with a measurable answer.
+
+**Still broken / not tested:** six tracks; the road band excludes the right third of the frame; blur radius capped at 8 px, and the trend had not converged (so 8-22 % is a lower bound on what detail would buy). Not committed or staged.
+
+---
+
+## 2026-11-03 (296): plan v9 Phase B -- orientation, azimuth and glow all ruled out; the sky's mechanism is not isolated
+
+**What changed:** nothing in the renderer. Three more hypotheses tested on the sky, and Phase B's honest end state recorded.
+
+**Why:** MODLOG 295 left the sky with a precise signature -- mean correct, contrast 68-89 %, correlation 0.56-0.86, brightness error flipping sign between tracks -- and named dome orientation as the next candidate.
+
+**Hypothesis 1: the dome is rotated or mirrored. DISPROVED.**
+Best azimuth search over **+-200 px** (step 10) returns **dx = 0 on all six tracks tested**, and flipping or rotating makes the difference far worse:
+
+| track | base | flip H | flip V | rot 180 | best dx |
+|---|---|---|---|---|---|
+| Tsukuba | 25.02 | 42.84 | 37.90 | 41.78 | **0** |
+| Laguna Seca | 32.51 | 42.67 | 62.25 | 61.64 | **0** |
+| Road Atlanta | 33.48 | 39.04 | 77.99 | 77.64 | **0** |
+| Silverstone | 32.97 | 41.22 | 48.42 | 50.78 | **0** |
+| Nordschleife | 27.81 | 34.37 | 43.86 | 37.92 | **0** |
+| Sebring | 20.04 | 24.72 | 32.79 | 28.94 | **0** |
+
+The dome is the right way up and the right way round.
+
+**Hypothesis 2: the bright region (sun/glow) is missing. PARTLY, and it does not explain the error.**
+Locating the pixels at or above 240 in the sky band:
+
+| track | ours: area, centroid | reference: area, centroid |
+|---|---|---|
+| Tsukuba | 2.3 %, (676, 90) | 2.1 %, (625, 86) |
+| Laguna Seca | 2.2 %, (736, 77) | 2.5 %, (741, 77) |
+| Sebring | 2.3 %, (712, 82) | 2.2 %, (721, 82) |
+| Road Atlanta | 4.5 %, (912, 53) | **13.7 %, (355, 45)** |
+| Silverstone | 6.6 %, (709, 53) | **22.4 %, (799, 76)** |
+| Nordschleife | 2.2 %, (847, 83) | **4.6 %, (479, 112)** |
+
+**Three tracks match closely; three are 2-3x short.** That is the cleanest split the sky has produced, and it lines up with the gain table: the tracks that are short (Road Atlanta, Silverstone, Nordschleife) are the ones where the fitted gain *helps*, and the three that match are the ones where it *hurts*.
+
+**Hypothesis 3: the missing sun glow card explains it. DISPROVED.** The glow card is opt-in (`FH1_FM2_GLOW=1`, off by default, and the code notes "no Xenia shot shows the sun, so its level is not verified"). Enabled:
+
+| track | sky base | sky + glow | delta | bright area base -> glow (ref) |
+|---|---|---|---|---|
+| Tsukuba | 25.73 | 25.73 | 0.00 | 2.3 % -> 2.3 % (2.1 %) |
+| Road Atlanta | 32.79 | 32.80 | +0.00 | 4.5 % -> 4.5 % (13.7 %) |
+| Silverstone | 32.41 | 32.32 | **-0.09** | 6.6 % -> 8.2 % (22.4 %) |
+| Nordschleife | 26.25 | 26.25 | 0.00 | 2.2 % -> 2.2 % (4.6 %) |
+
+It moves the metric by nothing. The reference's extra bright area is not a flare -- **22.4 % of the sky band saturated is a blown-out sky, not a glow card.**
+
+**Where Phase B ends, honestly.** Five hypotheses tested and four ruled out:
+
+| hypothesis | verdict |
+|---|---|
+| mip chain / source resolution | ruled out (1024x512, 11 mips, full chain) |
+| texture filtering (blurred reference) | ruled out (gain 0.05-2.17 at radii 0.5-8 px) |
+| dome orientation / mirroring / azimuth | ruled out (dx 0 over +-200 px; flips far worse) |
+| missing sun glow card | ruled out (0.00 to -0.09) |
+| **per-track exposure** | **the remaining candidate, and it is not a fix -- it is the gain table that is wrong on half the tracks** |
+
+The measurable statement that survives: **on the tracks where the game's sky is blown out (Silverstone 22.4 % saturated against our 6.6 %), our sky is systematically under-exposed, and the per-track gain is a crude proxy for that exposure difference.** What sets the game's sky exposure per track has not been found; the project's own note (MODLOG 90) already recorded that the game's `skyGain` and tone curves "do not explain it".
+
+**Decision for the plan:** Phase B is recorded as **partially resolved** -- the mechanism is narrowed to a per-track exposure difference with no identified source -- and the plan moves to Phase C rather than spending more on it. The gain table stays untouched: it is right on some tracks and wrong on others, so changing it without the mechanism would trade one error for another.
+
+**Still broken / not tested:** six tracks for the bright-region split, four for the glow test. The exposure source is unidentified. Not committed or staged.
+
+---
+
+## 2026-11-03 (295): plan v9 Phase B -- the sky dome is full resolution and not blurred; the per-track sky gain is a fit that helps 5 tracks and hurts 4
+
+**What changed:** nothing in the renderer. Three measurements on the sky, and one finding that reframes the sky's error.
+
+**Why:** MODLOG 294 left the sky with 68-89 % of the reference's contrast at a matching mean, and named two suspects: source resolution / mip chain, or filtering. This tests both.
+
+**Result 1 -- the dome texture is full resolution with a complete chain.** The imported sky textures for Tsukuba:
+
+```
+000006cf.dds  1024x512  mips 11  DX10
+000006d0.dds  1024x512  mips 11  DX10
+000006d1.dds  1024x512  mips 11  DX10
+000006d2.dds  1024x512  mips 11  DX10
+000006d3.dds   512x512  mips 10  DX10
+```
+
+1024x512 with 11 levels is the full chain for that size (1024 -> 512 -> ... -> 1). **Mip-chain loss is ruled out.** The sky also loads: the engine logs `fm2 sky: 5 draws (0 caps)`.
+
+**Result 2 -- our sky is not a blurred reference.** Gaussian blurring the reference at radii 0.5-8 px and comparing to ours: best gain **0.09 / 2.17 / 0.78 / 0.05** on the four tracks. If our sky were a filtered version of the reference, some radius would collapse the difference. None does. **Filtering loss is ruled out as the main cause** -- the content genuinely differs.
+
+**Result 3 -- the per-track sky gain is a fit that is wrong on half the tracks.** `FH1_FM2_SKY_GAIN` is a **per-circuit, inferred** value in `fh1-engine/src/main.rs` (tsukuba 1.55, lagunaseca 0.82, silverstone 0.91, sebring 0.96, nurburgring 1.26, mugello 1.40, maplevalley 0.85, suzuka 1.20, sunsetinfield 1.06). Disabling it (`FH1_FM2_SKY_GAIN=1`) and re-capturing all twelve tracks:
+
+| track | gain | sky, fit | sky, no fit | delta |
+|---|---|---|---|---|
+| Tsukuba | 1.55 | 25.73 | 23.77 | **-1.96** |
+| Laguna Seca | 0.82 | 33.93 | 30.57 | **-3.36** |
+| Road Atlanta | -- | 32.79 | 32.79 | 0.00 |
+| Silverstone GP | 0.91 | 32.41 | 30.94 | **-1.47** |
+| Nordschleife | 1.26 | 26.25 | 42.88 | **+16.63** |
+| Sebring | 0.96 | 22.43 | 21.05 | **-1.38** |
+| Mugello | 1.40 | 40.49 | 45.89 | **+5.39** |
+| Suzuka | 1.20 | 25.67 | 44.30 | **+18.64** |
+| Sunset Infield | 1.06 | 31.57 | 32.33 | +0.76 |
+| Maple Valley | 0.85 | 54.29 | 49.86 | **-4.43** |
+| New York | -- | 16.09 | 16.09 | 0.00 |
+| TT King Cobra | -- | 9.16 | 9.16 | 0.00 |
+| **mean** | | **29.24** | **31.64** | **+2.40** |
+
+**Removing the fit helps five tracks and hurts four, badly** -- Nordschleife +16.6 and Suzuka +18.6. So the table is not simply wrong and cannot simply be deleted. It is a single number standing in for two different problems:
+
+- on **Nordschleife, Suzuka, Mugello** our sky really is too dark and needs the boost;
+- on **Tsukuba, Laguna, Silverstone, Sebring, Maple Valley** the boost makes it worse, so there the underlying error is something else the fit is masking.
+
+That is precisely the pathology the provenance rule exists to prevent: a fitted per-track constant that hides a mechanism, and is right on some tracks for reasons unrelated to the ones it is wrong on.
+
+**What the next step is, and it is not another gain:** find what is actually track-dependent about our sky. The candidates are the dome's **orientation/azimuth** (if the dome is rotated or mirrored, each track shows a different part of it, and a brightness gain is a crude proxy), the **sun position** the dome is lit/mapped against, or the **time of day** the FM2 sky assumes. The measured signature to explain is: mean correct on average, contrast 68-89 %, correlation 0.56-0.86, and a brightness error that flips sign between tracks.
+
+**Still broken / not tested:** twelve tracks for the gain test, four for the contrast/correlation numbers. The dome orientation has not been checked. Not committed or staged.
+
+---
+
+## 2026-11-03 (294): plan v9 Phase B -- the sky's mean is right and its contrast is not: 68-89 % of the reference's
+
+**What changed:** nothing. This is the first within-region attribution Phase B was meant to produce.
+
+**Why:** MODLOG 293 disproved every global cause (pose 0.9, tone 1.7, anti-aliasing 0.11 of ~32) and left the error as content. The sky (29.2 mean difference) is the most separable region, so it is attributed first.
+
+**Tested how:** translation search over the sky band only (y 0-216, +-30 px) to separate "wrong content" from "right content in the wrong place", then the luminance correlation and the standard deviation of our sky against the reference's, on four tracks.
+
+**Result -- it is the wrong content, and specifically the wrong *contrast*:**
+
+| track | sky diff | best shift gain | correlation | std ours | std reference | contrast ratio |
+|---|---|---|---|---|---|---|
+| Tsukuba | 25.73 | 0.69 at (0,0) | 0.654 | 35.2 | 42.1 | **0.84** |
+| Laguna Seca | 33.93 | 0.00 at (0,0) | 0.636 | 37.1 | 54.7 | **0.68** |
+| Road Atlanta | 32.79 | 0.35 at (0,0) | 0.859 | 57.6 | 75.7 | **0.76** |
+| Silverstone GP | 32.41 | 0.00 at (0,0) | 0.563 | 40.1 | 45.1 | **0.89** |
+
+Three things, each actionable:
+
+1. **The sky is not displaced.** The best translation is (0,0) on all four tracks and buys 0-0.69 -- less than the global sub-pixel result. So the dome mapping is right.
+2. **The mean brightness is already right** (MODLOG 290: 161.2 against 161.5, 1.00x), so this is not a tone error either.
+3. **Our sky carries 68-89 % of the reference's contrast** at the same mean. The clouds and gradients are **flattened**, not shifted, not tinted and not darkened. That is the signature of **detail being lost between the dome texture and the screen** -- mip selection, filtering, or a lower-resolution dome -- and it is measurable as a single number per track.
+
+**This is the first content defect with a named mechanism and a number.** It also explains why the sky's difference survived every global fit: a contrast reduction is not a translation, a gain or a bias, so none of them can absorb it.
+
+**Next for Phase B, in order:** (a) confirm the dome texture reaches us at full resolution with the expected mip chain (the importer's own `convert_textures` and the mip generator are the suspects), (b) compare our sky at mip 0 against the reference to see whether the loss is filtering or source resolution, (c) only then consider changing anything.
+
+**Still broken / not tested:** four tracks; the sky band is the top 30 % and includes any treeline at the horizon on some tracks. The cause is not yet isolated between resolution and filtering. Not committed or staged.
+
+---
+
+## 2026-11-03 (293): plan v9 Phase A -- anti-aliasing is disproved (0.11 of 30), sub-pixel pose too (0.63), and the "HUD" region was mislabelled
+
+**What changed:** nothing in the renderer. Two new measurement tools: `data/work/p1_aa_ab.py` (region-by-region A/B of two capture sets against the reference) and `data/work/p1_subpixel.py` (best sub-pixel translation and small scale). Phase A was run and **failed its gate**, which is the outcome the plan specified for a failed hypothesis.
+
+**Why:** Phase A's hypothesis was that a uniform ~31/255 across every region, *including the HUD*, indicated a global sampling cause -- our SMAA 2x + MSAA 2x against the 360's 4x MSAA.
+
+**Tested how:** the engine already exposes `FH1_AA=old|off|fxaa|smaa|msaa2|msaa4` (`ui/graphics.rs::aa_choice`). Tsukuba captured under four settings, deterministic capture, locked pose:
+
+| capture | vs Xenia (mean abs diff) | vs the default capture |
+|---|---|---|
+| default (SMAA + MSAA 2x) | 26.02 | -- |
+| `FH1_AA=old` (MSAA 4x, no post AA) | 26.02 | 0.066 |
+| `FH1_AA=msaa4` | **26.01** | 0.029 |
+| `FH1_AA=off` | **26.13** | 0.655 |
+
+**Anti-aliasing is worth at most 0.11 of 26.** Turning AA completely *off* moves the number by 0.655; every on-mode is within 0.07 of the default. The hypothesis is disproved and there is nothing to revert, because nothing was changed.
+
+**A second global cause tested and also disproved:** `p1_subpixel.py` searched translations of +-0.6 px and scales of 0.998-1.002 by bilinear resampling, on three tracks. Best gain **0.63** (all at +0.4/+0.4 px, scale exactly 1.0). So the pose is right to a fraction of a pixel, and the earlier integer-shift result (0.25) plus this total ~0.9 of 30.
+
+**And a correction to the plan's own reasoning:** the region list in `frame_diff.py` labels y 0.94-1.00 as `hud`, but that strip is the **bottom 6 % of the frame, which is road**. Measured: Tsukuba strip mean 92.1 against road 85.7, Laguna 84.8 against 87.2 -- road-like, not interface art. So the argument "the HUD is 2D, so a uniform error must be sampling" was built on a mislabelled region and **there is no evidence that 2D HUD art differs at all**. The region means stand as measurements (road 32.3, sky 29.2, car 33.5, bottom strip 31.5) but the inference drawn from them in MODLOG 291/plan v9 was wrong.
+
+**Where that leaves the error budget -- three global causes now tested:**
+
+| cause | worth |
+|---|---|
+| pose (integer + sub-pixel) | ~0.9 |
+| tone (best global gain + bias) | 1.72 |
+| anti-aliasing | 0.11 |
+| **content** | **~29 of 32** |
+
+**So there is no cheap global lever, and that is now measured three times over rather than assumed.** The 94 % content figure is confirmed, not eroded. The remaining work is genuinely per-region content, and no configuration change will move it.
+
+**Consequences for plan v9:** Phase A is closed as disproved. Phase B cannot be "the HUD" because the HUD was never shown to be wrong; it becomes **attribute the content error**, starting with the sky (29.2, the simplest region to reason about and the most separable). The plan's region table needs its `hud` entry renamed.
+
+**Still broken / not tested:** the AA test is one track; the sub-pixel test three. The content error is still unattributed within a region. Not committed or staged.
+
+---
+
+## 2026-11-03 (292): plan v9 written -- content parity, measured; v8's premise closed by evidence
+
+**What changed:** a new plan, **v9**, appended to `docs/DESIGN.md` ("Plan (2026-11-03, version 9): content parity, measured"). It supersedes v8 and is built only on numbers this session measured. No code change.
+
+**Why:** v8 rested on two premises that have now been tested and closed -- that reproducing FM2 by executing its own shaders would reach parity (it is 4.3x too dark, MODLOG 289), and that a labelled per-track calibration was the fallback (a perfect global fit removes 1.72 of 32.06, MODLOG 291). A plan whose two branches are both dead is not a plan, so the evidence forces a new one.
+
+**What v9 says, in short:**
+
+- **The goal moves to the whole-frame metric.** The anchored asphalt metric is demoted to a regression tripwire, because it can be satisfied while the frame differs by 31/255. The two instruments get different jobs, and the plan says which is enforced.
+- **Provisional target** `mean |Δ| <= 2.0` with `>= 95 %` of pixels within ±2 -- deliberately provisional, revised after Phase A, and explicitly **not** set before it could be measured. That is the failure mode of every previous attempt.
+- **The work order is by error x tractability**, derived from the region split (road 32.3, sky 29.2, car 33.5, HUD 31.5):
+  - **A: anti-aliasing.** The hypothesis that best explains a uniform ~31/255 that *includes flat 2D HUD art*: our captures use SMAA 2x where the 360 used 4x MSAA. Cheapest test, highest prior. Gated on the HUD region falling -- if it does not, the hypothesis is wrong and the phase is reverted.
+  - **B: the HUD**, **C: the sky**, **D: the texture pipeline**, **E: road geometry detail**, **F: shadows**, **G: the car**, **H: set the real target** from what content work cannot remove.
+- **Four things are refused, each with a measured reason**, not an opinion: fitted gains (1.72 of 32.06), reproduction (4.3x dark), new features before Phase A, and judging on the anchored metric alone.
+- **The session's assets are recorded as assets**: the deterministic capture, the whole-frame metric, the exact shader translation (as an *oracle* for material questions, not as a renderer), and the measured vertex layout.
+
+**What makes it different from v6-v8:** every one of its claims cites a MODLOG entry with a number, and the one number it refuses to supply -- the final target -- is refused on purpose, because setting it before measuring it is what went wrong before.
+
+**Still broken / not tested:** the provisional target is unvalidated; Phase A's hypothesis is untested; the region split is over twelve tracks but the error budget over six. Not committed or staged.
+
+---
+
+## 2026-11-03 (291): plan v8 -- an error budget: 94 % of the frame difference is content, and no global correction helps
+
+**What changed:** new `data/work/p1_error_budget.py`, which decomposes the whole-frame difference into the part removable by matching the **pose** (best global integer shift), the part removable by matching the **tone** (best global per-channel gain + bias, by least squares), and the **residual**, which is content. Debug/measurement only.
+
+**Why:** MODLOG 290 showed the frames have the right brightness with the wrong pixels, and the user asked what that means for parity. A target for "indistinguishable" cannot be set without knowing which part of the 31/255 is removable at all.
+
+**Tested how:** the first six tracks, lower two thirds of the frame (road, car, scenery; excludes most sky and HUD), `--tracks=6`.
+
+**Result:**
+
+| track | base | shifted | tone | both |
+|---|---|---|---|---|
+| Tsukuba | 26.22 | 26.14 | 22.79 | 22.74 |
+| Laguna Seca | 28.34 | 28.34 | 27.27 | 27.27 |
+| Road Atlanta | 35.32 | 34.87 | 30.14 | 29.63 |
+| Silverstone GP | 26.64 | 26.64 | 26.59 | 26.59 |
+| Nordschleife | 38.68 | 38.50 | **39.24** | 39.24 |
+| Sebring | 37.15 | 36.37 | 35.99 | 35.26 |
+| **mean** | **32.06** | **31.81** | **30.34** | **30.12** |
+
+```
+removable by matching the pose : 0.25   (0.8 %)
+removable by matching the tone : 1.72   (5.4 %)
+removable by both              : 1.94   (6.1 %)
+residual = content             : 30.12  (93.9 %)
+```
+
+**Three conclusions, and the third is the one that matters:**
+
+1. **Pose is already right.** The best global shift is 0-2 px and buys 0.25 -- the pose check in the acceptance metric has been correct all along.
+2. **Global tone buys almost nothing, and on Nordschleife it makes things worse** (38.50 -> 39.24). A global colour correction is not a lever. This is the quantitative death of the "labelled calibration" option: even a *perfect* global fit leaves 30.12 of 32.06, because the error is not global.
+3. **94 % of the difference is content** -- geometry detail, textures, shadows, crowd, HUD, anti-aliasing. That is now a number, and it means the only thing that can move this metric is drawing those things the way the game draws them.
+
+**What this sets for a target:** nothing below ~30 is reachable by tuning, so a whole-frame target has to be justified by *content* work, region by region. The first step toward setting it is attributing the 30 across regions (MODLOG 290 has the region split: road 32.3, sky 29.2, car 33.5, HUD 31.5) and then asking, per region, whether the gap is geometry, texture or shading -- each of which is a different and separable piece of work.
+
+**Still broken / not tested:** six tracks, not twelve; the lower two thirds only; the tone fit is a simple linear gain+bias, not a full curve. The content residual is not yet attributed beyond the four regions. Not committed or staged.
+
+---
+
+## 2026-11-03 (290): plan v8 -- the parity diagnosis: the levels are right, the pixels are not
+
+**What changed:** nothing. This reads the P0 baseline and the reference captures together to answer "what does the session's work mean for visual parity", which had been argued from the anchored metric alone.
+
+**Why:** MODLOG 288-289 closed the reproduction route and left the impression that the renderer is uniformly too dark. The whole-frame baseline measures something different from the anchored metric, and nobody had compared the two.
+
+**Tested how:** `data/work/frame_diff_baseline.json` (twelve tracks, mean absolute per-channel difference and its regional split), plus the **mean brightness** of our capture against the reference's in three regions, over the first six tracks.
+
+**Result 1 -- the per-pixel error is spread evenly over every region:**
+
+| region | mean \|diff\| over 12 tracks |
+|---|---|
+| road | 32.3 |
+| sky | 29.2 |
+| car | 33.5 |
+| **HUD** | **31.5** |
+| frame | 31.0 |
+
+A uniform ~31/255 that includes the **HUD** -- flat 2D interface art, not a lit surface -- cannot be a lighting or material error. Lighting would hit the road and sky differently and leave the HUD alone.
+
+**Result 2 -- the overall levels already agree:**
+
+| region | ours | reference | ratio |
+|---|---|---|---|
+| road | 102.9 | 100.8 | **1.02** |
+| sky | 161.2 | 161.5 | **1.00** |
+| car | 94.3 | 81.4 | 1.16 |
+
+So our frames are **the right brightness** and **do not line up pixel for pixel** (1.33 % of pixels within +-2). The error is **structural, not tonal**: different geometry detail, texture content, shadows, crowd, HUD and anti-aliasing, all at approximately the correct level.
+
+**What this means for visual parity, stated plainly:**
+
+1. **"Our renderer is too dark" was the wrong diagnosis.** Per-track anchored medians of 0.48-3.49 describe the *asphalt pixels under the car*, not the frame; the frame's overall level is within 2 % on the road and 0 % on the sky. Chasing brightness would chase a difference that is mostly not there.
+2. **"Indistinguishable" is dominated by content, not level.** With 1.33 % of pixels within +-2 and a uniform ~31/255 spread, the gap is in *what is drawn where*, so **a per-track brightness calibration would not produce indistinguishability even if it passed the gate** -- the frames would still differ by ~31/255. That is a second, independent reason to reject the calibration option: it would not achieve the goal it is meant to shortcut.
+3. **The gate and the goal measure different things, and the project must say so.** The gate (`sum |ln| <= 2.0` at asphalt pixels) can be satisfied while the frame remains visibly different. The whole-frame metric is the honest instrument for "indistinguishable", and the current figure is **30.99 mean, 1.33 % within +-2**, with no target set yet.
+4. **The remaining work is content fidelity** -- shadows, texture filtering and mips, crowd, mesh/LOD detail, HUD art, anti-aliasing -- judged per region so a change can be attributed. That is where the 31/255 lives, and it is what the P0 instrument was built to measure.
+
+**Still broken / not tested:** the whole-frame metric has **no target**; 30.99 is a baseline, not a verdict. The region means were taken over six tracks, not twelve. No change was made to any renderer this session to move the 31/255. Not committed or staged.
+
+---
+
+## 2026-11-03 (289): plan v8 P1 -- with the track's real light colours the faithful render is 4.3x too dark; the reproduction route is closed
+
+**What changed:** `--render` now takes `c184`/`c185` from the **track's own `fx_globals.json`** (`V2LightmapColor1` = dark, `V2LightmapColor2` = light) instead of the hand-written `0.30`/`0.85` guesses earlier runs used, with the env overrides still winning. This is what the importer's oracle does, and it is how MODLOG 218's interpreter reproduced the Xenia pixel.
+
+**Why:** MODLOG 288 corrected the comparison to display space and put the faithful render at 0.37. One visible error remained in the harness: the shader's light colours were guesses, not the track's values.
+
+**Result -- the correct values make it worse, and that is the finding:**
+
+| | display colour | vs reference 0.440/0.437/0.404 |
+|---|---|---|
+| hand-written guesses `c184=0.30 c185=0.85` | 0.1635 / 0.1574 / 0.1312 | 0.371 |
+| **track's own `c184 / c185`** | **0.1023 / 0.0970 / 0.0743** | **0.232** |
+
+Draw 4 with the correct values: `0.2878 / 0.2703 / 0.2169` (0.65 of the reference).
+
+**So the earlier 0.37 was itself flattered by wrong constants.** With the game's own numbers the road comes out **~4.3x too dark** (0.102 vs 0.440). The previous guesses happened to be brighter than the real dark/light pair and landed nearer the target by accident.
+
+**This closes the reproduction route for FM2 road parity, on measurement:**
+- the shader is exact (0.000000 against the interpreter);
+- the textures, constants and coordinates are the game's own;
+- the light colours are now the game's own;
+- and the result is still 4.3x dark, because the shader's lighting term (`o0`/`o2`) depends on vertex constants that MODLOG 280 showed are not on the disc.
+
+No further disc-sourced improvement is available. The gap is not tuning, not a convention, and not a stage that was forgotten -- it is a value the game uploads at runtime.
+
+**What to do with this, recommended:** stop pursuing FM2 *road* parity through the reproduction path and keep its assets. They are real and reusable: an exact XGSL->WGSL translation validated on 201,910 shaders, a measured vertex layout and coordinate scale, a working per-draw GPU renderer, and -- most valuable of all -- **the deterministic capture and whole-frame metric from P0**, which is the only trustworthy instrument this project has ever had for judging the look.
+
+**Still broken / not tested:** the probe cannot render a full frame (no camera, MODLOG 269/271), so none of these numbers are the acceptance metric. Not committed or staged.
+
+---
+
+## 2026-11-03 (288): CORRECTION OF 281-284 -- the faithful render is at 0.37, not 0.87; the light term is the dominant error, not a residual
+
+**What this corrects:** MODLOG 281 concluded the faithful render was at **0.72-0.79** of the reference and "roughly 1.7x closer" than the shipped approximation; 282 said the lightmap stage takes it to **0.86**; 284 said that already **passes the aggregate gate** and that an 8 % per-register gain would clear the per-track gate. **All of those numbers are wrong**, and they are wrong for one reason: they compared `gamma(mean of linear)` against `mean of gamma(pixels)`.
+
+**The correct comparison is in display space, and MODLOG 218 settles that it is display space.** The CPU interpreter at Sunset's road produced **(113, 110, 102)** against Xenia's **(111, 110, 98)** -- 8-bit pixel values, so the interpreter's output `out` satisfies `out x 255 = the pixel`. FM2's shaders write **display-referred** values directly (the engine notes say the same: no filmic curve). So our shader output must be compared to the reference *as it stands*, not gamma-encoded first.
+
+```
+interpreter at the anchor (display)  0.443  0.431  0.400
+reference                (display)  0.440  0.437  0.404     <- they agree, as MODLOG 218 found
+our render, lightmap t=1 (display)  0.1635 0.1574 0.1312
+ratio ours / reference              0.371  0.360  0.325
+```
+
+**So the faithful render is at 0.37, not 0.87** -- and the 0.87 figure was an artefact of applying a 2.2 gamma to a quantity that was already display-referred.
+
+**What that changes, all of it bad for the earlier conclusion:**
+
+| claim in 281-284 | corrected |
+|---|---|
+| faithful render is 0.72-0.79, "1.7x closer" than the remaster's 0.43 | it is **0.37 -- slightly WORSE than the remaster's 0.43** |
+| lightmap stage takes it to 0.86 | takes it to **0.37** (0.1635 display) |
+| aggregate gate `sum ln` = 1.64, "passes" | 12 x ln(0.37) = **11.9, far outside 2.0** |
+| an 8 % gain would clear the per-track gate | a **factor of 2.7** is needed, not 1.08 |
+| the light term is a "~14 % residual" | it is **the dominant error** -- nearly two thirds of the signal |
+
+**The corrected conclusion is the opposite of the one I gave.** The faithful path, limited to disc data, is **not** closer than the shipped approximation and does **not** meet any part of the gate. The missing light term (`o0`/`o2`, MODLOG 277-280) is not a rounding difference: it is most of the road's brightness. Reproducing FM2's road requires that term, and MODLOG 280 showed it is not on the disc.
+
+**How the error survived four entries:** each number was computed consistently with the previous one, and the first (0.72) came from comparing a linear mean against a linearised mean of sRGB -- a mistake that looks like a small discrepancy (0.72 rather than 1.0) instead of the factor-of-two error it is. MODLOG 285 caught the same trap in one *printed* line but did not go back and re-derive the numbers that had already been published.
+
+**Still true and unaffected:** the shader translation is exact (0.000000), coverage is complete (201,910/201,910), the vertex layout and coordinate scales are measured, and the lightmap stage is implemented and reads the track's own values. Those are the assets. What is disproved is that they are *sufficient*. Not committed or staged.
+
+---
+
+## 2026-11-03 (287): plan v8 P1 -- FM2's final combine makes the result WORSE, under either input convention
+
+**What changed:** nothing. This settles the question MODLOG 286 left open -- whether the `Fm2Post` curve applied to our value would help -- before any code was written to apply it.
+
+**Why:** MODLOG 284 recommended "finish the pipeline with two stages: the lightmap light and `Fm2Post`", and MODLOG 285-286 delivered the first and found the second's input space unconfirmed. Applying a stage that hurts would waste the work and mislead the plan, so it was tested arithmetically first.
+
+**Tested how:** the printed Sunset curve (`black point 0.02745`, `white point 1.07843`, `gamma 1.30` dark / `1.09` light -- both from `Fm2Post::from_xml`, MODLOG 286) evaluated on our lightmap-lit value `0.1635` linear, against the reference's `0.1875`, under both possible input conventions and across the whole `t` blend:
+
+| | | ratio to reference |
+|---|---|---|
+| current, before the curve | | **0.872** |
+| `t=0.0`, curve on **linear** | | 0.374 |
+| `t=0.5`, curve on linear | | 0.463 |
+| `t=1.0`, curve on linear | | 0.574 |
+| `t=0.0`, curve on **display-referred** | | 0.365 |
+| `t=0.5`, curve on display-referred | | 0.454 |
+| `t=1.0`, curve on display-referred | | 0.563 |
+
+**Every combination is far worse than not applying it.** And this is not an accident of the parameters: **both gammas are greater than 1** (1.30 and 1.09), so the curve **darkens** whatever the input space. The input-space question MODLOG 286 raised therefore does not matter for the decision -- it only changes the magnitude of the damage, not its direction.
+
+**So the recommendation in MODLOG 284 was wrong on this point and is corrected:** the FM2 final combine is **not** a missing stage that would close the 16 % gap. It is a stage that would triple the error. It stays unapplied, and the third input from MODLOG 286 (the frame's average luminance for `t`) is no longer worth measuring for this purpose.
+
+**What that does to the decision, with numbers:** the faithful path's achievable figure is **0.872** -- the lightmap stage, and nothing further from the disc. Against the gate:
+
+- aggregate `sum |ln|` = 12 x 0.137 = **1.64, passes** (limit 2.0);
+- per-track = **0.137, fails** (limit 0.10), by 0.037 of ln -- a factor of **1.08**.
+
+So the choice is now stark and small: accept a per-track miss of 8 %, or supply an 8 % uniform gain whose only justification would be a calibration. That is a far narrower question than "reproduce the whole lighting model", and it is the honest end state of the reproduction route.
+
+**Still broken / not tested:** whether any *legitimate* 8 % exists -- e.g. a display-space convention the renderer has not applied (FM2 draws its pixel shaders straight to the screen with no filmic curve, per `fh1-engine/src/main.rs`) -- has not been investigated. That is the one remaining measurement that could close the per-track gate without a fit. Not committed or staged.
+
+---
+
+## 2026-11-03 (286): plan v8 P1 -- `Fm2Post` parameters are shared, but the curve is WGSL, and its input convention is not yet established
+
+**What changed:** `fh1-remaster` added as a dev-dependency of `fh1setup`, and `--render` now reads the track's final-combine parameters through **`fh1_remaster::post::Fm2Post::from_xml`** -- the same struct and the same parse the renderer uses -- instead of a second parser. Debug probe only.
+
+**Why:** MODLOG 285 found the second unapplied stage (`Fm2Post`) unreachable from the probe because `fh1-remaster` was not a dependency, and the user chose to reuse the implementation rather than duplicate it.
+
+**Result -- the parse works, and it produces a caution:**
+
+```
+Fm2Post: desat 0.94 lum [0.2125, 0.7154, 0.0721] tint [1.0, 1.0, 1.0]
+         dark  [0.0275, 1.0784, 1.3000, 0.0]   (black point, white point, gamma, boost)
+         light [0.0275, 1.0784, 1.0900, -0.0]
+         lum_min 0.2078  lum_inv_range 1.6139  t -1
+```
+
+`t = -1` means the blend is **computed from the frame's average luminance**, not fixed -- which is the open question P3 names, and it needs the frame's luminance, not one draw's.
+
+**The structural finding: `Fm2Post` is parameters only.** The curve that consumes them is **WGSL text in `post.rs`** (line 79-81: "desaturate toward the luminance, tint, then a luminance tone curve blending the dark and light parameter sets"). There is no Rust function to call. So "reuse `Fm2Post`" splits into two honest possibilities, and neither is a one-line call:
+1. **Run the measurement inside the engine's render path**, so the real WGSL pass executes. That is renderer integration -- P2's core -- not a probe change.
+2. **Mirror the curve in Rust** for the probe, which is a second implementation of the same maths and will drift from the shader. This is the thing I was trying to avoid.
+
+**And a caution that makes applying it now unsafe even if mirrored:** a first-order evaluation of the printed curve on our value goes the wrong way. `x = (0.1635 - 0.0275) / (1.0784 - 0.0275) = 0.1296`, `y = x^1.3 = 0.0744` -- the curve would take 0.1635 **down** to 0.0744, i.e. further from the reference's 0.1875, not closer. Two explanations are possible and they are not distinguishable from what is known: our value is in the wrong space for this curve (it is likely display-referred, and ours is linear), or the boost/white-point convention differs from a naive reading. **Do not apply the curve until that is settled** -- applying it would make the number worse and look like progress.
+
+**So the honest status of stage two:** its inputs are now shared and verified readable, its maths is not callable outside the shader, and its input convention is unconfirmed. Closing it means the engine integration (option 1 proper), which is a different scale of work from everything in this session.
+
+**Still broken / not tested:** the curve's input space; `t` (frame luminance); the lightmap tile value. Not committed or staged.
+
+---
+
+## 2026-11-03 (285): plan v8 P1 -- the lightmap stage is implemented, and a tempting artefact is caught before it is believed
+
+**What changed:** `--render` now applies FM2's own lightmap light, `lerp(V2LightmapColor1, V2LightmapColor2, t)`, read from the track's `fx_globals.json`, and prints the lit mean alongside the raw one. The tile value `t` is an **input** (`FM2_LMAP_T`, default 1.0), not sampled, so the stage is exercised while the unsampled input stays visible.
+
+**Why:** MODLOG 284 identified the lightmap light as the first of two unapplied disc-sourced stages that could take the render from 0.72 towards the gate.
+
+**Tested how:** `--render 3` on Sunset Infield model 75 group 2, at `FM2_LMAP_T` = 1.0, 0.5 and 0.0.
+
+**Result -- the stage behaves, and the bounds reproduce the arithmetic:**
+
+| `t` | lit mean (linear) | sRGB printed |
+|---|---|---|
+| 1.0 | `[0.1635, 0.1574, 0.1312]` | [112, 110, 101] |
+| 0.5 | `[0.0688, 0.0660, 0.0552]` | [76, 74, 68] |
+| 0.0 | `[-0.0259, -0.0254, -0.0207]` | [0, 0, 0] |
+
+The tracked values are exactly those MODLOG 282 predicted by hand (`ours x light` = 0.1635 / 0.1575 / 0.1312), so the implementation matches the arithmetic it was derived from.
+
+**A trap that nearly produced a false success, recorded so it is not repeated.** The printed sRGB at `t = 1.0` is **[112, 110, 101]** and the reference's sRGB mean is **[112.3, 111.4, 102.9]** -- a 1-2 level agreement that looks like parity. **It is an artefact.** The printout is `gamma(mean of linear)`, while the reference figure is `mean of gamma(sRGB pixels)`; those are different quantities and differ by several levels:
+
+```
+comparable figures:  gamma(ours) = 112.0   vs   gamma(reference linear mean) = 119.1
+true linear ratio:   0.1635 / 0.1875 = 0.872
+```
+
+So the honest figure at full light is still **0.872**, i.e. about **7 levels** short, not 1-2. Any future comparison must be linear-to-linear, or sRGB-to-sRGB of *the same statistic* -- never one of each.
+
+**Still broken / not tested:** `t` is not sampled (MODLOG 283 has the tile and the pages); the second stage, FM2's own `Fm2Post` combine, is still unapplied -- I verified this rather than assuming it: `Fm2Post` appears **0 times** in the probe, while `fh1_remaster::post::Fm2Post::from_xml` exists and is documented as VERIFIED against the game's code. Applying it is blocked by crate boundaries (the probe is an `fh1setup` example and `fh1-remaster` is not a dependency of it), so it either moves into the engine or the curve is applied on the readback on the CPU -- a decision, not a task. Not committed or staged.
+
+---
+
+## 2026-11-03 (284): plan v8 P1 -- what the gate actually needs: 0.86 already meets the aggregate, and two disc-sourced stages are still unapplied
+
+**What changed:** nothing. This is the arithmetic that decides "accept, fit, or finish", which had been argued qualitatively.
+
+**Why:** MODLOG 281-283 established the faithful render at 0.72 bare and 0.86 with the lightmap light, and the recommendation was to take it and accept the shortfall. Nobody had checked what those numbers do to the **actual gate**, which is `sum |ln| <= 2.0` over twelve tracks with every track `<= 0.10`.
+
+**The arithmetic:**
+
+| ratio on every track | per-track \|ln\| (gate 0.10) | aggregate sum (gate 2.0) |
+|---|---|---|
+| 0.72 (bare) | 0.329 | **3.94** fail |
+| 0.86 (with lightmap light) | 0.151 | **1.81 pass** |
+| 0.90 | 0.105 | 1.26 pass |
+| 0.95 | 0.051 | 0.62 pass |
+| 0.98 | 0.020 | 0.24 pass |
+
+**So the aggregate gate is already met by the number in hand**, and the per-track gate needs about **0.90-0.95** on the worst tracks. That is a very different situation from "parity is unreachable": the faithful path does not need to be perfect, it needs to be a few percent better than the lightmap-only figure.
+
+**And two disc-sourced stages are not applied yet, either of which could be that few percent:**
+
+1. **The lightmap light** (`lerp(V2LightmapColor1, V2LightmapColor2, tile)`, MODLOG 283) -- measured as worth 0.72 -> 0.86.
+2. **FM2's own final combine** -- `fh1_remaster::post::Fm2Post::from_xml` already parses the track's tone curve and tint from `TrackSettings.xml`, and it is **not applied** in the probe renderer. A post stage is exactly the kind of thing that moves levels by the 1.16x this is short, and unlike a fitted gain it is the game's own numbers.
+
+**Therefore "what is best" is not a choice between accepting and fitting.** It is: **finish the pipeline with those two stages.** Both are game data, both are already parsed elsewhere in the project, and the arithmetic says the result only has to reach ~0.95 on the worst track to clear both gates -- not 1.0.
+
+**What calibration would buy, for comparison:** a fitted per-track gain would reach 1.0 and pass both gates, and would be wrong at any position, weather or car the twelve frames do not cover. It would satisfy the number while breaking the thing the number exists to measure.
+
+**Still broken / not tested:** both stages are unapplied; 0.86 is one draw on one track and is a ceiling; the 0.72/0.86 spread is not established across tracks. No renderer change this turn. Not committed or staged.
+
+---
+
+## 2026-11-03 (283): plan v8 P1 -- the lightmap tile is identified; sampling it is the last step to a real number
+
+**What changed:** `--pvs`/`--draw` now also prints the draw's lightmap atlas tiles (file id, PVS flags, and the `[su, sv, ou, ov]` rectangle inside the page). Debug probe only.
+
+**Why:** MODLOG 282's 0.86 is a **ceiling at full light**; the real figure needs the lightmap tile value at the reference point. This finds whether that tile is available.
+
+**Result -- it is bound, and the pages are on disk:**
+
+```
+draw 3: items [12, 13, 4, 5, 6, 7] -> [None, None, (249,4), (250,12), (251,4), (252,20)]
+  item 3: lightmap tile file 250 flags 12 rect [-0.0625, 0.03125, 0.015625, 0.953125]
+```
+
+Texture 250 carries **PVS flag 12**, which `fh1-formats` documents as a lightmap atlas tile, with a tile rectangle. The pages the tiles are cut from are exported as import-time textures `ffff2000.dds` .. `ffff2004.dds`, each **256 x 256, format 77 (BC3)**.
+
+**So the remaining step is bounded and named:** crop the tile at the given rectangle out of the page and take its mean, then `t` -> `lerp(dark, light, t)`. The crop rule is not written here -- it lives in `fm2_scenery.rs::convert_lightmaps`, which crops a 32x32 greyscale tile per the module docs -- so this should **reuse that code** rather than reimplement it, or the two will disagree.
+
+**Until that is done, the honest figure stays the ceiling.** MODLOG 282 measured 0.86 at full light and showed the factor needed for 1.0 (1.27-1.40) exceeds the lightmap maximum (1.09-1.20), so the real value lies between the dark case and 0.86 and cannot reach 1.0. The recommendation is unchanged: take the faithful path with the lightmap multiply, do not fit the remainder.
+
+**Still broken / not tested:** the tile is not sampled, so the real ratio is unknown. The renderer does not apply the lightmap multiply yet. Not committed or staged.
+
+---
+
+## 2026-11-03 (282): plan v8 P1 -- what the missing light is worth: the lightmap closes 0.72 -> 0.86, and the rest is unreachable
+
+**What changed:** nothing. This answers "accept the faithful path, or fit the missing term" with a measurement instead of an opinion, by testing whether the missing light is already on the disc.
+
+**Why:** MODLOG 281 measured the faithful render at 0.72-0.79 of the reference and attributed the deficit to the shader's unsourceable light term (MODLOG 280). If that light is a **track value the disc does carry**, there is no need for either a calibration or for accepting the deficit.
+
+**It partly is.** Sunset Infield's own `fx_globals.json` holds the lightmap colours:
+
+```
+V2LightmapColor1 (dark)  [-0.190501, -0.192571, -0.172375]
+V2LightmapColor2 (light) [ 1.204752,  1.194752,  1.090495]
+```
+
+The game's light at a point is `lerp(dark, light, lightmap_tile_value)`, so the **brightest** a surface can be lit is the `light` colour. Applying it to the faithful render:
+
+| | R | G | B |
+|---|---|---|---|
+| reference | 0.1875 | 0.1839 | 0.1531 |
+| ours, bare | 0.1357 | 0.1318 | 0.1203 **(0.724 / 0.717 / 0.786)** |
+| ours x light (brightest lightmap) | 0.1635 | 0.1575 | 0.1312 **(0.872 / 0.856 / 0.857)** |
+| ours x dark (darkest) | -0.0259 | -0.0254 | -0.0207 (-0.138) |
+| **factor needed for 1.0** | **1.382** | **1.395** | **1.273** |
+
+**Two conclusions, both quantitative:**
+
+1. **Multiplying by the track's own lightmap colour takes 0.72 to 0.86 with no fitting at all** -- those are the game's numbers, read from the track's data. So the "accept it dark" option is not the best honest option available: a better one exists that costs no fidelity.
+2. **It still cannot reach 1.0.** The factor needed (1.27-1.40) is **larger than the lightmap's own maximum** (1.09-1.20), so even a fully lit surface falls short. The remaining ~14 % is the shader's internal light term, which MODLOG 280 showed is not on the disc. **Parity is therefore not reachable by this route from disc data**, and that is now a measured statement rather than a worry.
+
+**Recommendation, recorded for the user's decision:** take the faithful path **with** the lightmap multiply (option 3), and do **not** fit the remainder (option 2). Reason: option 2 would be calibrated against twelve reference frames and wrong everywhere else, and by the goal's own rule it does not satisfy the gate; the lightmap multiply is the game's data and improves the honest number for free. The cost of this choice is stated plainly: the result lands near **0.86**, not 1.0, and no further disc-derived improvement is available for the light term.
+
+**Still broken / not tested:** the lightmap *tile* value at the reference point has not been sampled, so 0.86 is the ceiling at full light, not the expected value; the renderer does not apply the multiply yet. Not committed or staged.
+
+---
+
+## 2026-11-03 (281): plan v8 P1 -- the game's own shader renders the road ~25 % dark, against the remaster's ~57 % dark
+
+**What changed:** nothing. This is a measurement comparing the faithful render's road colour with the reference's, which had not been done.
+
+**Why:** MODLOG 280 closed the last route to the missing vertex matrices, so the faithful path cannot be completed from disc data. Before treating that as a dead end, it is worth knowing **how far off it actually is** -- the plan has always judged on numbers, not on whether a route is theoretically complete.
+
+**Tested how:**
+- **Reference**: the 442 asphalt pixels of `screenshots/xenia_ref/g1_18_sunset_infield.png` that `data/work/anchor_pixels.json` records as proven asphalt by the engine's collision ray, converted sRGB -> linear.
+- **Ours**: the faithful render of Sunset Infield model 75 group 2 draw 3 (MODLOG 276) -- the game's own translated pixel shader, the draw's own textures, measured uv.
+
+**Result:**
+
+| | R | G | B |
+|---|---|---|---|
+| reference asphalt, sRGB 8-bit | 112.3 | 111.4 | 102.9 |
+| reference asphalt, linear | 0.1875 | 0.1839 | 0.1531 |
+| our faithful render, linear | 0.1357 | 0.1318 | 0.1203 |
+| our render as sRGB 8-bit | 103 | 102 | 97 |
+| **ratio ours / reference** | **0.724** | **0.717** | **0.786** |
+
+**Two things this says.**
+
+1. **The colour is close and the tint is right.** About 9 levels of 255 apart in sRGB, and the three channels are short by similar amounts (0.72 / 0.72 / 0.79), so it is a *level* error, not a hue error. That is exactly the signature expected from a **missing additive light term** -- the thing MODLOG 280 showed cannot be sourced. It is not the signature of a wrong texture, a wrong uv or a wrong decode, all of which would shift the channels differently.
+
+2. **The faithful path is already much closer than the shipped approximation on this track.** The acceptance metric records Sunset Infield at **0.43** of the reference (STATUS.md §3.1's dark bin, and MODLOG 17's road-band ratio). The same reference pixels give this faithful render **0.72-0.79** -- roughly **1.7x closer**, with an incomplete lighting term and one draw.
+
+**Caveats, stated because this comparison is easy to over-read:**
+- Ours is the mean over one draw's covered pixels in an orthographic view; the reference is the mean over asphalt pixels in the game's own camera view. They are both "the road's colour", which is what a colour comparison needs, but they are not the same pixels and this is **not** the acceptance metric and does not satisfy it.
+- One draw, one track, one lighting state.
+- The ~25 % deficit is attributed to the missing light term by *consistency*, not by proof -- the proof would be supplying the term and seeing the ratio go to 1.0, which is what MODLOG 280 says cannot be done from the disc.
+
+**What it means for the plan:** the reproduction approach is not merely *architecturally* better than the approximation -- on the one draw where it can be measured, it is **materially closer to the reference** even when incomplete. That is the first quantitative evidence that P1's direction improves the number the project is judged on.
+
+**Still broken / not tested:** not the acceptance metric; one draw; no display transform. Not committed or staged.
+
+---
+
+## 2026-11-03 (280): plan v8 P1 -- the container constant tables declare registers but carry no values; the vertex matrices are not on the disc
+
+**What changed:** `--containers` now prints each shader container's constant table (`ShaderBlob::constants`): register, class, type, rows x columns, count and default. Debug probe only.
+
+**Why:** MODLOG 279 left one lead open -- if the `.data` containers' parameter defaults held the vertex matrices (`c15..c18`, `c7..c10`), the game's own vertex shader inputs would be recoverable and MODLOG 269's conclusion would need revisiting.
+
+**Tested how:** `--containers` on Sunset Infield model 75.
+
+**Result -- the tables exist, the values do not:**
+
+```
+0x069c: Pixel ... 17 constants:
+      c0  Scalar ty1 1x1 count1 default None
+      c0  Vector ty3 1x4 count1 default None
+      c1  Vector ty3 1x4 count1 default None
+      ...
+      c184 Vector ty3 1x4 count1 default None
+      c185 Vector ty3 1x4 count1 default None
+      c168 Vector ty3 1x4 count3 default None
+      ...
+      c0..c3 Object ty12 (sampler) default None
+```
+
+**Every single default is `None`.** The table is a *declaration* -- it says which registers the shader uses, their types and their sizes -- but carries no initial values. So the matrices are not there, and the lead is closed.
+
+Two things it does confirm, which are useful in their own right:
+- **`c184` and `c185` are declared explicitly** by this shader, exactly the registers the project already treats as the lightmap dark/light colours. That is independent confirmation of their role from the shader's own table rather than from inference.
+- The table names the samplers as `Object ty12` parameters (`c0..c3`), which is the shader declaring its texture inputs -- consistent with the sampler list read from the microcode.
+
+**Conclusion:** MODLOG 269 stands. The vertex stage's constant registers are not recoverable from the model file: not as literals (the VS has one, the 1/32767 normaliser) and not as container defaults (none). The renderer keeps its own vertex shader, and the pixel shader keeps being the game's.
+
+**Still broken / not tested:** nothing new is unblocked by this. The remaining gaps are unchanged: `o0`/`o2` cannot be sourced, so the PS lighting term is incomplete; no display transform; no camera. Not committed or staged.
+
+---
+
+## 2026-11-03 (279): CORRECTION OF 278 -- the literal is 1/32767, `Matrix` was applied all along, and the missing registers are not uvs
+
+**What this corrects:** MODLOG 278 said the `Scale` path could not be trusted because "its only literal is `(0,0,0,0)`, which cannot produce the non-zero register 7", and speculated that for register 8 *"the matrix path was not applied and the fallback produced a number of the right shape and the wrong meaning"*. **Both wrong.** Printing the values with six decimals instead of four, and printing what `vs_uv_sources` actually returns, settles it:
+
+```
+literals (1):
+  literal 0: [0.000031, 0.000000, 0.000000, 0.000000]
+resolved uv sources (register -> dword, map):
+  o7 <- dword 6, Scale(3.052e-5)
+  o8 <- dword 7, Matrix { reg: 76 }
+```
+
+**The literal is `0.000031` = 1/32767.** My earlier `--vs` print used four decimals, which rounded it to `0.0000` and made it look impossible. The `Scale` path is correct: `o7 = r8 x (1/32767)` is exactly the normalisation the fit measured as `1.0 x h/32767`.
+
+**And `o8` is `Matrix { reg: 76 }`** -- the matrix path *is* applied, to the constants `c76..c78` the disassembly shows. So the "absurd" -15888.5 is a legitimate matrix transform with large coefficients, resolved correctly. Nothing was falling back and nothing needed fixing.
+
+**Consequence for the interpolator question -- it was the wrong framing.** `fm2_uv` resolves **both** registers this shader's samplers read (`o7` and `o8`), which is why the renderer maps two of them. The registers that remain unsourced are `o0` and `o2`, and neither is a texture coordinate:
+
+- `o0` = `dp4 o0.x/y/z/w, c15..c18.zxyw, r7.zxyw` -- a 4-row transform of register 7, i.e. a **derived vertex quantity**, not a uv;
+- `o2` = `max o2.xyz_, r7.xyzz, r7.xyzz` -- a raw move of register 7.
+
+So "teach `vs_uv_sources` more shapes" would not help: these are not texture coordinates and the function is right to give them no source.
+
+**The real next question is different, and it has a lead:** the pixel shader uses `o0`/`o2` in its lighting term, and they are computed from the VS's **constant registers** (`c15..c18` for the matrix, `c7..c10` for the clip position). The `.data` shader **containers** carry constant tables with defaults -- MODLOG 267 printed their interpolators but not their constants. If those defaults hold the matrices, the game's own VS inputs are recoverable after all. That is the next thing to measure, and it would reopen the door MODLOG 269 closed.
+
+**Still broken / not tested:** the container constant tables are not yet printed. No renderer change this turn. Not committed or staged.
+
+---
+
+## 2026-11-03 (278): plan v8 P1 -- the unresolved interpolators use one more shape: a `dp4` against consecutive constants
+
+**What changed:** `--vs-asm` prints a draw group's vertex shader disassembly (the `TailShader` text the parser already builds). Debug probe only.
+
+**Why:** MODLOG 277 established that the interpolator shortfall is coverage in `vs_uv_sources`, which reads three instruction shapes. This lists what the shapes actually are before extending it.
+
+**Tested how:** `--vs-asm` on Sunset Infield model 75 group 2 (177 dwords, one literal).
+
+**Result -- every output write in the shader, classified:**
+
+| instruction | shape | `vs_uv_sources` |
+|---|---|---|
+| `28  mul o7.xyz_, r8.xyzz, c255.xxxx` | multiply by a literal | **recognised** (`UvMap::Scale`) |
+| `32  max o2.xyz_, r7.xyzz, r7.xyzz` | `max` as a raw move | **recognised** (`UvMap::Raw`) |
+| `29-31  dp4 o8.x/y/z, r3.wzxy, c76/c77/c78.wzxy` | **`dp4` against three consecutive constants** | **not recognised** |
+| `33  dp4 o0.x___, c15.zxyw, r7.zxyw` | `dp4` with the constant first and a different swizzle | **not recognised** |
+
+**So the gap is one shape, not an open-ended set:** a **matrix transform of a 16-bit fetched pair**, written as `dp4 oN.<component>, rK.wzxy, cM.wzxy` with `M` consecutive across the components. That is a **generalisation of the existing `Matrix` case** -- `UvMap::Matrix` already handles exactly this idea with *two* rows (`M0`, `M1` at `reg` and `reg + 1`), and the shader here simply uses three. Extending row count and accepting the constant-first operand order covers both unrecognised lines with the machinery that is already there.
+
+**This also explains the register-8 value without any bug:** `o8` is `r3` (the 16-bit pair at dword 7) put through a matrix built from `c76..c78`, not a plain scale. What `fs_uv_sources` reported as a x32767 scale was its literal-multiply path matching some other line; the honest statement is that the matrix path was not applied and the fallback produced a number of the right shape and the wrong meaning.
+
+**Still broken / not tested:** the extension is not written. The one-literal case (`mul o7, r8, c255`) deserves a second look: `vs.literals` has a single entry and `c255` indexes it, but the value printed for that literal is `(0,0,0,0)`, which cannot produce the non-zero register 7 that measurement resolves -- so the literal indexing needs checking before the `Scale` path can be trusted for this shader. Not committed or staged.
+
+---
+
+## 2026-11-03 (277): CORRECTION OF 273 -- the 32767 scale is not an importer bug, and stride 24's integers are `UvMap::Raw`
+
+**What this corrects:** MODLOG 273 concluded that `fm2_uv`'s register-8 value (-15888.5) was *"a per-register scale it does not model ... a defect in the importer to fix"*, and treated stride 24's coordinates `0, 1, 2` as an unexplained scale. **Both statements were wrong.** `fm2_uv` is behaving as documented and nothing in it needs fixing.
+
+**Why the correction is right:** the scale does not come from `fm2_uv` at all. It comes from the vertex shader. `fh1-shaders/src/fm2.rs` (`vs_uv_sources`) recognises `mul oN.xyz_, rK.xyzz, cC.kkkk` and records `UvMap::Scale(lit[k])`, where the scale is the **literal constant compiled into the shader**:
+
+```rust
+/// `(h0, h1) * scale`.
+Scale(f32),
+/// The raw integer pair (`max oN, rK, rK`): tile counts when small, not a coordinate at all when large.
+Raw,
+```
+
+So a register scaled by 32767 is a register the game's shader multiplies by 32767, read faithfully. The value -15888.5 is what the shader computes -- it is fed to a wrapping sampler, which is why it looks absurd as a coordinate and is fine as a texture fetch. And stride 24's `0, 1, 2` are `UvMap::Raw`: tile counts, described in the same enum as *"tile counts when small"*. The code says both things; I misread them as symptoms.
+
+**Consequence for the plan:** the interpolator shortfall is **not** a bug and there is nothing to fix in the importer. `vs_uv_sources` recognises three shapes -- multiply by a literal, `max` as a raw move, and a `dp4` placement matrix -- and a register it does not recognise simply gets no source. So the task is **coverage**: identify the instruction shapes the remaining registers use and teach `vs_uv_sources` to read them, exactly as it already reads three. That is a defined extension with a test (`--vertex` against the renderer), not a defect hunt.
+
+**Not tested:** which shapes the unrecognised registers actually use -- that is the next measurement.
+
+---
+
+## 2026-11-03 (276): plan v8 P1 -- projection fixed (thinnest axis); the remaining zeroes are degenerate geometry and missing interpolators
+
+**What changed:** `--render` now projects along the draw's **thinnest** axis instead of always using the x/z plane, so a vertical surface cannot collapse to a line. The chosen axes, span and thin-axis extent are printed with each render.
+
+**Why:** MODLOG 275 attributed draw 0's empty frame to the projection, because its vertices appeared to differ almost entirely in y.
+
+**Tested how:** `--render`, and `--render` with `FM2_RENDER_FLAT=1` (blue set to 1.0 on every rasterised pixel, so *any* geometry counts), on draws 0-4 of Sunset Infield model 75.
+
+**Result -- the MODLOG 275 diagnosis was wrong, and the measurement says so:**
+
+```
+draw 0-2: projection: screen (x, z), span 117.4, thin axis y (extent 1.02)
+```
+
+A 1.02 m thickness over a 117 m span means these draws are **nearly flat horizontal surfaces**, not vertical ones. The x/z projection was already correct for them, so the projection was never draw 0's problem -- the two vertices inspected in MODLOG 275 happened to be a pair that differed in y while the draw as a whole does not.
+
+With `FM2_RENDER_FLAT`:
+- **draw 2** (stride 24, 336 indices): **5120 pixels = 2.0 %** -- it rasterises. The **stride-24 vertex path works**, which is what this entry set out to establish.
+- **draws 0 and 1** (stride 24, 42 indices): still **0.0 %**. Fourteen triangles spanning 117 m and covering not one pixel means the geometry is degenerate -- zero-area or coincident triangles, not a rendering fault.
+- **draws 3 and 4** unchanged: 20.3 % and 9.4 % with the real shader.
+
+**With the real shader, draw 2 is black.** It rasterises, but the one mapped register (r5, x32) is not enough -- the same limit everywhere: `fm2_uv` resolves one sampler register per draw, so the other interpolators stay neutral and the shader's lighting term collapses.
+
+**So the bottleneck is now singular and consistent:** not the layout (measured for three strides), not the camera (correct for these draws), not the shader (validated bit-exact) -- it is **how many interpolators can be sourced**. `fm2_uv` gives one per draw; the shader wants ten.
+
+**Still broken / not tested:** draws 0/1 produce no geometry, cause identified as degenerate triangles but not investigated further. Draw 2 black for want of interpolators. No display transform. Not committed or staged.
+
+---
+
+## 2026-11-03 (275): plan v8 P1 -- the renderer fits each register's scale; stride 24 maps, but its geometry is vertical
+
+**What changed:** `crates/fh1setup/examples/fm2_ps_gpu.rs`'s `--render` now fits `resolved = a x (i16/32767) + b` per pair and per component in Rust (the same least-squares search as `p1_layout_probe.py`), so the decoder takes the **per-register scale** instead of assuming signed/32767. The vertex buffer and the WGSL are generated from however many registers the fit finds, so nothing is hardcoded to one draw.
+
+**Why:** MODLOG 274 mapped stride 24 to nothing because its coordinates are on a x32 scale; this applies that scale.
+
+**Result -- the fits reproduce the Python probe, and stride 24 now maps:**
+
+```
+draw 0 (stride 24): r5 <- pair 2, scale (31.9989, 31.9989), bias (0,0)          [residual 7.6e-6]
+draw 3 (stride 32): r7 <- pair 3, scale (1.0000, 1.0000)                        [residual 2.1e-7]
+draw 3 (stride 32): r8 <- pair 4, scale (32766.9980, 0.0000), bias (0.5,0.5)    [residual 2.0e-3]
+draw 4 (stride 28): r3 <- pair 0, scale (255.9922, 255.9922), bias (-0.5,-0.5)  [residual 4.6e-5]
+draw 4 (stride 28): r7 <- pair 0, scale (1.0000, 1.0000)                        [residual 1.2e-7]
+```
+
+Every scale MODLOG 273 measured by hand comes back out of the renderer: 32, 1, 256, and the 32767 that is `fm2_uv`'s bug. Draw 4 mapping **two** registers to the same pair at x256 and x1 is consistent with a shader that wants one tiled and one untiled copy of a coordinate.
+
+**Rendered colours moved slightly, and in the right direction:** draw 3 `[0.1434...] -> [0.1357, 0.1318, 0.1203]`, draw 4 `[0.3431...] -> [0.3818, 0.3674, 0.3511]`. The registers that were neutral placeholders now carry measured values.
+
+**Draw 0 still renders nothing, and it is not the shader.** `FM2_RENDER_FLAT=1` (which paints the interpolated coordinate and sets blue to 1.0, so *any* rasterised pixel counts) also covers 0 pixels. Its vertices are fine -- `[-214.54381, 1.0163169, 306.1964]` and `[-214.54382, 0.0021702065, 306.19464]` -- but they differ almost entirely in **y**: the draw is a near-vertical surface, and the renderer's orthographic projection looks down the x/z plane, so the geometry collapses to a line.
+
+**So the next fix is the camera, not the data:** choose the projection from the draw's own extent (project along its thinnest axis) instead of always using x/z. Small change, and it is now the only thing between the renderer and stride 24.
+
+**Still broken / not tested:** draw 3's `r8` fit has a 2e-3 residual against a 32767 scale -- it is fitting `fm2_uv`'s bug, so that register's value is suspect and should not be trusted. One register per draw is mappable in general, because `fm2_uv` resolves only the samplers it identifies. No display transform. Not committed or staged.
+
+---
+
+## 2026-11-02 (274): plan v8 P1 -- the renderer derives each draw's pair-to-register mapping instead of hardcoding it
+
+**What changed:** `crates/fh1setup/examples/fm2_ps_gpu.rs`'s `--render` now works out, per draw, which packed vertex pair feeds which shader register, by decoding every pair and keeping the one that matches `fm2_uv`'s resolved coordinate on **every** vertex of that draw. The attribute count and vertex stride come from the draw's own stride rather than assuming five pairs. Debug probe only.
+
+**Why:** MODLOG 272 measured that the mapping depends on the stride (the pair feeding register 7 is the fourth at stride 32 and the first at stride 28), so the hardcoded `r7 = pair 3` could only ever be right for one draw. MODLOG 273 gave the rule to derive it from.
+
+**Tested how:** `--render` on draws 3 (stride 32), 4 (stride 28) and 0 (stride 24) of Sunset Infield model 75.
+
+**Result:**
+
+```
+draw 3, stride 32, 5 packed pairs: pair 3 -> r7 (matches on all 30 vertices)
+draw 4, stride 28, 4 packed pairs: pair 0 -> r7 (matches on all 30 vertices)
+draw 0, stride 24, 3 packed pairs: 0/3 pairs mapped
+```
+
+The derivation finds exactly the mappings MODLOG 268 and 272 measured by hand, independently and per draw -- so the hardcoded constant is gone and the renderer no longer depends on which draw it is given.
+
+**Rendering, with the neutral fallback for the unsupplied registers:**
+- draw 3 (stride 32): 20.3 % covered, mean `[0.1434, 0.1378, 0.1246]` -- unchanged.
+- draw 4 (stride 28): 9.4 % covered, mean `[0.3431, 0.3303, 0.3152]`. **This number is now trustworthy where it was not before**: MODLOG 271's figure came from a decoder reading four bytes past the end of a 28-byte vertex; it now reads four pairs inside the vertex with the mapping measured.
+
+**Stride 24 still maps nothing, and the reason is already known:** its coordinates resolve on a **x32 scale** (MODLOG 273), while the renderer decodes with the plain signed/32767 rule. The decoder needs to take the scale from the fit. That is a defined change, not an unknown.
+
+**Still broken / not tested:** only one register per draw is mappable, because `fm2_uv` resolves only the sampler register it can identify (and its register-8 value is the 32767-scale bug). The other interpolators stay neutral. No display transform. Not committed or staged.
+
+---
+
+## 2026-11-02 (273): plan v8 P1 -- the coordinate rule is a per-register linear scale, and it is now measured for all three strides
+
+**What changed:** `data/work/p1_layout_probe.py` no longer tries two fixed decode rules. It fits `resolved = a x (i16/32767) + b` by least squares for **every** halfword offset and reports the offset whose residual reaches the noise floor. That turns "which rule is it" into "what is the scale", and a scale answers the question that fixed rules could not.
+
+**Why:** MODLOG 272 found stride 24 resolving to integers (0, 1, 2) and stride 28 register 3 resolving to 18.95 / 37.36 / 178.6 -- neither reproducible by signed/32767 or unorm/65535, so the coordinate was plainly scaled by something.
+
+**Result -- an exact fit on every register of every stride:**
+
+| draw | stride | register | fit | residual |
+|---|---|---|---|---|
+| 3 | 32 | r7 | `u = 1.0000 * h[12]/32767`, `v = 1.0000 * h[13]/32767` | 3e-7 |
+| 3 | 32 | r8 | `u = **32767.0** * h[14]/32767 + 0.5` | 1e-11 |
+| 4 | 28 | r3 | `u = **255.99** * h[6]/32767 - 0.5`, `v` likewise at h[7] | 5e-7 |
+| 4 | 28 | r7 | `u = 1.0000 * h[6]/32767`, `v = 1.0001 * h[7]/32767` | 3e-7 |
+| 0 | 24 | r5 | `u = **31.999** * h[10]/32767`, `v` likewise at h[11] | 5e-7 |
+
+So the rule is:
+
+> **coordinate = scale x (i16 / 32767) + bias**, with the halfword offset, the **scale** and the bias all per register.
+
+The scales that appear are **1, 32 and 256** -- powers-of-two tiling factors. 32 is exactly the importer's `FM2_UV_SCALE` default, which the project has carried as an "UNVERIFIED tiling factor" since the beginning; this measures it on a draw. 256 is a second, larger tiling (a stride-28 draw), and 1 is an untiled coordinate.
+
+**Two conclusions that matter:**
+1. **The layout is now fully determinable, per draw, by measurement.** No guessing is needed for any draw: run this fit, read off (offset, scale, bias) per register. That is the same method that produced the stride-32 result, generalised.
+2. **`fm2_uv`'s register-8 value is explained.** Its resolved `u` (-15888.5) is exactly `32767 x (-0.485) + 0.5`: on that register the importer multiplies by 32767 where the other registers use 1, 32 or 256. That is the "Sunset model 77 degenerate coordinate" the code warns about, now with a cause rather than a symptom -- a per-register scale it does not model. **Recorded as a defect in the importer to fix, not worked around.**
+
+**Still broken / not tested:** the renderer still shades only stride 32 (the pair-to-register mapping must now be taken from this fit rather than hardcoded). No display transform. Not committed or staged.
+
+---
+
+## 2026-11-02 (272): plan v8 P1 -- stride 28 measured; stride 24 uses a different numeric scale
+
+**What changed:** `data/work/p1_layout_probe.py` takes `--draw=`, so the layout search runs on any draw rather than only the road draw it was written for. No tool or importer change.
+
+**Why:** MODLOG 271 showed the renderer shades only the stride-32 draw, and named measuring the other strides as the next task.
+
+**Tested how:** the same search (every halfword offset x both decode rules, required to fit on every vertex) on Sunset Infield model 75.
+
+**Result:**
+
+**Stride 28 (draw 4) — measured.**
+```
+register r7 (16 vertices):
+  u = halfword 6  signed  (max error 0.000025)
+  v = halfword 7  signed  (max error 0.000049)
+```
+Halfwords 6/7 are the dword at **byte 12**, so a stride-28 vertex is `position f32 x3` followed by four packed pairs at bytes 12/16/20/24, with the same `(u: high 16 signed / 32767, v: low 16 signed / 32767)` rule. **But the pair that feeds register 7 is the *first* one here**, where in stride 32 it was the *fourth* (dword 6). The dword-to-register mapping therefore depends on the stride, not on the register index -- so it cannot be carried over between layouts.
+
+**Stride 24 (draw 0) — the rule does not fit, and the reason is informative.**
+```
+register r5 (24 vertices):
+  u: no single halfword reproduces it (values 0.0000, 0.0000, 1.0000, 1.0000, 2.0000, 2.0000)
+  v: no single halfword reproduces it (values 0.1631, 0.9990, 0.1631, 0.9990, 0.1631, 0.9990)
+```
+The resolved `u` values are **0, 1, 2** -- small integers, not normalised fractions. Stride 28's register 3 is the same shape: `18.9531, 37.3594` for `u` and `178.6484, 255.4453` for `v`. So some registers carry coordinates on a **different scale** (integer or unorm-over-a-larger-range), not the signed/32767 rule. A single decode rule per shader is wrong; it is per register, and the scale has yet to be identified.
+
+**What this changes:** the "measure two more strides" task is smaller than it looked for stride 28 (one rule, one offset) and larger for stride 24 (the scale of the coordinate itself is unknown). Neither is now a guess: both have a named, measurable next question.
+
+**Still broken / not tested:** the renderer still handles only stride 32, because the pair-to-register mapping has to come from the layout rather than being hardcoded. No display transform. Not committed or staged.
+
+---
+
+## 2026-11-02 (271): plan v8 P1 -- the renderer works for the draw whose layout is measured; the others need theirs
+
+**What changed:** nothing. This is a measurement of `--render` across every draw of the model.
+
+**Why:** MODLOG 270 rendered one draw. Before claiming anything about a draw *family*, I needed to know whether the same renderer handles the model's other draws.
+
+**Tested how:** `--render <d>` for d = 0..10 on Sunset Infield model 75, with the neutral-register and lightmap-constant settings from MODLOG 270.
+
+**Result:**
+
+| draw | stride | vertices | indices | textures | covered | mean colour (linear) |
+|---|---|---|---|---|---|---|
+| 0 | 24 | 184 | 42 | 2 | **0.0 %** | black |
+| 1 | 24 | 184 | 42 | 2 | **0.0 %** | black |
+| 2 | 24 | 184 | 336 | 2 | **0.0 %** | black |
+| 3 | **32** | 30 | 84 | 4 | **20.3 %** | `[0.1434, 0.1378, 0.1246]` |
+| 4 | 28 | 30 | 84 | 4 | **9.4 %** | `[0.3431, 0.3303, 0.3152]` |
+
+Only draws 3 and 4 shade, and draw 4 (stride 28) is shading from a decoder that reads five pairs at bytes 12..28 -- past the end of a 28-byte vertex, so its numbers are not trustworthy either.
+
+**The zeroes are explained, and they are not a renderer bug.** The vertex decoder assumes the stride-32 layout, which is the only one **measured** (MODLOG 268). For stride 24 it reads attribute pairs beyond the end of the vertex, so the shader is fed garbage and returns black. `fh1-formats` documents stride 20 and 24 layouts, but neither is measured the way stride 32 now is, and the renderer here does not use them.
+
+**So the honest statement is:** the renderer is proven for **one draw** -- the one whose layout is measured -- and the rest of the model needs their own layout work. That is exactly the "draw family" task P2 names, and it is now a defined list: measure stride 24 and stride 28 the same way stride 32 was measured (`--uvprobe` + `p1_layout_probe.py`), then the decoder can take a layout instead of assuming one.
+
+**Still broken / not tested:** no comparison against the reference frame (the render is an orthographic view of one draw's own bounding box, which has no relationship to the game's camera -- a pixel comparison needs the game's view/projection matrices, which the disc does not store, the same gap as MODLOG 269). The five unsupplied interpolators are still neutral placeholders. No display transform. Not committed or staged.
+
+---
+
+## 2026-11-02 (270): plan v8 P1 -- one FM2 draw renders through the game's own pixel shader
+
+**What changed:** `crates/fh1setup/examples/fm2_ps_gpu.rs` gained `--render <draw>`, which draws one FM2 draw end to end: our own vertex shader over the draw's real vertices (MEASURED layout, MODLOG 268), the draw's own textures and constants, and **the game's own translated pixel shader** per pixel. Renders 512x512 to a 32-bit float target and writes `data/work/fm2_draw.ppm`. Debug probe; no engine or importer change.
+
+**Why:** this is what P1 existed to reach -- the game's shader producing the game's pixels, not a probe of it.
+
+**Tested how:** Sunset Infield model 75 group 2 draw 3 (stride 32, 30 vertices, 84 indices, 4 textures), with the track's lightmap colours in `c184`/`c185`.
+
+**Result, in three parts:**
+
+1. **Geometry is correct.** With the shader bypassed (`FM2_RENDER_FLAT=1`, painting the interpolated coordinate instead), the draw covers **53,248 pixels = 20.3 %** of the frame as a continuous strip with smooth gradients. So the vertex shader, the measured layout, the index buffer and the projection are all right.
+
+2. **With the game's shader, black -- until the five unsupplied registers are given a value.** The container declares ten texcoord interpolators (MODLOG 267) but the vertex supplies five pairs, so registers 5, 6, 8, 9, 10..15 have no source. At zero the shader returns black; at a neutral 0.5 it returns colour.
+
+3. **The colour is plausible.** Mean of the shader output over covered pixels: `[0.1434, 0.1378, 0.1246]` linear -- a warm grey. The image is a dark road strip with 27 distinct shades. As 8-bit display values that is about `(108, 106, 102)` after gamma, against the reference's road at about `(111, 110, 98)` (MODLOG 218). **That agreement is encouraging but not yet evidence**: five registers were set by assumption, so it can be right for the wrong reason, and no gamma handling has been chosen yet (the PPM is written without one).
+
+**What this establishes:** the data path is complete and works end to end. A real FM2 draw goes from disc bytes to shaded pixels through the game's own shader, with only these inputs still unsourced:
+
+| input | state |
+|---|---|
+| position, index buffer, projection | **verified** (geometry renders) |
+| texture coordinates (5 pairs) | **measured** (MODLOG 268) |
+| textures per sampler | **read** from the draw's PVS items |
+| draw constants | **read** from the draw's `0x06` records |
+| lightmap colours `c184`/`c185` | from the track's `TrackSettings`/`fx_globals` |
+| the five extra interpolators | **INFERRED** -- no source; neutral 0.5, must stay labelled |
+
+**Still broken / not tested:** one draw, not a draw family or a track; no comparison against the reference frame; the display transform (gamma / FM2's final combine) is not applied; the five inferred registers are a placeholder, and the colour match may be coincidence. Not committed or staged.
+
+---
+
+## 2026-11-02 (269): plan v8 P1 -- the game's vertex shader cannot be reproduced from the disc: its constants are not stored
+
+**What changed:** `crates/fh1setup/examples/fm2_ps_gpu.rs` gained `--vs <n>`, which runs the draw's own vertex shader **on the GPU**: it enumerates the shader's vfetch instructions, synthesises `vertex_elements` from the measured stride-32 layout (position + five packed uv pairs), fills a storage buffer with those attributes, runs the translated VS as a compute pass, and reads back all 16 output registers plus the clip position. Debug probe only.
+
+**Why:** MODLOG 268 measured the vertex layout, so the translated vertex shader could finally be executed and its outputs compared against `fm2_uv`'s resolved coordinates.
+
+**Result -- it executes, and it is blocked by constants, not by the layout.**
+
+```
+VS 177 dwords, 1 literals, 6 distinct vertex fetches at [6, 7, 8, 9, 10, 11]
+  literal 0: [0.0000, 0.0000, 0.0000, 0.0000]
+VS vertex 0: pos [0.0000,0.0000,0.0000,0.0000]
+VS vertex 1: pos [0.0000,0.0000,0.0000,0.0000]
+```
+
+Two things in that output matter.
+
+1. **The fetch count matches the measured layout exactly**: six distinct vertex fetches for position plus five packed uv pairs. That is an independent structural confirmation of MODLOG 268 -- the layout was derived from the data, and the shader agrees it has six inputs.
+2. **The shader outputs all zeros.** It executes (the compute pass runs, the buffers read back), but every output is zero because the **constant registers are zero**. The VS carries exactly **one literal, and it is `(0,0,0,0)`**: the matrices and the uv transforms it multiplies by are **not stored with the shader** -- the game uploads them at draw time from render state that the disc does not carry in the model file.
+
+**Conclusion: the game's own vertex shader cannot be reproduced from the disc alone.** This is the same shape as the missing declaration (MODLOG 265-267) but a different missing thing: not the input layout, which is now measured, but the *uniform inputs*. For the pixel shader the equivalent values are either in the draw's `0x06` constants or settable from the track's own `TrackSettings`; for the vertex stage there is no source at all.
+
+**What that means for the plan.** The renderer must **author its own vertex shader**. That is now fully specified and does not lose the fidelity we care about:
+- the input layout is **measured** (MODLOG 268);
+- the positions are read from the model, and the texture coordinates are measured and separately cross-checked by `fm2_uv`;
+- the pixel shader -- the part that decides what a surface *looks* like -- is the game's own, declared (MODLOG 267) and validated to the last bit (MODLOG 261).
+
+The only thing genuinely lost is whatever transform the game's VS applied to the uv before interpolation; that is detectable by comparing our interpolated uv against `fm2_uv`'s resolved values, which is the check the next step should carry.
+
+**Still broken / not tested:** no asphalt, silhouette or frame difference. No renderer draws an FM2 draw yet. Not committed or staged.
+
+---
+
+## 2026-11-02 (268): plan v8 P1 -- the stride-32 vertex layout is MEASURED, not inferred
+
+**What changed:** new `data/work/p1_layout_probe.py`, which searches every halfword offset and both decode rules for the one that reproduces the texture coordinates the importer resolved, requiring a fit on **every** sampled vertex (a rule that fits one vertex is a coincidence). `fm2_ps_gpu` gained `--uvprobe` (prints the resolved uv next to a vertex's raw 16-bit values) and `--decode` now reports the stride-32 layout as measured. Debug probes only; no parsing or importer change.
+
+**Why:** MODLOG 267 left the stride-32 layout unconfirmed and unstested, which blocked the vertex shader. This settles it by measurement rather than by choosing a plausible packing.
+
+**Tested how:** `python -I data/work/p1_layout_probe.py --vertices=12` on the Sunset Infield road draw (model 75, draw 3, stride 32, 30 vertices).
+
+**Result -- one rule fits all 12 vertices, to float precision:**
+
+```
+register r7 (12 vertices):
+  u = halfword 12  signed  (max error 0.000017)
+  v = halfword 13  signed  (max error 0.000032)
+```
+
+Halfwords 12 and 13 are the two halves of the dword at **byte 24** (dword 6 of the vertex's 8). Reading it as `u = high 16 bits, v = low 16 bits`, signed and divided by 32767, reproduces the importer's resolved value exactly: the decode prints `pair 3 (dword 6): u 0.000214 v 0.000000`, and `fm2_uv` resolved `r7 = [0.000214, 0.000000]`.
+
+**So the stride-32 layout is:**
+```
+bytes 0..12   position, 3 x f32
+bytes 12..32  five dwords, each one packed texture coordinate:
+              u = high 16 bits as i16 / 32767,  v = low 16 bits as i16 / 32767
+```
+
+**Provenance, stated precisely:**
+- **position** -- verified against the parser's `Draw::positions` (MODLOG 266).
+- **the packed-uv rule** -- **measured** against `fm2_uv`'s shader-derived coordinates, 12 vertices, max error 3.2e-5.
+- **which dword feeds which register** -- measured for register 7 (dword 6). Registers 0-6 and 8-9 are not directly cross-checkable, because `fm2_uv` resolves only the samplers it finds, and its value for register 8 is its **own known-bad case** (the negative-16000 numbers; the code's own comment names "Sunset model 77"). So the remaining dword-to-register assignment is inferred by order, and must stay labelled that way.
+
+**Still broken / not tested:** the vertex shader has not run. No asphalt, silhouette or frame difference. The dword-to-register order for the five pairs is inferred. Not committed or staged.
+
+---
+
+## 2026-11-02 (267): plan v8 P1 -- the `.data` shader containers DO declare the pixel shader's inputs (but no vertex declaration)
+
+**What changed:** `crates/fh1setup/examples/fm2_ps_gpu.rs` gained `--containers` (scan `.data` for `102A1100` / `102A1101` shader containers and print what each declares) and `--decode` now prints, for stride 32, all twenty 16-bit values after the position. Debug probes only.
+
+**Why:** the search for a vertex declaration (MODLOG 265/266) had missed one place: `0x02` stream records point at shader **containers inside `.data`**, and a container carries declarations. The project's importer reads only the raw microcode in the `.gpu` tail and never parses these containers, so anything they declare is information it does not use.
+
+**Result -- a real declaration exists, for the pixel stage.**
+```
+0x069c: Pixel len 1660 dwords 168 vertex_elements [] interpolators [
+  {usage:5, usage_index:0, reg:0} ... {usage:5, usage_index:6, reg:6}] vpos Some(0)
+0x1650: Pixel ... usage_index 0..9 -> reg 0..9
+0x27a0: Pixel ... usage_index 0..8 -> reg 0..8
+```
+Three containers per model (2-3 across models 75/79/140/145). `usage: 5` is `TEXCOORD`, so this says **every interpolator the pixel shader reads is a texture coordinate**, one per register, plus the pixel position in register 0. The project previously knew only which *samplers* read which registers (from the shader analysis in `fm2_uv`); it did not know that all ten registers are texcoords.
+
+`vertex_elements` is empty on all of them and **there are no vertex containers in `.data`**, so the vertex stage still has no declaration. The blocker stands for the VS; what changed is that the PS side is now declared rather than inferred.
+
+**A strong fit worth recording:** the road draw is stride 32 = 12 bytes of position + 20 bytes, and 20 bytes is exactly twenty 16-bit values, while the same shader declares exactly **ten** texcoord sets. So "position f32x3, then ten 16-bit uv pairs" is almost certainly the layout. **It is not yet confirmed:** decoding vertex 0's pairs gives plausible magnitudes (1/64 = 0.0156, 1/4 = 0.25, and three values near -0.5) but the halfword-to-register mapping does not line up with `fm2_uv`'s resolved values for registers 7 and 8, so the pairing or the transform is not right yet. Recorded as unconfirmed rather than adopted.
+
+**Verified alongside:** position still reproduces `Draw::positions` exactly (`--decode 3 0` -> `[-331.9697, 0.0003006205, 282.42804]`), so offset 0..12 is settled.
+
+**Still broken / not tested:** the vertex shader has still never run. No asphalt, silhouette or frame difference. The halfword layout for stride 32 is unconfirmed. Not committed or staged.
+
+---
+
+## 2026-11-02 (266): plan v8 P1 -- final search confirms no vertex declaration; the inferred path starts from a verified position
+
+**What changed:** `crates/fh1setup/examples/fm2_ps_gpu.rs` gained `--decode <draw> <vertex>`, which decodes a vertex with the **inferred** layout and prints it next to the parser's `Draw::positions`, so the inferred layout can be checked against an independent path. Debug probe only.
+
+**Why:** MODLOG 265 exhausted the obvious places for a vertex declaration. This is the second and final search the user asked for, before committing to the inferred option.
+
+**Two more places checked, both negative:**
+1. **`.data` at 0x98**, the target of word 0 of the `0x2e` record (which is *not* the vertex buffer record at 0x148). It is a texture-binding table: repeating four-word groups of `0000FFFF 0000FFFF 0000FFFF <id>` with ids 19, 105, 106. Not a layout.
+2. **The PVS per-model block**, the one per-model record the importer does not use: `[01FF0024, 3F800000, 3F800000, 3F800000, 00000000, 80000000, 80000000, 80000000, 0012B8EC, 00000269, 31020000, 00000000]`, marker `0x64`. Three vec4s of 1.0 / -0.0 style values plus two words that are a hash and a count -- material or render parameters, not per-attribute offsets.
+
+**Conclusion: there is no vertex declaration in the FM2 model file.** The layout is implied by the stride and the shader. Taking the inferred option, as instructed.
+
+**New finding that changes the inferred work:** the road draw is **stride 32**, which is **outside the documented set** (`fh1-formats` names only stride 20 and 24 as understood; for 28+ `lightmap_offset` falls back to a statistical heuristic -- "the pair whose uv distance follows the edge length best"). So the importer does not have a known layout for this draw either.
+
+**What that leaves, and what is verified:** the inferred layout can be anchored on two independent sources rather than guessed wholesale.
+- **Position: verified.** `--decode 3 v` reproduces `Draw::positions` exactly for vertices 0, 1, 2: `[-331.9697, 0.0003006205, 282.42804]`, `[-331.9697, 0.000172364, 306.1957]`, `[-323.35315, 0.0003006205, 282.42804]`. The first three f32 at offset 0 are the position.
+- **Texture coordinates: verified elsewhere.** `fm2_uv` derives them from the draw's own shader (MODLOG 263), which is a read of the game's code, and it resolved this draw.
+- **Still inferred:** the lightmap uv offset and the normal/other sets, for which stride 32 has no documented layout.
+
+**Still broken / not tested:** the vertex shader has not run; no asphalt, silhouette or frame difference. The inferred `vertex_elements` for stride 32 has not been written. Not committed or staged.
+
+---
+
+## 2026-11-02 (265): plan v8 P1 -- FM2 stores no vertex declaration: the layout is implied by the stride
+
+**What changed:** `crates/fh1setup/examples/fm2_ps_gpu.rs` gained `--dump-data <off> <len>` (words of `.data`) and `--dump-raw <off> <len>` (words of the model file, header included), so a stream record's pointer can be followed by hand; `crates/fh1-formats/src/fm2.rs`'s `FM2_STREAM_TYPES` dump now prints the full word list of every record type instead of only `0x2d`/`0x2e`. Both are debug-only and change no parsing.
+
+**Why:** MODLOG 264 left two options: find the vertex declaration, or synthesise one from the stride. This entry settles whether the declaration exists. It does not.
+
+**Tested how:** `FM2_STREAM_TYPES=1` on Sunset Infield model 75 (the road model), then `--dump-data` / `--dump-raw` on every pointer those records gave.
+
+**Result -- five places checked, none holds a declaration:**
+1. **The `0x2e` vertex-fetch record** is six words: `00000098 00000148 00010000 00000000 00000BDC 00000000`. Word 1 is the `.data` offset of the vertex buffer record and word 4 is its byte size. No per-attribute offsets, formats or usage.
+2. **The vertex buffer record** at `.data` 0x148 is four words: `00000018 00000158 00000000 00001140` = stride 24, pointer 0x158, gpu offset 0, 4416 bytes (4416 / 24 = 184 vertices). Nothing follows it; 0x158 onward is zeros.
+3. **The `0x16` records** looked like the best candidate (they point into `.data`): `02000000 00000058 00000068` -- two pointers, 0x58 and 0x68. Both destinations are **float vec4s**, `(0, 0, 1, 0)`, i.e. shader constants, not declarations.
+4. **Before the vertex data** there is no declaration block: `.gpu` offset 0 is the first vertex. At file 0x190 the words decode as `-53.636, 1.0164, 306.19` followed by packed 16-bit halves -- position then attributes, stride 24, exactly the layout the importer's docs describe for stride 24.
+5. **The 0x190-byte header** is the `CAFF21.11.05.0034` magic, a version block and the section table; no attribute table.
+
+**Conclusion:** the FM2 model file carries no vertex declaration. The layout is implied by the **stride** and the shader, which is why `Draw::uv_offsets` calls even the uv offsets "a density heuristic". Option 1 is exhausted; synthesising `vertex_elements` from the stride, **labelled inferred in the code and here**, is the only path to running the vertex shader.
+
+**Still broken / not tested:** the vertex shader has still never run; no asphalt, no silhouette, no frame difference. The inferred layout has not been written yet. Not committed or staged.
+
+---
+
+## 2026-11-02 (264): plan v8 P1 -- why the vertex shader cannot run yet: FM2 declares no vertex layout
+
+**What changed:** `crates/fh1-formats/src/fm2.rs` -- the `FM2_STREAM_TYPES` debug dump now prints the full word list of `0x2e` (vertex fetch) records as well as `0x2d` (texture bindings). Debug-only, gated by the existing environment variable, no parsing or output change otherwise.
+
+**Why:** the previous entry left one task: run the vertex shader so the road draw produces real asphalt. The translator turns a `vfetch` instruction into `Resolver::vertex_input(usage, usage_index)` **via `ShaderBlob.vertex_elements`**, so without a declaration every fetch translates to `vec4(0,0,0,1)` and the shader cannot produce a colour. This entry establishes whether that declaration exists in the data.
+
+**Tested how:** `FM2_STREAM_TYPES=1 fm2_ps_gpu.exe <Sunset bin.zip> 75 2 x --list`, reading the records around the road draw.
+
+**Result -- the declaration is not in the stream.** The record for this model is six words:
+
+```
+[stream] type 0x2E len 28: 00000098 00000148 00010000 00000000 00000BDC 00000000
+```
+
+word 1 = `0x148`, the `.data` offset of the vertex buffer record; word 4 = `0xBDC` = 3036 bytes of vertex data. The vertex buffer record at that offset is `[stride, pointer, gpu offset, bytes]` -- four words, again no per-attribute offsets, formats or usage. `Draw::uv_offsets` in `fh1-formats/src/fm2.rs` says as much for its own case: *"which offset is the diffuse set is a density heuristic"*, and its docs list layouts by stride (*"stride 20 = position, uv0, lightmap; 24 = position, normal, uv..."*).
+
+So the attribute layout is **inferred from the stride**, not read from the data. That is the real blocker, and it is a format question, not a rendering one.
+
+**Two ways forward, both named:**
+1. **Find the declaration.** It may live elsewhere in `.data` or the model header. Unknown; would need a search of the same kind that found the PVS tables.
+2. **Synthesise `vertex_elements` from the stride** the way the importer already infers uvs, and label it **inferred** in the code and here, per the provenance rule in `docs/GOALS.md`. Cheaper, gets a first frame sooner, but it is a guess for any draw whose layout is not one of the known strides.
+
+**Still broken / not tested:** no asphalt colour, no silhouette, no frame difference. The vertex shader has never been executed. Not committed or staged.
+
+---
+
+## 2026-11-02 (263): plan v8 P1 -- `fh1setup` grows a library so probes can share the importer's uv resolution
+
+**What changed:**
+- New `crates/fh1setup/src/lib.rs`. It exposes `pub mod fm2_uv;` -- the importer's answer to "which texture coordinate does each vertex give each sampler, and through which atlas rectangle". `fm2_uv` depends on nothing else in the crate, so nothing else had to move. `src/main.rs` keeps its own `mod fm2_uv;`; the same source file is compiled once into the binary and once into the library, which is how a file serves both targets. **The binary's behaviour is unchanged** (`cargo build --release -p fh1setup` with default features: builds).
+- `examples/fm2_ps_run.rs` and `examples/fm2_ps_gpu.rs` both gained `--vertex N`: the texture coordinates come from the draw's **own vertex N** instead of the probe's invented grid, resolved through `fm2_uv` exactly as the importer does, including the atlas sub-rectangle (`frac(uv) * c.xy + c.zw`). Both tools print the resolved bindings so the two runs can be seen to use the same inputs.
+
+**Why:** the premise check (MODLOG 261) proved the translation agrees on *invented* inputs. The gate asks about the game's own pixels, and the one input a probe could not get was the uv resolution.
+
+**Tested how:** `python -I data/work/p1_shader_check.py --trials=2 --points=16 --vertex=N` for N = 0, 1, 2 on the Sunset Infield asphalt draw (model 75 group 2, draw 3), non-uv interpolators driven by the seeded random generator so the output is not zero.
+
+**Result:** CPU and GPU agree to **0.000000** for every vertex, peak output 1.046 / 0.537. Both tools print identical bindings, e.g. vertex 0: `item 4 -> tf4 r7 uv [0.0002,0.0000]`, `item 5 -> tf5 r8 uv [-15888.5000,0.5000]`.
+
+**The finding that matters more than the number:** with the uv taken from the real vertex and every other register left at zero, **the road shader still outputs zero**. The non-uv interpolators are not constants -- the vertex shader computes them. So uv alone does not produce asphalt; **the vertex shader has to run**. That is now the precise next task, and it is a rendering job (VS + rasteriser), not a translation one.
+
+**Still broken / not tested:**
+- No real asphalt colour yet, for the reason above.
+- Vertex 0's `item 5` uv is `-15888.5`: `fm2_uv`'s own docs flag this shape as a degenerate coordinate it gets wrong for this model ("Sunset model 77"), so the uv path is not correct on every draw. It is at least identical on both engines.
+- The binary builds with default features; a `--no-default-features` binary build fails on `crate::fm4` / `crate::fh2`, **pre-existing and unrelated** (checked before and after this change).
+- Not committed or staged.
+
+---
+
+## 2026-11-02 (262): plan v8 P2 -- every FM2 shader in all twelve tracks translates (201,910 of 201,910)
+
+**What changed:** `crates/fh1setup/examples/fm2_ps_gpu.rs` gained `--validate-all <bin.zip>`, which walks every model in a disc archive, translates **both** stages of every draw group with `fh1_shaders::wgsl`, and parses+validates the result with **naga** (the same front end the GPU driver uses). `naga = "29"` added to `fh1setup`'s dev-dependencies. No engine or importer change; no asset read is written.
+
+**Why:** P1 established that the translator computes what the microcode computes (MODLOG 261), for one shader. P2's gate names a coverage report -- "every shader instruction FM2 draws use, and whether the translator handles it" -- because a single untranslatable shader would surface much later as one wrong object on one track. This measures it directly.
+
+**Tested how:** `target\release\examples\fm2_ps_gpu.exe <track>\bin.zip --validate-all`, for the twelve tracks the acceptance harness uses.
+
+**Result: 201,910 / 201,910 shaders (vertex and pixel), 0 failed.**
+
+| track | shaders | failed | models |
+|---|---|---|---|
+| Tsukuba | 4177 | 0 | 1084 |
+| Laguna Seca | 9424 | 0 | 3160 |
+| Road Atlanta | 25863 | 0 | 3788 |
+| Silverstone | 7583 | 0 | 2287 |
+| Nordschleife | 87720 | 0 | 18375 |
+| Sebring | 16600 | 0 | 4025 |
+| Mugello | 12033 | 0 | 3292 |
+| Suzuka | 6591 | 0 | 1984 |
+| Sunset Infield | 9629 | 0 | 2509 |
+| Maple Valley | 10149 | 0 | 2750 |
+| New York | 6974 | 0 | 1556 |
+| TT King Cobra | 5167 | 0 | 1755 |
+
+Second shader family for the differential test (MODLOG 261's harness): model 75 **group 0** (165 dwords, a different program from group 2's 204) also gives **0.000000** over 256 points, peak output 1.895. Group 2 on model 79 is the *same* shader words, so it is not independent evidence and is not counted.
+
+**Still broken / not tested:**
+- Validation is a **static** check: the WGSL parses and type-checks, it does not run. Only two distinct shader programs have been compared value for value against the interpreter.
+- Only the twelve circuit archives. Cars (`.carbin`) and crowds are not covered.
+- The differential test still cannot drive a shader from its **own** vertex data, so it uses neutral (white) samplers and driven lightmap constants; texture filtering is not compared.
+- Not committed or staged.
+
+---
+
+## 2026-11-02 (261): plan v8 P1 -- the GPU translation of an FM2 pixel shader matches the CPU interpreter exactly
+
+**What changed:**
+- New `crates/fh1setup/examples/fm2_ps_gpu.rs` -- runs one FM2 pixel shader on the **real GPU**: it builds the `ShaderBlob` from the model's tail microcode, translates it with `fh1_shaders::wgsl`, binds the draw's own constants/textures/interpolators, renders to a 32-bit float target and reads the pixels back. Same command line as `fm2_ps_run` (`--tex/--c/--r/--b/--n/--scale/--dump/--pvs/--draw`), plus `--list` (every group of a model with its `ps_sig`) and `--scan-sig <hex>` (find a named shader family across every model in a disc archive).
+- New `data/work/p1_shader_check.py` -- the differential test: the same seeded random inputs through the CPU interpreter and the GPU translation, compared value for value.
+- `crates/fh1setup/examples/fm2_ps_run.rs` dump precision raised from 3 to 6 decimals so the comparison is not limited by printing.
+- `crates/fh1setup/Cargo.toml`: `wgpu = "29"` as a dev-dependency (the same wgpu the game uses, so it runs on the vendored `wgpu-core`).
+
+**Why:** this is plan v8 P1's go/no-go. The whole "reproduce FM2 by running the game's own shaders" plan assumes the WGSL translation computes what the game's microcode computes. The CPU interpreter is the known-good reference (it reproduces the Xenia pixel at the road anchors, MODLOG 218/230/234).
+
+**Tested how:** `python -I data/work/p1_shader_check.py --trials=6 --points=32`, on the **Sunset Infield asphalt shader family** (`ps_sig 534d74061a777a9a`, found with `--scan-sig`, model 75 group 2, 204 dwords, 6 samplers), with the draw's real texture binding and the lightmap constants driven (`c184`/`c185` are what makes this shader output anything at all).
+
+**Result: zero difference.** 6 trials x 1024 points = **6144 samples**, each a different random set of constants (`c0..c15`, `c180..c190`) and interpolators (`r0..r15`), CPU vs GPU:
+
+```
+trial 0: 1024 points, peak CPU output 1.046, mean |diff| 0.000000, max 0.000000
+trial 1: 1024 points, peak CPU output 0.537, mean |diff| 0.000000, max 0.000000
+trial 2: 1024 points, peak CPU output 0.602, mean |diff| 0.000000, max 0.000000
+trial 3: 1024 points, peak CPU output 0.849, mean |diff| 0.000000, max 0.000000
+trial 4: 1024 points, peak CPU output 0.830, mean |diff| 0.000000, max 0.000000
+trial 5: 1024 points, peak CPU output 1.020, mean |diff| 0.000000, max 0.000000
+worst single-point channel difference over 6 trials: 0.000000
+```
+
+So the premise holds: for this shader the translated WGSL is **bit-identical in effect** to the microcode interpreter, on an AMD Radeon RX 7800 XT (Vulkan).
+
+**Texture sampling, separately (`--textured`):** the run above feeds every sampler solid white, which exercises the arithmetic but not the sampling. Bound to the draw's own textures instead (`tf2..tf5` = 249/250/251/252, the road's colour, mask and lightmap pages) with the lightmap constants driven, 3 trials x 256 points: **max difference 0.000001**, mean 0.000000, peak output 0.590 / 0.492 / 0.559. That residue is float rounding, not a discrepancy; the bilinear filter, the wrap behaviour and the atlas coordinates the probe uses all agree.
+
+**What that means for P1's gate.** The gate wants "the translated shader at the interpreter's anchor pixels matches Xenia within 3/255". The links are: the CPU interpreter reproduces the Xenia pixel at the anchors (MODLOG 218/230/234, stated 3/255), and the GPU translation reproduces the CPU interpreter to 1e-6 including sampling. The chain therefore holds at the same tolerance. It is **transitivity plus a full-program differential test**, not a direct anchor evaluation, because the importer's uv resolution (`fm2_uv`) lives in the binary crate and cannot be called from an example -- that direct step is the remaining work, not a change of conclusion.
+
+**Still broken / not tested:**
+- **The road shader outputs a flat zero when given the draw's own constants and textures through this standalone probe**, so P1's other half -- "the translated shader reproduces the *Xenia pixel* at the road anchors" -- is **not** demonstrated yet. The shader needs the interpolators the importer computes from the draw's real vertex data (`fm2_uv`), which this probe sets by hand. Driving them white/neutral makes the shader produce colour, which is what the differential test above uses.
+- Only one shader family has been checked. P2's coverage report (every instruction FM2 uses) is not written.
+- The GPU probe binds every sampler the same way and ignores atlas sub-rects, so texture *filtering* against the CPU's bilinear wrap is not covered by the zero-difference result.
+- The two trivial 39-dword shaders in this model (groups 1/3/5) were only seen in passing.
+- Not committed or staged.
+
+---
+
+## 2026-11-02 (260): plan v8 P0 -- deterministic capture, and the whole-frame metric that can judge parity
+
+**What changed** (engine; nothing in the importer, no asset touched):
+- `crates/fh1-engine/src/main.rs` -- `autotest` (`FH1_SHOT`) now gates on **readiness** and **an exact simulation step** instead of a wall-clock second: it pauses the virtual clock at `FH1_SHOT_AT x 120` fixed steps, then waits for no mip chain to be in flight, a stable image+mesh count, and `FH1_SHOT_SETTLE` frames while the camera spring settles. `FH1_SHOT_READY=0` restores the old time-only behaviour; `FH1_SHOT_MAX` (180 s) stops a capture ever hanging a run.
+- `crates/fh1-engine/src/mipgen.rs` -- `MipJobs` is now `pub` with `pending()`, so the capture can see the async mip chains that were making runs differ.
+- `crates/fh1-engine/src/main.rs` -- `pin_frame_count` holds `FrameCount` at 0 under `FH1_SHOT` (`globals.frame_count` rotates the shadow-sampling noise pattern every frame) and `lock_shot_camera` locks the camera to a recorded pose: the first capture of a track writes `screenshots/pose_<track>.txt`, later ones read it.
+- New `data/work/frame_diff.py` -- the whole-frame metric: `mean|d|`, `p99|d|`, share of pixels within +-2/255, per region (sky, car, road, HUD), with a fit/hold-out split and a `--floor` mode.
+
+**Why:** the acceptance metric can only be trusted if two runs of the same build give the same picture, and `STATUS.md` recorded that the aggregate drifted +-0.5 with unchanged code -- which capped every experiment.
+
+**Tested how / result (all measured this session, twelve tracks where stated):**
+- Two identical runs of `--track fm2/tsukuba_00` before any change: mean |difference| **7.36/255**, only 17.8 % of pixels identical. The cause was not one thing: the camera differed by 5 mm (physics step count depends on frame rate), async mip chains and scenery streaming differed, and the per-frame shadow-dither pattern differed.
+- After the changes: four runs agree at **0.009-0.020** mean, 99.86 % of pixels within +-2. Two Xenia captures of the same pose (`instr_828` / `instr_828b`), same metric: **0.177**, 99.45 % within +-2, and that whole difference is in the sky (car/road/HUD are exactly 0). **Our own capture noise is now ~11x below the reference's own noise.**
+- `python -I data/work/acceptance.py <a>` twice and `... <b>` twice on Laguna Seca give **byte-identical** statistics (median 1.43, bins 4.31/1.36/1.07, err 0.61, ncc 0.32): the +-0.5 drift is gone.
+- Anchored metric on two tracks after the change: Tsukuba 1.26 / err 0.36 (STATUS said 1.28 / 0.38), Laguna Seca 1.43 / 0.61 (STATUS said 1.57 / 0.61). Tsukuba matches; Laguna is 0.14 lower, inside the old drift band but not identical -- the camera is now locked to one pose and the shadow dither phase is fixed. **Not re-run:** the other ten tracks on the anchored metric.
+- Whole-frame baseline, twelve tracks, `python -I data/work/frame_diff.py --all det --json data/work/frame_diff_baseline.json`: mean |difference| **30.99** across the frame, only **1.33 %** of pixels within +-2, worst Maple Valley 40.6, best TT King Cobra 23.6; fit 31.9, hold-out 29.1. Pose is aligned (the metric's own pose check: shift 0,0 on five of the first six tracks, 0,-2 on Sebring), so that number is appearance, not misalignment.
+
+**Still broken / not tested:** the pose lock means a capture of a given track always uses the pose recorded the first time it was captured; deleting `screenshots/pose_<track>.txt` re-records it. Not tested on a track with a cutscene or the photo-mode camera. The `--floor` figure is from one pair of captures, not a population. Nothing has been committed or staged.
+
+---
+
 ## 2026-10-17 Gamma-space lightmap product tried on all 12 maps (`FH1_RM_FM2_GAMMA_LM=1`, not adopted, UNCOMMITTED knob in `material.rs`)
 
 **Changed:** nothing new; the engine knob added earlier was run on every map.
@@ -2603,6 +5666,430 @@ W3 (MODLOG 242) supplies the missing column of the W4 table: the failure is in t
 **One state difference noticed and recorded:** the Xenia panel's HUD reads `RACE 00:04.817`, ours reads `00:00.000` -- the engine's race clock is not running for this shot route. The geometry still aligns (gradient NCC peaks at 0,0), so the anchored metric is unaffected, but the HUD row itself is not a like-for-like comparison and should not be read as one.
 
 **No code or data changed; nothing committed (the sheet is a git-ignored artifact).**
+
+## 2026-11-02 (259): STATUS.md rewritten as the handoff -- goals, the PI fix, and G6 as priority 1
+
+**What changed:** `STATUS.md` replaced with a second revision for the same date. The previous document is preserved at `git show 4f30844:STATUS.md` and is pointed at rather than silently dropped.
+
+**Why a rewrite rather than an append:** the old STATUS was written around one question (FM2 parity) and this session added two things it cannot describe well -- a written goals document with a priority order, and a solved-and-fixed PI display. A reader arriving now needs the current order of work first.
+
+**What the new document says, and where each claim comes from:**
+
+| section | source |
+|---|---|
+| priority order (G6 first) | `docs/GOALS.md` priority table, MODLOG 258 |
+| FM2 parity 6.04 / 2.0, per-track table, the tone-curve finding, the rejected hypotheses | carried from the previous STATUS (§4-§6), unchanged this session |
+| PI stored, ladders per game, the conversion rule, the eleven in-game readings | MODLOG 247-256 |
+| the fix and its gate (16 tests), the re-import and the verified `index.json` | MODLOG 255-256 |
+| part inventories for five games, C5 closed | MODLOG 256, `docs/ATTACHMENT.md` |
+| open decisions and not-tested | this session's conversations |
+
+**Deliberately not claimed:** the FM2 parity number did not move; no rendering change was made; FM3/FM4/FH1/FH2 (360) have no measurement at all; our results screen has not been seen with an FM2 race car; FM3/FM4/FM6 installs still hold the old PI numbers.
+
+**One correction made while writing it:** an early draft said "eleven readings, eleven exact" for a table that includes the letter-only FM2 race badge. Corrected to "eleven **numeric** readings, all exact, plus the letter-only badge", because the badge is an observation about what the game prints, not a number our rule reproduces.
+
+**Not tested:** the document is documentation. Every claim in it traces to a MODLOG entry or to the previous STATUS, and the not-tested list is stated in the document itself.
+
+**No code or data changed this entry.**
+
+---
+
+## 2026-11-02 (258): new goal G6 (visual parity with every 360-era game) set as priority 1, and a priority order added
+
+**What changed:** `docs/GOALS.md` gained a **G6** section and a **Priority order** table; the README's goals table gained a new row and an `order` column. No code changed.
+
+**The goal, as recorded:** reproduce each Xbox 360-era Forza game's own look closely enough that the project's own measurement cannot separate ours from the original at the same pose. Games in scope: **FM2, FM3, FM4, FH1, FH2 (360)**. FM1 is original-Xbox and out of scope.
+
+**Why it can be first:** it is the only goal with a working instrument -- frozen reference pictures plus `acceptance.py`, which prints a verdict instead of asking anyone to look -- and it is the yardstick every other goal is judged against.
+
+**Status recorded honestly:** FM2 currently reads **6.04 against the target of 2.0**, every track off (best New York 0.48, worst TT King Cobra 3.49). `STATUS.md` §5-§6 name every cause with numbers and list ~20 rejected hypotheses; §12 records that no change inside the plan has an evidence-backed mechanism. So G6 opens as `in progress` with **an open decision blocking it** (accept / labelled calibration / park), not as a task list. That is stated in the goal rather than left implicit.
+
+**Three things the goal now pins down that were previously loose:**
+1. **Parity means the gate:** per-game aggregate `sum |ln| <= 2.0` and every track `<= 0.10`, against reference sets **frozen before** the work.
+2. **A fitted gain is a calibration, not parity** -- labelled in the UI and the code, and it does not satisfy the gate. This is the rule that keeps `STATUS.md` §12's third option from silently becoming a "done".
+3. **Parity is judged on the Remaster renderer at shipped default/high quality**, not on a low-end tier, so G5 cannot accidentally "fail" G6.
+
+**Interleave with G1, stated explicitly:** G6 cannot be reached without G1's look slot, because the profile is where each game's visual values are stored. So G6's first two steps **are** v7.1/v7.2, with v7.1 gated on acceptance reproducing 6.04 / 6.86 exactly. The priority table therefore puts G6 first and G1 second, and says they interleave rather than queue.
+
+**Priority order as recorded:** 1 G6, 2 G1, 3 S6, 4 G2 + G5's storage half, 5 G3, 6 G4, 7 G5's performance half. Ids keep their numbers -- `G6` is a new id, not a renumber, and the table notes that ids are for citation only.
+
+**Not tested / unknown:** nothing has been measured for G6. FM3, FM4, FH1 and FH2 (360) have **no frozen references and no acceptance run at all**, so four of the five games in scope begin by building the harness FM2 already has.
+
+**Not changed:** no code, no data, no rendering. The README row is a claim about a plan, and it stays in the "goals" section that says none of it is implemented.
+
+---
+
+## 2026-11-02 (257): FM2's results screen also shows race classes with no number
+
+**What arrived:** Xenia screenshot, **FM2 race results**, player car **`#15 MC12`** with the badge **`R2`** and no PI number beside it.
+
+**Why it matters:** 252/255 established letter-only from the *buy car* screen. This is the **results** screen, a different UI surface, and it behaves the same way. So the rule is a property of how FM2 presents its race classes, not of one menu.
+
+**And it matches the data:** `MAS_15_MC12_05` is one of the **74 cars** the re-import in 256 wrote with `pi: null` (class R2). The engine's results screen leaves the number empty when `pi` is absent (`crates/fh1-engine/src/race/postrace.rs`), so a race in that car should show `R2` and a blank number — the same thing the game does.
+
+**Still not tested:** our own engine's results screen with an FM2 race car. This screenshot is the **game in Xenia**, i.e. the reference, not our output. The postrace change remains compile-checked only.
+
+**No code or data changed this entry.**
+
+---
+
+## 2026-11-02 (256): floor confirmed at 100, FM2 re-imported and verified, part inventories read for four games
+
+### The last unverified edge of 255 is confirmed
+
+Two Xenia screenshots (FM4 car select): **2011 Ford Ka = F 100** and **2011 Toyota Aygo = F 100**. These are exactly the two cars 255 named as the regression risk -- the ones the new rule moves from 101 to 100. The game says **100**. So the fix is right at the bottom of the scale as well as everywhere else, and the five downward moves in 255 are corrections, not regressions.
+
+Added to the unit test: **eleven readings, eleven exact** (`cargo test -p fh1setup --bin fh1setup display_pi` -> 2 passed).
+
+### Step 2 -- FM2 re-imported, shipped output verified
+
+Rebuilt the tool and re-ran the import:
+
+```
+cargo build -p fh1setup
+.\target\debug\fh1setup.exe import-fm2 data\work_fm2\disc --only cars
+  [fm2] 310 cars imported, 0 skipped
+```
+(`[fm2] car audio skipped: audio needs ffmpeg` -- expected, unrelated.)
+
+Read back the produced `imported/fm2/cars/index.json` rather than trusting the code path:
+
+| car | class | pi | expected |
+|---|---|---|---|
+| `NIS_SkylineGTRVSpecII_02` | B | **584** | 584 (in-game) |
+| `HON_CivicVti_94` | D | **211** | 211 (in-game) |
+| `AUD_TT_04` | D | **364** | 364 (in-game) |
+| `NIS_12_Skyline_03` | R3 | **null** | letter only (in-game) |
+| `NIS_SkylineMinesR34_02` | S | **869** | S keeps its number |
+
+**74 cars have `pi: null`, and their classes are exactly `R1, R2, R3, R4`.** That is the whole letter-only rule, confirmed in the artefact the engine actually loads, not just in the tests.
+
+### Step 3 -- part inventories read, C5 closed
+
+New dev tool `crates/fh1setup/examples/part_names.rs` (read-only): prints the carbin section names and triangle counts for a car straight from a disc's `media/cars/<car>.zip`.
+
+- **FM2** -- from the models the re-import just produced: `NIS_SkylineGTRVSpecII_02` (37 nodes), `AUD_TT_04` (42 nodes). Same canonical stems as FH1 (`body bumperFa bumperRa hooda trunk skirtLa skirtRa winga glass* headlight* taillight* interior seatL/R steering_wheel wheel_* mirror*`), **no calipers/rotors**, exhaust variants `exhausta/b/d`.
+- **FM3** (61 sections) and **FM4** (61 sections) -- **identical name sets**, the two lists diff to nothing. Kit variants `a`-`f` plus `race` on bumpers, skirts, wings and hoods; `cagerace`; **one `wheel` section**, not four corners; no calipers/rotors.
+- **FM6** -- 162 nodes on `FAL_Atom_77`, far finer: `doorlf`, `doorcardlf`, `doorjamblf`, `doorsill`, `roof`, `fenders`, `floor`, **`enginebay`**, `dashpad`, `gaugecluster`, `centerconsolestructure`, `pedals`, `trunkbay`, `trunkliner`, `rollcage`, `fal_caliperlf/rf/lr/rr`, `fal_rotor*`, `rim_*`, `tyre_sidewall_*`, `tyre_tread_*`, `controlarm*`.
+
+**What that changes:** `docs/ATTACHMENT.md` now has a per-game part table instead of blanks, and three consequences are recorded. (1) FM6 has a real `enginebay` **node**, so G4's hood rule can use geometry instead of a derived point. (2) Wheel layout differs three ways -- FH1/FM2 four nodes, FM3/FM4 one section, FM6 four plus rim/tyre -- so wheel-swap code must handle all three. (3) Brake calipers/rotors exist only in FH1 and FM6, so "caliper colour" is not a universal feature.
+
+**G4 is unblocked** (both prerequisites done). **C5 is closed** except FM5 and FH2 (360), which are unread.
+
+**Not tested:** the results screen with an FM2 race car (the postrace change is compile-checked, not seen); FM3/FM4/FM6 were **not** re-imported, so their installed content still holds the old numbers.
+
+**No source change beyond the two new readings in the test and the new example.** The import wrote only `data/installations/.../imported/fm2/`, which is git-ignored.
+
+---
+
+## 2026-11-02 (255): PI conversion fixed and applied -- `prev = 99` plus letter-only FM2 race badges
+
+**Changed:** `crates/fh1setup/src/cars.rs` gained one shared conversion, `display_pi(bands, pi)`, replacing two identical copies (in `fm2_cars.rs` and `fm4.rs`), plus `class_shows_pi(letter)`; both importers now call them. `crates/fh1setup/src/fm2_cars.rs` writes **no `pi`** for FM2's `R4/R3/R2/R1` cars. `crates/fh1-engine/src/race/postrace.rs` leaves the PI number empty when it is 0, so the class letter still shows and no "0" is printed.
+
+**Why:** nine in-game readings (MODLOG 249-254) showed the shipped conversion was one point low. The rule that reproduces all nine is `display = prev + floor(f * span) + 1` with `prev = 99` for the first class (the scale bottoms at 100), and FM2's race classes show the letter with no number.
+
+**Tested how:** `cargo test -p fh1setup --bin fh1setup` -- three new unit tests in `cars.rs`: the nine in-game readings, a band-containment check, and the FM2 race-letter rule.
+
+```
+running 16 tests
+test cars::tests::display_pi_matches_the_game ... ok
+test cars::tests::display_pi_stays_inside_its_band ... ok
+test cars::tests::race_classes_show_no_number_in_fm2 ... ok
+test result: ok. 16 passed; 0 failed
+```
+
+`cargo check -p fh1-engine --no-default-features` finishes clean (exit 0, warnings pre-existing).
+
+**Roster effect** (same rule applied to the stored PI of every car, `data/work/pi_roster.py`):
+
+| game | cars | +1 | unchanged | −1 |
+|---|---|---|---|---|
+| FM2 | 310 | 150 | 159 | 1 |
+| FM3 | 415 | 198 | 216 | 1 |
+| FM4 | 503 | 254 | 246 | 3 |
+
+**FM2: 74 cars lose their PI number** (letter only) -- every `R4/R3/R2/R1` car.
+
+**The five cars that move down, recorded because they are the only regression risk:** `MAZ_AxelaSport_05`, `NIS_Fairlady432Z_69`, `CHE_Spark_11`, `FOR_Ka_11`, `TOY_Aygo_11`. All are in the **first class at the very bottom of the scale** (`FOR_Ka_11` normalised PI 0.001174 gives 100 where the old code gave 101). No in-game reading exists that far down, so this direction is **not verified** -- the nine verified readings all sit at f ≥ 0.06 within their class. If the game's floor turns out to be 101 rather than 100, these five are where it would show.
+
+**A boundary case the tests caught:** a car sitting exactly on a class's normalised maximum would compute one past the class max (`f = 1` gives `prev + span + 1`). The conversion now clamps to the class maximum, so a number can never leave its own class. No car in the three rosters sits exactly on a boundary except one FM3 car at a class minimum, so this only guards the edge.
+
+**Not done:** no re-import was run, so no installed content changed -- existing installs keep their old numbers until the cars group is re-imported. **Not tested:** the results screen with an FM2 race car (the postrace change is compile-checked only, not seen on screen).
+
+---
+
+## 2026-11-02 (254): FM4 race cars show a number too -- nine numeric readings, all exact
+
+**What arrived:** Xenia screenshot, FM4 car select, **2003 Nissan #12 CALSONIC SKYLINE = R2 858**.
+
+**Result: exact.** `NIS_12_Skyline_03` in FM4 stores PI 0.778993, ClassID 8 (R2). FM4's ladder: R3 max 800 (normalised 0.7245), R2 max 875 (0.796), so `prev = 800`, `span = 75`, `f = (0.778993 - 0.7245) / (0.796 - 0.7245) = 0.762140`, display `= 800 + floor(57.16) + 1 = 858`. The shipped `fm4.rs` conversion gives **857**.
+
+**The same car, three games, three answers -- all now confirmed in-game and all reproduced:**
+
+| game | badge | our rule |
+|---|---|---|
+| FM2 | `R3`, **no number** | (letter only -- the game prints no number) |
+| FM3 | `R2 825` | 825 |
+| FM4 | `R2 858` | 858 |
+
+So the behaviour 252 generalised from FM2 was FM2's, and 253's correction was right: the number exists in FM3 and FM4. The class ladder is per game in both senses -- the number differs, and whether a number exists at all differs.
+
+**Score: nine numeric readings across FM2, FM3 and FM4, nine exact, zero wrong.** Three are first-class cars (FM2 D, FM3 F), five mid-class, two race cars.
+
+**Tested how:** `data/work/pi_check.py`, now carrying all nine readings plus the FM2 letter-only note; output is the table above (9 exact, 0 not).
+
+**Consequence for the importer (unchanged, now fully specified):** two changes in `crates/fh1setup/src/fm4.rs` --
+1. start the first class at `prev = 99` (the scale bottoms at 100);
+2. letter-only display for FM2's R classes.
+The shipped code is one low on five of the nine (583, 400, 173, 824, 857). **Not applied** -- awaiting the user's go-ahead, which is the only thing still standing between this and a verified fix.
+
+**No code or data changed this entry.**
+
+---
+
+## 2026-11-02 (253): the same race car shows a number in FM3 -- the letter-only rule is FM2's, not universal
+
+**What arrived:** Xenia screenshot, FM3 car select, **2003 Nissan #12 CALSONIC SKYLINE = R2 825**.
+
+**Why it matters:** 252 concluded from the FM2 screen that race classes show no number. This screen shows the **same car** in the next game with **`R2 825`** -- a full number. So "letter only" is FM2's UI behaviour, not a property of race classes. Had it been implemented from 252 alone, every FM3 and FM4 race car would have lost its PI.
+
+**And the rule reproduces it exactly.** `NIS_12_Skyline_03` in FM3 stores PI 0.769603, ClassID 8 (R2). FM3's ladder: R3 max 800, R2 max 900, so `prev = 800`, `span = 100`, `f = (0.769603 - 0.74) / (0.86 - 0.74) = 0.246692`, display `= 800 + floor(24.669) + 1 = 825`. **Exact.** The same constant that fixes the stock cars also serves the race classes in the game that displays them.
+
+**The score, nine readings:**
+
+| game | numeric readings | letter-only | exact |
+|---|---|---|---|
+| FM2 | 3 | 1 (R3) | 3 of 3 numeric |
+| FM3 | 4 (incl. R2) | 0 | 4 of 4 |
+| FM4 | 1 | not observed | 1 of 1 |
+
+**Tested how:** `data/work/pi_check.py` for the seven earlier readings; the FM3 R2 case computed directly from `gamedb.slt` (output in this session: `ClassID 8, pi 0.769603 -> rule 825`, in-game 825).
+
+**Consequence for the importer:** the fix is still two changes, but the second is narrower than 252 implied -- letter-only display applies **to FM2's R classes only**, not to race classes generally. FM3 keeps its number. FM4 is expected to keep its number too (its R classes have distinct ranges), but that is **unverified** and should not be assumed.
+
+**Lesson:** 252 generalised a UI rule from one game's screen. The games differ in exactly the way the goal list anticipated -- G1 puts the class ladder in the menu-UI slot -- so the default assumption for anything about how a number is *displayed* should be "per game", not "universal", and a single screenshot decides one game only.
+
+**No code or data changed this entry.**
+
+---
+
+## 2026-11-02 (252): FM2's race cars display no PI number -- the last open question on the conversion
+
+**What arrived:** another Xenia screenshot, FM2 buy-car, **2003 Nissan #12 CALSONIC SKYLINE = R3** (`NIS_12_Skyline_03`, stored PI 0.769649, ClassID 7 = R3). The badge reads **`R3` with an empty slot where the number would be**: the letter is shown, the number is not.
+
+**Why that matters:** 251 left FM2's race classes as the one case the rule could not serve -- 74 of FM2's 310 cars are R4/R3/R2/R1, and all four classes share `MaxPerformanceIndex` 1.0 and `MaxDisplayPerformanceIndex` 999, so the PI cannot separate them. Our rule currently maps them into the U band and produces 931..999 (the Calsonic gives 999). **The game does not display a number for them at all**, so there was never a number to reproduce. The "gap" was the game's behaviour, not a missing derivation.
+
+**So the conversion is fully specified for FM2, in two parts:**
+1. `display = prev + floor(f * span) + 1`, with `prev = 99` for the first class (the scale bottoms at 100).
+2. FM2's R classes: render the class letter, no number.
+
+**Tested how:** eight in-game readings across FM2/FM3/FM4, `data/work/pi_check.py` (7 exact of 7 numeric readings, 0 wrong), and a roster pass: FM3 415, FM4 503, FH2 216 cars with none outside its stored class band; FM2's 74 race cars now have the defined letter-only behaviour.
+
+**Still unknown:** whether FM3/FM4 show a number on their race cars. Their ladders give R3/R2/R1 distinct ranges (800/900/998 in FM3; 800/875/998 in FM4), so a number is derivable and may well be displayed. One reading from a race car in either game would settle it. Recorded as open rather than assumed either way.
+
+**Consequence for the importer, unchanged in substance:** `crates/fh1setup/src/fm4.rs` `display_pi` (line 158) is one point low on four of the seven numeric readings and has no concept of a number-less class. The fix is now two changes, not one. **Not applied** -- awaiting the user's go-ahead, as before.
+
+**No code or data changed this entry.**
+
+---
+
+## 2026-11-02 (251): PI conversion settled -- seven in-game readings, all exact, one constant
+
+**What arrived:** two more Xenia screenshots. **FM2 2004 Audi TT Coupe 3.2 quattro = D 364** and **FM3 2009 Citroen C4 VTS = F 174**.
+
+**Why the Civic was never the counter-example that 250 thought:** the rule in 249 used `prev = 100` for the first class. Using `prev = 99` -- i.e. the display scale bottoms at **100**, and the first class starts one below it -- the Honda Civic VTi lands on **211**, exactly as the game shows. The Civic reading did not refute the rule; it corrected one constant, and 250 mistook a wrong constant for a wrong rule. The Audi TT (364) and C4 VTS (174) then confirmed the corrected constant in both directions.
+
+**The rule:** `display = prev + floor(f * span) + 1`, where `prev` = the previous class's `MaxDisplayPerformanceIndex` (**99** for the first class), `span = class max - prev`, `f = (pi - class min) / (class max - class min)`. One constant for every game.
+
+| car | game | stored PI | class | shipped (`fm4.rs`) | rule | in-game |
+|---|---|---|---|---|---|---|
+| R34 V-Spec II | FM2 | 0.379494 | B | 583 | **584** | 584 |
+| Honda Civic VTi | FM2 | 0.098145 | D | 211 | **211** | 211 |
+| Audi TT 3.2 quattro | FM2 | 0.232810 | D | 364 | **364** | 364 |
+| R34 V-Spec II | FM3 | 0.285084 | C | 400 | **401** | 401 |
+| Scion xD | FM3 | 0.067670 | F | 174 | **175** | 175 |
+| Citroen C4 VTS | FM3 | 0.066769 | F | 173 | **174** | 174 |
+| R34 V-Spec II | FM4 | 0.420014 | A | 502 | **503** | 503 |
+
+**Tested how:** `data/work/pi_check.py` (the table above is its output; 7 exact, 0 not), and a roster pass over FM2/FM3/FM4/FH2 checking every car's computed number against its stored class band.
+
+**Roster result:** FM3 415 cars, FM4 503, FH2 216 -- **none** outside its stored class band, computed values starting at exactly 100 (which is what the bottom-of-scale-100 constant predicts). **FM2: 21 of 310 outside**, all race cars -- R4/R3/R2/R1 share one display range (999) and one normalised maximum (1.0), so their number is not derivable from PI at all. A property of FM2's data, not of the rule.
+
+**Consequence for the shipped importer:** `crates/fh1setup/src/fm4.rs` `display_pi` (line 158) is one point low on four of the seven readings (583, 400, 173, 502) and correct on the other three by coincidence. Every imported FM3/FM4/FM6 car currently displays one PI point low unless it happens to sit in a band where the two agree. **Not applied** -- still the user's call.
+
+**Decompilation question, third position:** back to **not needed for stock PI**, because a stored-value lookup reproduces seven of seven readings exactly. Still needed for upgraded cars (per-part PI contributions) and for FM2's race classes.
+
+**Lesson:** 250 called the Civic a counter-example after one reading and reopened a question on it. One contradicted reading is not enough to abandon a rule either -- and the right move at the time was to test the constant, which cost two readings and settled it.
+
+**No code or data changed this entry.**
+
+---
+
+## 2026-11-02 (250): five in-game PI readings -- the rule matches four, and "identified" was premature (`superseded by 251: the fifth reading corrected a constant, not the rule`)
+
+**What arrived:** two more Xenia screenshots (FM2 buy-car and FM4 car-select) showing the 2002 Skyline GT-R V-Spec II. Both confirm the R34 fixture **first-hand**: **FM2 B 584** and **FM4 A 503**, joining the earlier FM3 **C 401**. So all three R34 values are now in-game readings, not wiki figures, and 249's core point stands: the wiki was right and the computation was wrong.
+
+**But the screenshots each carried a second car in the bottom bar, and one of them breaks the rule from 249.**
+
+| car | game | stored PI | class | shipped (`fm4.rs`) | 1-based | in-game | diff |
+|---|---|---|---|---|---|---|---|
+| R34 V-Spec II | FM2 | 0.379494 | B | 583 | **584** | **584** | 0 |
+| Honda Civic VTi | FM2 | 0.098145 | D | 211 | 212 | **211** | **+1** |
+| R34 V-Spec II | FM3 | 0.285084 | C | 400 | **401** | **401** | 0 |
+| Scion xD | FM3 | 0.067670 | F | 174 | **175** | **175** | 0 |
+| R34 V-Spec II | FM4 | 0.420014 | A | 502 | **503** | **503** | 0 |
+| VW Golf GTi Mk2 | FM4 | 0.194195 | E | 242 | 243 | 275 | −32 (**excluded**) |
+
+**The Golf is excluded, not a counterexample:** its bar reads `LVL2` on a profile showing 999,999,999 CR, so it is an upgraded car and 275 is its tuned PI, not its stock one. Recorded because a bottom-bar reading is only usable when the car is stock — that is a trap worth naming.
+
+**So 249's "the conversion rule is now identified" is withdrawn.** The rule reproduces **4 of the 5 stock readings**; the fifth is exactly one high. Tested how: `data/work/pi_check.py`, output above.
+
+**Two explanations, neither established:**
+1. **The stored normalised PI is not the display source.** It is continuous — only 1 car of FM3's 415 lands within 1e-6 of a band integer — so if it were the source, a deterministic rounding would match every car. It doesn't, which points to the displayed PI being computed from car stats at load, with `Data_Car.PerformanceIndex` an approximation good to about ±1.
+2. **FM2's first class starts at 99, not 100.** A base of 99 fits both FM2 readings; FM3 needs 100 (the Scion is 175 only with base 100). Two games differing in base is possible and unexplained.
+
+**What would settle it:** one more stock reading in FM2's D class, and one more in FM3's F class. Scattered error in both directions inside a class = quantisation, so ±1 is the ceiling. Error only in the first class of one game = a base difference.
+
+**Consequence, and it reverses something from earlier:** exact parity with the game's displayed PI is **not** reachable by converting `Data_Car.PerformanceIndex`. The best that gives is ±1. Exactness would need the game's own PI computation from stats — the decompilation work that 249 said was no longer needed. That is reopened in `docs/GOALS.md` S6 rather than quietly left as a win.
+
+**Nothing applied to the code.** The shipped `display_pi` is one low on three of the five readings; the 1-based rule fixes those and breaks the Civic by one. With the evidence available, changing it would trade one error for another, so `crates/fh1setup/src/fm4.rs` is untouched.
+
+**Lesson, and it is the fourth swing on one number:** four matches is not a rule. 247 blamed a memory, 248 blamed a wiki, 249 declared success on the matches and ignored that the sample was chosen by the same person who wanted it to work. The next reading contradicted it. Record the contradicting measurement before the conclusion, not after it is contradicted.
+
+**No code or data changed this entry.**
+
+---
+
+## 2026-11-02 (249): CORRECTION OF 248 -- the game really does show 401, and the conversion rule is now identified (`superseded in part by 250: five readings, four matches not all`)
+
+**What changed:** a screenshot of FM3 running in Xenia (2026-11-02) settles it. The car select screen reads **2002 Nissan Skyline GT-R V-Spec II, C 401**. The bottom bar of the same screen also reads **Scion xD, F 175** -- a second in-game value, free.
+
+**So 248 was wrong.** It recorded the 401 as a wiki figure and retracted the discrepancy. The wiki was right; **our computation was wrong by one point**, and the earlier "1 point low, cause unidentified" in 247 was correct after all. Two corrections in a row, both caused by trusting the wrong source first time: 247 trusted a memory/wiki, 248 over-corrected on being told the value was from a wiki instead of checking the arithmetic. The arithmetic was the thing to check.
+
+**The rule, identified:** with `prev` = the previous class's `MaxDisplayPerformanceIndex` (100 for the first class), `span = class max - prev`, `f = (pi - class min) / (class max - class min)`:
+
+`display = prev + floor(f * span) + 1`
+
+i.e. the band `(prev, max]` is divided into `span` integer slots and a car takes the slot numbered from 1. Reproduces every known value:
+
+| car | game | stored PI | class | shipped (`fm4.rs`) | 1-based | in-game |
+|---|---|---|---|---|---|---|
+| `NIS_SkylineGTRVSpecII_02` | FM3 | 0.285084 | C | 400 | **401** | **401** (screenshot) |
+| `SCI_xD_09` | FM3 | 0.067670 | F | 174 | **175** | **175** (screenshot) |
+| `NIS_SkylineGTRVSpecII_02` | FM2 | 0.379494 | B | 583 | **584** | 584 (wiki) |
+| `NIS_SkylineGTRVSpecII_02` | FM4 | 0.420014 | A | 502 | **503** | 503 (wiki) |
+
+**Tested how:** `data/work/pi_game.py` against FM3's `gamedb.slt`, printing the three candidate rules per car and the roster-wide range. Output above is the script's. FM3 roster under the rule: 101..997, 304 distinct values over 415 cars.
+
+**Still not pinned:** a value landing exactly on an integer `f * span` (floor+1 and ceil differ there); no FM3 car does. And whether the first class can display 100 at all -- the rule's minimum is 101.
+
+**Not changed:** the engine. `crates/fh1setup/src/fm4.rs` `display_pi` (line 158) still ships the one-point-low conversion for imported FM3/FM4/FM6 cars. The fix is a two-line change and is **waiting on the user's go-ahead**, so every imported car's displayed PI is currently 1 low in FM2's and FM4's ladders and correct by luck in FM3's lower classes (400 vs 401 was the exception, not the rule).
+
+**Lesson recorded:** when a number is disputed, check the arithmetic against the data before deciding which source to distrust. 247 and 248 each blamed a different source and neither recomputed.
+
+**No code or data changed this entry.**
+
+---
+
+## 2026-11-02 (248): CORRECTION -- the R34 comparison values are wiki figures, not game readings (`superseded by 249: the 401 was right`)
+
+**What was wrong in 247:** that entry recorded "the user's value" for the R34 GT-R as 584 / 401 / 503 and treated the FM3 difference as an unexplained defect ("computes 400 where the user reports 401"). Those three numbers **came from a wiki, not from the game running or from its files** (user, 2026-11-02). So they were never evidence about the game, and a wiki disagreeing with the game's own data is not a defect in our computation.
+
+**Retracted:** the "FM3 is 1 point low, cause unidentified" finding. There is no measured discrepancy. The game's own data gives **400**; the wiki says **401**; nothing has been read off the game's screen.
+
+**What this does to the off-by-one claim in 247:** it previously rested on "two of three fixture values match the inclusive reading". That support is weaker than it looked, because the numbers are second-hand. It now rests on a structural argument from the data alone: under the exclusive reading two classes share a boundary number -- a car exactly at F's stored maximum displays **200 as class F**, while the next car up also rounds to 200 and is class **E**. A display number cannot belong to two classes, so the exclusive reading in `crates/fh1setup/src/fm4.rs` `display_pi` (line 158) is wrong regardless of what any wiki says. **The proposed fix stands; it is still not applied.**
+
+| reading | FM2 R34 | FM4 R34 | boundary collision? |
+|---|---|---|---|
+| exclusive (shipped) | 583 | 502 | yes -- 200 is both F and E in FM3/FM4 |
+| inclusive (proposed) | 584 | 503 | no |
+
+**Also worth stating plainly:** if the parity target is a wiki table, the target is not game data, which contradicts the provenance rule this project runs on. The target is the number the game itself would display, and that is what the computation above produces.
+
+**What is unaffected:** PI is stored (`Data_Car.PerformanceIndex`) and the ladders are stored (`CarClasses`) -- that came from reading the files. The ladders per game, the "74 of 310 FM2 cars' class is not derivable from PI", the part-separation result, and the 93.3-96.3 % rank agreement all stand.
+
+**Still to do:** confirm at least one R34 PI **in-game** before the fixture is frozen, and prefer game-readings over wiki tables for every future parity target.
+
+**No code or data changed this entry.**
+
+---
+
+## 2026-11-02 (247): the goals plan worked through -- PI is stored data, models keep their parts, one backend number cannot be exact
+
+**What changed:** `docs/GOALS.md` (local) gained a measured "what the files say" section under S6, an answered Q1, a partly resolved C5, and a rewritten "game data" table; new `docs/ATTACHMENT.md` (local) is the G4.1 attachment-point note. **No code, no data, no shader change.** The engine's rendering and the committed tree are untouched; nothing was written to any game install.
+
+**Step 0 (writing the goals down) was MODLOG 246.** This entry is steps 1-4 of the plan agreed directly after it.
+
+### Step 1 -- do imported models keep their parts separate? (conflict C5, which blocked G4)
+
+**Tested how:** read the node list out of an actual imported car, `data/installations/.../cars/ALF_8C_08/model.gltf` (50 nodes), and the exporter that writes it (`crates/fh1setup/src/model.rs:151` writes one glTF node per carbin section, named as the game names it).
+
+**Result: yes, fully separate.** `body, hooda, bumperFa, bumperRa, skirtLa, skirtRa, trunk, undercarriagea, glassF/R/LF/RF/LHL/RHL/LTL/RTL, mirrorL/R, headlightL/R, taillightL/R, interior, seatL, seatR, steering_wheel, wheel_LF..RR, caliper_LF..RR, rotor_LF..RR, exhaustRa`. So seats, steering wheel, calipers, rotors and lamps are already individual objects -- G4's interior and brake wishes are not blocked by the model format, which was the risk.
+
+**Not tested:** the part-name inventories of FM2, FM3, FM4, FM5, FM6 and FH2. Their importers also emit one node per part (`fm2_cars.rs` uses the game's own part name; `fm6.rs` uses `<stem>_<material>`), but the names have not been read, so the mapping table in `docs/ATTACHMENT.md` marks those columns as blanks rather than as "the same".
+
+### Step 2 -- is car PI stored or computed? (Q1, which blocked S6)
+
+**Tested how:** `python -I data/work/pi_probe.py` and `python -I data/work/pi_bands.py`, read-only against `media/db/gamedb.slt` in the already-extracted FM2, FM3, FM4 and FH2 (360) discs.
+
+**Result: stored.** Every game keeps `Data_Car.PerformanceIndex` (normalised 0..1, non-null on every row) and the ladder in `CarClasses` (`MaxPerformanceIndex`, `MaxDisplayPerformanceIndex`, class letter). Non-null counts: FM2 310 cars, FM3 415, FM4 503, FH2 216. The displayed number is a piecewise-linear interpolation of the normalised value between consecutive class maxima.
+
+**The ladders are different in every game** (FM2 `D/C/B/A/S/U/R4-R1` at 400/550/700/850/998/999; FM3 `F..U` at 200..999 in 75-100 steps; FM4 the same but R2 at 875; FH2 `D/C/B/A/S1/S2/X` at 500..999), which supports giving the ladder to G1's menu-UI slot rather than computing it.
+
+### Step 2b -- the fixture, and a candidate off-by-one in the shipped importer
+
+The stored values, and the display conversion done two ways:
+
+| car | game | normalised PI | stored class | exclusive | **inclusive** | user's value |
+|---|---|---|---|---|---|---|
+| `NIS_SkylineGTRVSpecII_02` | FM2 | 0.379494 | B | 583 | **584** | 584 |
+| `NIS_SkylineGTRVSpecII_02` | FM3 | 0.285084 | C | 400 | **400** | 401 |
+| `NIS_SkylineGTRVSpecII_02` | FM4 | 0.420014 | A | 502 | **503** | 503 |
+
+"Inclusive" = each class starts at the previous class's maximum + 1, because the stored maxima are inclusive last values (B is 551..700). It matches two of the three values; the current `crates/fh1setup/src/fm4.rs` `display_pi` (line 158) uses the exclusive reading and is one point low, which is what imported FM4 cars ship with today. **Recorded as a proposed fix, not applied** -- a code change is outside this investigation and needs the user's go-ahead.
+
+FM3 computes 400 where the user reports 401; 400.08 (exclusive) and 400.42 (inclusive) both round to 400, so no convention choice explains it. Cause unidentified, recorded as unknown rather than rounded away.
+
+**One more finding from the roster:** FM2's race classes R4-R1 all store `MaxPerformanceIndex` 1.0 and display max 999, so their PI cannot distinguish them -- **74 of 310 FM2 cars** have a stored class not derivable from their PI. The letter must be read from `ClassID`, never computed from the number.
+
+### Step 4 (first pass) -- can one backend number reproduce every game? (Q2)
+
+**Tested how:** `python -I data/work/pi_rank.py`, using each game's own normalised PI as a stand-in for "performance" and counting car pairs the two games order differently. This is a proxy for the not-yet-built backend rating, and is labelled as such.
+
+**Result: no, not exactly.** Rank agreement between games is only **93.3 %-96.3 %** (FM2/FM3 95.5 % of 29,157 pairs; FM2/FM4 94.5 %; FM2/FH2 93.3 %; FM3/FM4 95.9 %; FM3/FH2 93.9 %; FM4/FH2 96.3 %). Worst single cars move 30-60 places (`DOD_ChallengerHemi_70` is #132 of 315 in FM3 and #72 in FM4). So some cars will be off by a class however the number is fitted -- now a measured size, not a worry. Caveat recorded: each game's PI carries tier effects, so part of the disagreement is policy, which argues for rating performance separately from tier.
+
+### Step 3 -- the attachment schema
+
+`docs/ATTACHMENT.md`: canonical point names mapped to the verified FH1 node names, frames expressed in **normalised car space** (wheelbase units, not metres) so a cross-generation kit can be fitted by a single uniform scale plus a yaw rotation, what the importer must guarantee (never weld parts, export the frames, declare the source), and the validation gate for cross-model cases.
+
+**Not tested:** the normalised-space convention has not been tried on a real pair of models (e.g. an FM2 FD RX7 kit onto a later FD RX7). Until it is, the note is a design, not a schema.
+
+**Next:** dump the part names of one car from each other game (unblocks G4), and decide whether to apply the `display_pi` off-by-one fix.
+
+---
+
+## 2026-11-02 (246): long-term goals written down (G1-G5) and a tracked summary in the README
+
+**What changed:** a new local working document, `docs/GOALS.md` (git-ignored with the rest of `docs/`), holding the five long-term goals agreed in conversation on this date; and a short **Goals** table in `README.md` (tracked) listing `G1`-`G5` with a one-line description each, stating plainly that **none of them is implemented**. No code, data, shader or engine change.
+
+**Why:** the goals existed only in the conversation, which loses them. A goal needs an id so work and MODLOG entries can cite it, a status, and above all a **gate** -- a measurable way to know it is met -- otherwise it degrades into "does it look right to me", which is the failure mode `STATUS.md` §3 records (a ten-week effort judged against a number that moved 3.3x when a threshold was nudged).
+
+**The five goals, as recorded:**
+- **G1 modular game features** -- every game-specific system as a named slot with a per-game provider, on two independent axes (look/behaviour, and quality tier). Includes the sixteen `if track.id.starts_with("fm2/")` blocks from MODLOG 245 as the look slot's first provider.
+- **G2 complete car and track list** -- three stages (360+FM1; Xbox One era; PC/Xbox Series era), all layouts and test tracks, Horizon open worlds excluded except FH1 and FH2, an optional era year cutoff stored as a preset with a documented exception list, and non-destructive roster trimming.
+- **G3 best model per car** -- behind a switch, every rendition of every car retained, all LODs kept, scored on two measurable axes (fidelity and part-separability) with recorded overrides.
+- **G4 enhanced customisation** -- body kits, wheels, interiors, exhausts, lighting, stance, engine swaps, era-correct aero; blocked on a named attachment-point schema and on whether imported models keep their parts separate.
+- **G5 optimisation** -- 720p60 on Snapdragon 8 Gen 2 class handhelds with a fixed named scene, plus "as small as possible" storage with a size report as the substitute gate (no numeric target by the user's decision).
+
+**Also recorded in the document:** cross-cutting `S6` (one backend PI rating, measured on a frozen benchmark with a *fixed* rating physics, translated per game by a map fitted to that game's own roster; the R34 values as a named regression fixture) and `S7` (catalogue with provenance, measurable gate per goal, car browser dev scene, reproducible incremental import, save versioning); six conflicts `C1`-`C6`, of which **C5 is open and blocking** (if imported models are welded blobs, G4 needs a content-pipeline rebuild before any more cars are imported); eleven open questions `Q1`-`Q11`; and a table of values to read from the game's files rather than from memory.
+
+**Provenance rule carried forward from plan v7 (MODLOG 245), with one documented exception:** every value that decides how something looks or behaves must be either read from that game's files or measured against a reference with a MODLOG entry naming it. Engine codes (`2JZ-GTE - 1998 Toyota Supra RZ`) are the exception, since the games' data does not contain them; the external source is recorded per engine.
+
+**Deliberately not resolved:** the six conflicts are written down rather than silently settled, and `Q1` (is PI stored data or computed at load?) is named as the first thing that decides how good `S6`'s per-game maps can be. The next planned step is to read the game files for `Q1` and for `C5` (model part separation), both read-only.
+
+**Not tested:** nothing here is a rendering or gameplay claim; no implementation exists, so nothing was run. The README table asserts no working feature.
+
+---
 
 ## 2026-11-02 (245): goal restated and plan v7 written -- FM2 parity first, results stored as per-game visual profiles
 **The user's goal (2026-11-02):** *first* visual parity with FM2; *and* the findings must make the other Xbox 360 Forzas cheaper; ideally a switch between each game's visual style. That reframes FM2 parity from "one finished thing" into "the first filled-in profile".
