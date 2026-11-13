@@ -144,14 +144,17 @@ fn main() -> AppExit {
     // FM2 car look (inferred from the Xenia shots, MODLOG 45 / 46 / 52): set before any plugin reads its environment (the car probe is read at
     // plugin build). An FM2 circuit is on the command line as `--track fm2/<id>`; the launcher's own choice sets the same later (below).
     if std::env::args().any(|a| a.starts_with("fm2/")) {
-        for (k, v) in [("FH1_RM_TAIL_FLOOR", "0.002"), ("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "2.0"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3"), ("FH1_FM2_SAT", "1.0")] {
+        for (k, v) in [("FH1_RM_TAIL_FLOOR", "0.002"), ("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "0.6"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3"), ("FH1_FM2_SAT", "1.0")] {
             if std::env::var_os(k).is_none() {
                 std::env::set_var(k, v);
             }
         }
     }
-    // Before anything logs: stdout/stderr through a buffered pipe so no game thread waits on the log file (logpipe.rs).
-    logpipe::install();
+    // (Per-track Sunset lightmap exposure REMOVED, MODLOG 554: it was shipped in MODLOG 552 to turn Sunset's prop
+    // delta negative, but that delta (+4.72) turned out to be crowd noise -- the props sit 202 m from the reference
+    // camera and change 44 px. With its justification gone the value only cost the road mask 5.02 -> 5.44 and Sunset's
+    // detail 0.84 -> 0.61, so the global default stands.)
+    // Before anything logs: stdout/stderr through a buffered pipe so no game thread waits on the log file (logpipe.rs).    logpipe::install();
     let mut data_dir = PathBuf::from("data");
     let mut car = None;
     let mut track_name: Option<String> = None;
@@ -347,6 +350,33 @@ fn main() -> AppExit {
             None => bevy::log::warn!("FH1_FM2_POST: no usable TrackSettings.xml for {}", track.id),
         }
     }
+    // FH1_FM2_BLOOM=1 (plan v12 phase 5.1, MODLOG 355): hand the track's OWN bloom numbers from TrackSettings.xml to
+    // light.rs, which maps them onto Bevy's bloom (threshold = bloomCutoff, additive amount = bloomScale). Off by
+    // default -- the game's `bloomPersist` is a temporal accumulation with no equivalent here, so this is measured first.
+    if track.id.starts_with("fm2/") && std::env::var("FH1_FM2_BLOOM").is_ok_and(|v| v == "1") {
+        if let Some(x) = track::native_track_dir(&assets, &track.id).and_then(|d| std::fs::read_to_string(d.join("tracks/TrackSettings.xml")).ok()) {
+            let attr = |tag: &str| -> Option<f32> {
+                let i = x.find(&format!("<{tag} "))?;
+                let t = &x[i..i + x[i..].find('>')?];
+                let j = t.find("value=\"")? + 7;
+                t[j..].split('"').next()?.parse().ok()
+            };
+            let cutoff = attr("bloomCutoff");
+            let scale = attr("bloomScale");
+            let persist = attr("bloomPersist");
+            if let Some(c) = cutoff {
+                if std::env::var_os("FH1_FM2_BLOOM_CUTOFF").is_none() {
+                    std::env::set_var("FH1_FM2_BLOOM_CUTOFF", format!("{c}"));
+                }
+            }
+            if let Some(s) = scale {
+                if std::env::var_os("FH1_FM2_BLOOM_SCALE").is_none() {
+                    std::env::set_var("FH1_FM2_BLOOM_SCALE", format!("{s}"));
+                }
+            }
+            bevy::log::info!("FH1_FM2_BLOOM: cutoff {cutoff:?} scale {scale:?} persist {persist:?} (persist has no Bevy equivalent)");
+        }
+    }
     // FM2's tail lamps read bright red in daylight in the Xenia shots (inferred floor for the lamp level; the lamp code only lights them with the brakes / headlights).
     // 0.002 (was 0.01): the lamps' red read (234,5,5) against Xenia (134,32,28); at 0.002 it is (127,9,10) on Tsukuba (MODLOG 84).
     if track.id.starts_with("fm2/") && std::env::var_os("FH1_RM_TAIL_FLOOR").is_none() {
@@ -361,8 +391,16 @@ fn main() -> AppExit {
     // red NISSAN banner went from (101,27,39) to (7,9,37), Xenia (47,8,10)): the floor is what keeps their own colour.)
     // Inferred from the Xenia shots (Tsukuba): with the final combine on, the car's paint reads paler than Xenia's navy at the default fill and
     // the lamps glow too wide; fill 0.4 and lamp level 5000 nits are closer.
+    // `FH1_RM_PAINT_ALBEDO` 2.0 -> 1.0 on 2026-11-06 (plan v12 phase 1, MODLOG 352): 2x was fitted against the reference, while 1.0 is the
+    // atlas colour as the game authors it. Twelve tracks: 30.496 -> 30.287 (-0.209), within2 1.35 % -> 1.53 %; ten of twelve improve, the two
+    // regressions are +0.07 and +0.05 (below the 0.1 threshold); the hold-outs improve. The PBR reflectance/clearcoat stay as they are -- they
+    // are fitted either way and the measurement says the neutral bundle is no better than the albedo alone.
+    // `FH1_RM_PAINT_ALBEDO` 0.85 -> 0.6 on 2026-11-09 (fifth pass, MODLOG 508): 0.85 was fitted to the reference; 0.6
+    // is the game's own `ColorScale` for the `body` technique in FM2's Media/cars/ShaderSettings/Normal.xml
+    // (MODLOG 10470). Tsukuba car luminance 1.42 -> 1.26, sum |ln| 0.35 -> 0.23, every channel better. Darker values
+    // keep improving the metric, so going below the game's own number would be a calibration, not parity.
     if track.id.starts_with("fm2/") {
-        for (k, v) in [("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "2.0"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3")] {
+        for (k, v) in [("FH1_RM_CAR_FILL", "0.1"), ("FH1_RM_LAMP", "250"), ("FH1_RM_GLASS_ALPHA", "1.5"), ("FH1_RM_CAR_PROBE", "0"), ("FH1_RM_PAINT_ALBEDO", "0.6"), ("FH1_RM_PAINT_REFLECTANCE", "0.2"), ("FH1_RM_PAINT_CLEARCOAT", "0.3")] {
             if std::env::var_os(k).is_none() {
                 std::env::set_var(k, v);
             }
@@ -521,6 +559,8 @@ fn main() -> AppExit {
         .add_systems(FixedUpdate, physics_settled.after(step_physics))
         .add_systems(Update, camera::drive_mirror.after(camera::follow_camera))
         .add_systems(Update, (scenery::stream, toggle_collision_view.run_if(ui::driving)))
+        .add_systems(Update, scenery::prop_oracle.after(scenery::stream))
+        .add_systems(Update, scenery::prop_hide.after(scenery::stream))
         .init_resource::<effects_surface::SurfaceFx>()
         .add_systems(Update, effects_surface::emit_surface_fx.run_if(ui::driving))
         .add_systems(Update, effects::tyre_smoke.run_if(ui::driving))
@@ -1051,7 +1091,11 @@ pub struct ShotFrozen(pub bool);
 /// it, so every capture of that track shares one camera exactly. Only under `FH1_SHOT`, only while paused, so it can
 /// never affect play.
 fn lock_shot_camera(track: Res<Track>, frozen: Res<ShotFrozen>, mut cam: Query<&mut Transform, With<fh1_render::post::FxPostCamera>>) {
-    if std::env::var_os("FH1_SHOT").is_none() || !frozen.0 {
+    // `FH1_SHOT_LOCK=1` locks the camera even when the simulation is not frozen, so a capture can skip the readiness
+    // gate (which can take 10 minutes per track on a loaded machine) and still be at the reference pose. The pose file
+    // is written by the first gated run of that track, so this reads the same transform. MODLOG 539.
+    let force = std::env::var_os("FH1_SHOT_LOCK").is_some();
+    if std::env::var_os("FH1_SHOT").is_none() || !(frozen.0 || force) {
         return;
     }
     let Ok(mut t) = cam.single_mut() else { return };

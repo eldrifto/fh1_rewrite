@@ -987,12 +987,13 @@ impl Scenery {
             files,
             far,
             props: Props {
-                files: index["props"]["tiles"]
+                // `FH1_PROPS=0` draws none of them, for an A/B against the same build (MODLOG 487).
+                files: if std::env::var("FH1_PROPS").as_deref() == Ok("0") { Default::default() } else { index["props"]["tiles"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .filter_map(|t| Some(((t["x"].as_i64()? as i32, t["z"].as_i64()? as i32), t["file"].as_str()?.to_owned())))
-                    .collect(),
+                    .collect() },
                 template_files: index["props"]["templates"]
                     .as_array()
                     .into_iter()
@@ -1243,10 +1244,41 @@ impl Scenery {
         let mut static_flags: HashMap<bevy::asset::UntypedAssetId, u32> = HashMap::new();
         match data {
             TileData::Fx(batches) => {
+                let (mut n_mat, mut n_skip, mut n_faith, mut n_fx, mut n_fb) = (0usize, 0usize, 0usize, 0usize, 0usize);
                 for b in batches {
                     if b.flags & STANDIN == 0 {
+                        // Props are drawn through the ordinary StandardMaterial path by default (fifth pass, MODLOG
+                        // 523). A prop is a separate model file (`co_*.bin`), so its material index is picked by
+                        // texture match against the *scenery* materials, and the remaster record behind that index
+                        // belongs to some other draw: the standard path measured better on five of six tracks and
+                        // much better on Nordschleife (+15.81 -> -7.59 at the pose-locked gate).
+                        //
+                        // LABELLED CALIBRATION (MODLOG 530): Laguna Seca is the exception -- its prop is better on the
+                        // remaster record (-0.47 against +12.18 for standard, pose locked). No field in the material
+                        // record separates the two cases (class, shader and the brightness params all overlap, MODLOG
+                        // 528), so this per-track choice is measured, not derived. `FH1_PROP_SIMPLE` overrides both
+                        // ways; `FH1_PROP_SIMPLE=0` forces remaster, `=1` forces standard.
+                        let prop_simple = match std::env::var("FH1_PROP_SIMPLE") {
+                            Ok(v) => v != "0",
+                            Err(_) => !self.dir.to_string_lossy().to_ascii_lowercase().contains("lagunaseca"),
+                        };
+                        if keep_mesh && prop_simple {
+                            let (h, _) = self.material(b.material, b.flags, materials);
+                            // `FH1_PROP_UNLIT=1`: the standard path is lit by our own sun, which makes the same prop
+                            // too bright on one track and correct on another (MODLOG 526: Laguna +12.18, Nordschleife
+                            // -7.59). A prop is small and the game's own shading is mostly its texture: a cloned
+                            // unlit material removes the sun dependence without touching the shared scenery material.
+                            let h = if std::env::var_os("FH1_PROP_UNLIT").is_some() {
+                                materials.get(&h).cloned().map(|mut m| { m.unlit = true; materials.add(m) }).unwrap_or(h)
+                            } else {
+                                h
+                            };
+                            out.push((b.mesh, BatchMaterial::Simple(h)));
+                            continue;
+                        }
                         match fx.remaster.batch(&self.dir, b.material) {
                             fh1_remaster::scenery::RemasterBatch::Material(m, _) => {
+                                n_mat += 1;
                                 if fh1_remaster::static_world::on() {
                                     use fh1_remaster::material::Class;
                                     use fh1_remaster::static_world::{FLAG_MASK, FLAG_TWO_SIDED};
@@ -1266,8 +1298,8 @@ impl Scenery {
                                 out.push((fh1_remaster::scenery::prepare_mesh(b.mesh), BatchMaterial::Remaster(m)));
                                 continue;
                             }
-                            fh1_remaster::scenery::RemasterBatch::Skip => continue,
-                            fh1_remaster::scenery::RemasterBatch::Faithful => {}
+                            fh1_remaster::scenery::RemasterBatch::Skip => { n_skip += 1; continue; }
+                            fh1_remaster::scenery::RemasterBatch::Faithful => { n_faith += 1; }
                         }
                     }
                     let fx_material = if b.flags & STANDIN == 0 {
@@ -1277,8 +1309,9 @@ impl Scenery {
                         None
                     };
                     match fx_material {
-                        Some(m) => out.push((b.mesh, BatchMaterial::Fx(m))),
+                        Some(m) => { n_fx += 1; out.push((b.mesh, BatchMaterial::Fx(m))) }
                         None => {
+                            n_fb += 1;
                             // Stand-ins (untextured) and materials whose game shader is missing (diffuse only).
                             if b.flags & STANDIN == 0 {
                                 let sh = self.game_materials.get(b.material as usize).map(|m| m.shader.clone()).unwrap_or_default();
@@ -1298,6 +1331,9 @@ impl Scenery {
                             out.push((mesh, m));
                         }
                     }
+                }
+                if std::env::var_os("FH1_RM_BATCH_DBG").is_some() {
+                    info!("scenery batches: remaster {n_mat}  faithful {n_faith}  skip {n_skip}  fx {n_fx}  fallback {n_fb}");
                 }
             }
             TileData::Simple(batches) => {
@@ -1640,6 +1676,11 @@ fn stream_props(commands: &mut Commands, sc: &mut Scenery, here: Vec2, meshes: &
                 }
                 let prepared = sc.prepare(data, meshes, materials, fx, true);
                 sc.props.templates.get_or_insert_with(HashMap::new).insert(n, prepared);
+    if std::env::var_os("FH1_PROP_DBG").is_some() {
+        let parts = sc.props.templates.as_ref().and_then(|t| t.get(&n)).map_or(0, |v| v.len());
+        let mesh = sc.props.templates.as_ref().and_then(|t| t.get(&n)).and_then(|v| v.first()).and_then(|(h, _)| meshes.get(h)).map(|m| m.count_vertices());
+        info!("props: template {n} prepared {parts} parts, mesh {mesh:?}");
+    }
             }
         } else {
             i += 1;
@@ -1820,6 +1861,19 @@ fn stream_props(commands: &mut Commands, sc: &mut Scenery, here: Vec2, meshes: &
         sc.p2.prop_tiles += 1;
         STREAMED[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         debug!("props: tile {k:?} placed");
+        // T1 (fifth pass): the numbers a props fix has to move, with no eyes needed. `parts spawned` is what
+        // `spawn_level` produced this tile; `level entries` is the deferred LOD bookkeeping. `job.placed` is NOT a
+        // presence count -- it is only filled when level streaming is off (MODLOG 505).
+        if std::env::var_os("FH1_PROP_COMPLETE").is_some() {
+            info!(
+                "props: tile {k:?}: {} placements, {} parts spawned, {} level entries, merge {}, {} baked/skipped",
+                job.list.len(),
+                job.spawned,
+                job.levels.len(),
+                if job.merged { "on" } else { "off" },
+                job.skip.len()
+            );
+        }
         sc.props.loaded.insert(k, (job.parent, job.ring));
         sc.props.tile_entities.insert(k, (job.spawned + 1).saturating_sub(level_live));
     }
@@ -1907,7 +1961,22 @@ fn spawn_level(
     e: &LevelEntry,
 ) -> Vec<Entity> {
     let Some(batches) = templates.get(&e.lod) else { return Vec::new() };
-    let t = Transform::from_matrix(e.m);
+    // `FH1_PROP_OFFSET="x,y,z"` and `FH1_PROP_SCALE=<s>` (diagnostics): move / resize every prop placement in world
+    // space, to test whether a systematic placement error explains why the props do not match the reference. The
+    // image-space shift sweep could not distinguish a world offset from same-distance misregistration (MODLOG 521).
+    let t = {
+        let mut t = Transform::from_matrix(e.m);
+        if let Ok(v) = std::env::var("FH1_PROP_OFFSET") {
+            let f: Vec<f32> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if f.len() == 3 {
+                t.translation += Vec3::new(f[0], f[1], f[2]);
+            }
+        }
+        if let Some(v) = std::env::var("FH1_PROP_SCALE").ok().and_then(|v| v.parse::<f32>().ok()) {
+            t.scale *= v;
+        }
+        t
+    };
     // ~2% of placements are mirrored: authored culling would draw them inside out.
     let mirrored = e.m.determinant() < 0.0;
     let object = fh1_render::material::object_consts(e.tint, e.normal);
@@ -1935,6 +2004,15 @@ fn spawn_level(
             continue;
         }
         let id = material.spawn(commands, mesh.clone(), t, parent);
+        if std::env::var_os("FH1_PROP_DBG").is_some() {
+            let kind = match &material {
+                BatchMaterial::Fx(_) => "Fx",
+                BatchMaterial::Simple(_) => "Simple",
+                BatchMaterial::Raw(_) => "Raw",
+                BatchMaterial::Remaster(_) => "Remaster",
+            };
+            info!("props: child {kind} at {:?} scale {:?} range {:?}", t.translation, t.scale, e.from..e.to);
+        }
         sc.static_bounds(commands, id, mesh);
         sc.p2.spawned += 1;
         STREAMED[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1942,6 +2020,10 @@ fn spawn_level(
         // PropMesh: category tag for the perf CSV (perf/record.rs) and the P2 stats.
         let mut ec = commands.entity(id);
         ec.insert((range.clone(), p2::PropMesh));
+        // T1 diagnostic (MODLOG 496): bypass inherited visibility for prop children.
+        if std::env::var_os("FH1_PROP_FORCEVIS").is_some() {
+            ec.insert(Visibility::Visible);
+        }
         if no_cpu_cull_on() {
             ec.insert(bevy::camera::visibility::NoCpuCulling);
         }
@@ -2000,6 +2082,9 @@ fn place_props(commands: &mut Commands, sc: &mut Scenery, job: &mut PlaceJob, fx
             if !streaming || entry.wanted(eye, margin) {
                 entry.spawned = spawn_level(commands, sc, &templates, fx, parent, &entry);
                 job.spawned += entry.spawned.len();
+                if std::env::var_os("FH1_PROP_DBG").is_some() {
+                    info!("props: placement {i} template {lod} spawned {} parts at {:?}, range {from}..{to}", entry.spawned.len(), entry.m.w_axis.truncate());
+                }
                 if !streaming && ring == 0 {
                     job.placed.extend(entry.spawned.iter().map(|&e| (key, e)));
                 }
@@ -2145,6 +2230,72 @@ pub struct FxParams<'w> {
     materials: ResMut<'w, Assets<FxMaterial>>,
     raw_materials: ResMut<'w, Assets<FxRawStandard>>,
     remaster: fh1_remaster::scenery::RemasterParams<'w>,
+}
+
+/// T1 oracle (fifth pass, `FH1_PROP_ORACLE=1`): draws one loaded prop template three ways, in front of the main camera,
+/// unstreamed, with culling off and a trivial transform, and logs which one it spawned.
+///
+///   left   = the production material (whatever `BatchMaterial` the importer produced)
+///   centre = magenta `StandardMaterial`, two-sided (`cull_mode: None`)
+///   right  = cyan `StandardMaterial`, back-face culled (the default)
+///
+/// The outcome names the cause without ambiguity: all three visible -> placement/streaming/visibility; magenta only ->
+/// the remaster material; centre only -> the winding is inverted and every face is culled; none -> the mesh itself.
+/// Every earlier attempt changed a value and diffed the frame; this changes *where and how* the same mesh is drawn.
+pub fn prop_oracle(
+    mut done: Local<bool>,
+    sc: Option<Res<Scenery>>,
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    meshes: Res<Assets<Mesh>>,
+    cam: Query<Entity, With<fh1_render::post::FxPostCamera>>,
+) {
+    if *done || std::env::var_os("FH1_PROP_ORACLE").is_none() {
+        return;
+    }
+    let Some(sc) = sc else { return };
+    let Some(templates) = sc.props.templates.as_ref() else { return };
+    // `place_props` takes the map out for a frame at a time: wait for a frame where it has parts.
+    let Some((&n, parts)) = templates.iter().find(|(_, p)| !p.is_empty()) else { return };
+    let Some((mesh, material)) = parts.first() else { return };
+    let Ok(cam) = cam.single() else { return };
+    use bevy::camera::primitives::MeshAabb;
+    let Some(aabb) = meshes.get(mesh).and_then(|m| m.compute_aabb()) else { return };
+    let centre = Vec3::from(aabb.center);
+    let extent = aabb.half_extents.max_element() * 2.0;
+    // Normalise to ~1 m in its largest dimension and centre it on its own bbox, so the three copies are the same size
+    // whatever unit the template is authored in.
+    let k = 1.0 / extent.max(1e-3);
+    let at = |x: f32| Transform::from_translation(Vec3::new(x, 0.0, -5.0) - centre * k).with_scale(Vec3::splat(k));
+    // 1. the production path (left).
+    let left = material.spawn(&mut commands, mesh.clone(), at(-1.6), cam);
+    commands.entity(left).insert((bevy::camera::visibility::NoFrustumCulling, bevy::light::NotShadowCaster));
+    // 2. two-sided magenta (centre) and 3. back-face cyan (right).
+    let two = materials.add(StandardMaterial { base_color: Color::srgb(1.0, 0.0, 1.0), unlit: true, cull_mode: None, ..default() });
+    let back = materials.add(StandardMaterial { base_color: Color::srgb(0.0, 1.0, 1.0), unlit: true, ..default() });
+    commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(two), at(0.0), ChildOf(cam), bevy::camera::visibility::NoFrustumCulling, bevy::light::NotShadowCaster));
+    commands.spawn((Mesh3d(mesh.clone()), MeshMaterial3d(back), at(1.6), ChildOf(cam), bevy::camera::visibility::NoFrustumCulling, bevy::light::NotShadowCaster));
+    info!(
+        "prop oracle: template {n} ({}), extent {extent:.3} m -> scale {k:.3}; left = production material, centre = two-sided magenta, right = back-face cyan",
+        mesh.id()
+    );
+    *done = true;
+}
+
+/// T1 (`FH1_PROP_HIDE=1`): hides the placed prop tiles every frame, after streaming. This is the clean presence
+/// test: unlike `FH1_PROPS=0` (which draws no props at all, so the frame also spends its streaming budget
+/// differently and two such runs differ by ~10k pixels among themselves), it leaves streaming untouched and changes
+/// only what is on screen.
+pub fn prop_hide(sc: Option<Res<Scenery>>, mut hidden: Query<&mut Visibility>) {
+    if std::env::var_os("FH1_PROP_HIDE").is_none() {
+        return;
+    }
+    let Some(sc) = sc else { return };
+    for (e, _) in sc.props.loaded.values() {
+        if let Ok(mut v) = hidden.get_mut(*e) {
+            *v = Visibility::Hidden;
+        }
+    }
 }
 
 pub fn stream(

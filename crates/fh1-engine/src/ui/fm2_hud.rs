@@ -45,7 +45,7 @@ const SS: f32 = 2.0;
 /// Scene point size -> pixels (96 dpi).
 const PT: f32 = 96.0 / 72.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Bind {
     Static,
     CurLap,
@@ -65,7 +65,7 @@ enum Bind {
     Assist(AssistKind, bool),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AssistKind {
     Abs,
     Tcs,
@@ -103,18 +103,40 @@ fn nums(v: &Value, k: &str) -> Vec<f32> {
 /// keep their alpha. `FH1_FM2_HUD_ALPHA=0` leaves the textures as they are.
 fn dark_panel_alpha(img: &mut Image, opacity: f32) {
     let off = std::env::var("FH1_FM2_HUD_ALPHA").is_ok_and(|v| v == "0");
+    // `FH1_FM2_HUD_PANEL` re-derives the coverage multiplier. The 1.146 was fitted against captures whose scene did
+    // not match the reference (a race puts the car on the grid). With a pose-locked HUD capture the dark plates
+    // measured 0.64-0.92 of the game's (too dark). Swept on Tsukuba with `run_panel_test.ps1`, ratio ours/game:
+    //   1.146 -> RACE 0.92  LAPS 0.80  PLACE 0.68  tach 0.75
+    //   1.0   ->        1.01       0.90        0.76       0.85
+    //   0.9   ->        1.07       0.97        0.81       0.93
+    //   0.85  ->        1.11       1.00        0.83       0.97   <- shipped: best mean deviation
+    //   0.8   ->        1.13       1.03        0.85       1.01
+    // RACE (its light time box) and PLACE stay the outliers; PLACE sits over the one region whose scene still differs.
+    let panel: f32 = std::env::var("FH1_FM2_HUD_PANEL").ok().and_then(|v| v.parse().ok()).unwrap_or(0.85);
     let Some(data) = img.data.as_mut() else { return };
     for px in data.chunks_exact_mut(4) {
         // The item's own opacity (the Lap row's bar is 54 %) multiplies the texture's alpha first.
         let a = px[3] as f32 / 255.0 * opacity;
         let dark = (px[0] as u32 + px[1] as u32 + px[2] as u32) <= 3 * 64;
-        let a = if dark && !off && a > 0.0 && a < 1.0 + 1e-3 { 1.0 - (1.0 - (a * 1.146).min(1.0)).powf(2.2) } else { a };
+        let a = if dark && !off && a > 0.0 && a < 1.0 + 1e-3 { 1.0 - (1.0 - (a * panel).min(1.0)).powf(2.2) } else { a };
         px[3] = (a * 255.0).round().clamp(0.0, 255.0) as u8;
     }
 }
 
-fn png(path: &Path, srgb: bool, opacity: f32, images: &mut Assets<Image>) -> Option<Handle<Image>> {
-    let bytes = std::fs::read(path).ok()?;
+/// Glyph coverage as a gamma-space value -> linear. The game blends its HUD text in gamma space, so an
+/// anti-aliased edge at coverage `a` lands at display value `a`; our sRGB target blends in linear, where the same
+/// coverage encodes to `a^(1/2.2)` and reads brighter. Measured (MODLOG 514): every opaque text element was
+/// 1.06-1.39x the reference. `FH1_FM2_HUD_TEXT_GAMMA=0` restores the old behaviour.
+fn gamma_text(mut img: Image) -> Image {
+    let Some(d) = img.data.as_mut() else { return img };
+    for px in d.chunks_exact_mut(4) {
+        let a = px[3] as f32 / 255.0;
+        px[3] = (a.powf(2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    img
+}
+
+fn png(path: &Path, srgb: bool, opacity: f32, images: &mut Assets<Image>) -> Option<Handle<Image>> {    let bytes = std::fs::read(path).ok()?;
     match Image::from_buffer(&bytes, ImageType::Extension("png"), CompressedImageFormats::NONE, srgb, ImageSampler::linear(), RenderAssetUsages::default()) {
         Ok(mut i) => {
             dark_panel_alpha(&mut i, opacity);
@@ -135,6 +157,15 @@ fn font_target(map: &FontMap, name: &str) -> Option<String> {
 
 fn load(mut commands: Commands, garage: Res<Garage>, track: Res<Track>, mut images: ResMut<Assets<Image>>) {
     if !track.id.starts_with("fm2/") || std::env::var("FH1_FM2_HUD").is_ok_and(|v| v == "0") {
+        return;
+    }
+    // `FH1_FM2_HUD=none` draws no HUD at all (FH1's stays off too). The per-element HUD comparison needs the
+    // HUD's exact footprint: two captures of the same frame, HUD on and HUD none, differ only where the HUD
+    // draws. Fixed rectangles alone are not enough -- measured with control rectangles, the scene behind a text
+    // rect carries the same bias as the rect itself (MODLOG 511).
+    if std::env::var("FH1_FM2_HUD").is_ok_and(|v| v == "none") {
+        // Suppress FH1's HUD as well, but spawn nothing: the "HUD off" half of the footprint measurement.
+        commands.insert_resource(Fm2HudOn(true));
         return;
     }
     let dir = garage.assets.join("imported/fm2/ui");
@@ -171,11 +202,22 @@ fn load(mut commands: Commands, garage: Res<Garage>, track: Res<Track>, mut imag
         .id();
     let assist = |a: AssistKind, on: bool| Bind::Assist(a, on);
     let (mut quads, mut texts) = (0, 0);
+    // Diagnostics (P2): with FH1_FM2_HUD_DUMP=<path>, write every element this module actually spawns,
+    // with the screen box it is given. The old per-element table computed positions from the scene file and
+    // measured scene pixels; this records the real ones (MODLOG 439/440).
+    let hud_dump = std::env::var("FH1_FM2_HUD_DUMP").ok().filter(|p| !p.is_empty());
+    let mut hud_rows: Vec<String> = Vec::new();
     let mut tex_cache: HashMap<String, Option<Handle<Image>>> = HashMap::new();
     for (scene, items) in doc["scenes"].as_object().into_iter().flatten() {
         for it in items.as_array().into_iter().flatten() {
             let kind = it["kind"].as_str().unwrap_or("");
             let name = it["name"].as_str().unwrap_or("");
+            // `FH1_FM2_HUD_LAYER=text|models` draws only that layer. The gauge glyphs sit on the tach plate, so a
+            // rectangle cannot separate them (MODLOG 511: the plate confounds the text rect); this can.
+            let layer = std::env::var("FH1_FM2_HUD_LAYER").unwrap_or_default();
+            if (layer == "text" && kind != "text") || (layer == "models" && kind != "model") {
+                continue;
+            }
             let index = it["index"].as_u64().unwrap_or(0);
             let path: Vec<&str> = it["path"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
             let in_path = |p: &str| path.contains(&p);
@@ -248,6 +290,7 @@ fn load(mut commands: Commands, garage: Res<Garage>, track: Res<Track>, mut imag
                 };
                 commands.spawn((
                     ChildOf(root),
+                    Name::new(name.to_owned()),
                     HudItem { bind, font: None, em: 0.0, scale: Vec2::ONE, halign: 1, anchor: Vec2::new(x, y), shown: String::new() },
                     Node {
                         position_type: PositionType::Absolute,
@@ -262,6 +305,18 @@ fn load(mut commands: Commands, garage: Res<Garage>, track: Res<Track>, mut imag
                     if matches!(bind, Bind::Assist(..)) { Visibility::Hidden } else { Visibility::Inherited },
                 ));
                 quads += 1;
+                if hud_dump.is_some() {
+                    hud_rows.push(format!(
+                        "{},{:?},model,{:.1},{:.1},{:.1},{:.1},{}",
+                        name.replace(',', " "),
+                        format!("{:?}", bind).replace(',', ";"),
+                        W / 2.0 + x - w / 2.0,
+                        H / 2.0 - y - h / 2.0,
+                        w,
+                        h,
+                        tex
+                    ));
+                }
             } else {
                 let font = it["font"].as_str().and_then(|f| font_target(&map, f));
                 let size = it["size"].as_str().and_then(|s| s.parse::<f32>().ok()).unwrap_or(18.0);
@@ -279,10 +334,30 @@ fn load(mut commands: Commands, garage: Res<Garage>, track: Res<Track>, mut imag
                     Name::new(initial),
                 ));
                 texts += 1;
+                if hud_dump.is_some() {
+                    hud_rows.push(format!(
+                        "{},{:?},text,{:.1},{:.1},0,0,",
+                        name.replace(',', " "),
+                        format!("{:?}", bind).replace(',', ";"),
+                        W / 2.0 + x,
+                        H / 2.0 - y
+                    ));
+                }
             }
         }
     }
     info!("fm2 hud: {quads} pictures, {texts} texts, {} fonts, {} labels", fonts.len(), labels.len());
+    if let Some(path) = hud_dump {
+        let mut out = String::from("name,bind,kind,x0,y0,w,h,texture\n");
+        for r in &hud_rows {
+            out.push_str(r);
+            out.push('\n');
+        }
+        match std::fs::write(&path, out) {
+            Ok(()) => info!("fm2 hud: dumped {} elements to {path}", hud_rows.len()),
+            Err(e) => warn!("fm2 hud: cannot write {path}: {e}"),
+        }
+    }
     commands.insert_resource(Fm2HudOn(true));
     let mut dials = Vec::new();
     for kind in [DialKind::Rpm, DialKind::Boost] {
@@ -542,6 +617,9 @@ fn drive(
     let on = settings.hud && !menu.open && !rig.photo && !crate::cutscene::hide_hud() && !frontend.as_deref().is_some_and(|f| f.0);
     let car = cars.single().ok();
     let racing = matches!(rs.phase, RacePhase::Racing);
+    if std::env::var_os("FH1_HUD_DBG").is_some() {
+        info!("hud: phase {:?} racing {} clock {:.3} laps {} car {}", rs.phase, racing, rs.clock_s, rs.laps.len(), car.is_some());
+    }
     let (race_t, lap_t) = if racing { (rs.clock_s, rs.clock_s - rs.lap_start_s) } else { (0.0, 0.0) };
     let total = rs.race.and_then(|r| events.races.get(r)).map(|r| r.laps);
     let player_name = crate::net::player_name();
@@ -549,15 +627,18 @@ fn drive(
     let gear = car.map_or(1, |c| c.0.gear);
     for (mut item, name, mut node, mut img, mut vis) in &mut items {
         if let Bind::Assist(kind, selected) = item.bind {
-            let (enabled, active) = car.map_or((false, false), |c| {
+            let active = car.map_or(false, |c| {
                 let v = &c.0;
                 match kind {
-                    AssistKind::Abs => (settings.abs, v.abs_active()),
-                    AssistKind::Tcs => (settings.tcs, v.tcs_cut > 0.0),
-                    AssistKind::Stm => (settings.stm, v.stm_active),
+                    AssistKind::Abs => v.abs_active(),
+                    AssistKind::Tcs => v.tcs_cut > 0.0,
+                    AssistKind::Stm => v.stm_active,
                 }
             });
-            *vis = if on && enabled && active == selected { Visibility::Inherited } else { Visibility::Hidden };
+            // One of the pair is always shown: 'selected' when the assist is active, 'unselected'
+            // otherwise. The old form also required `enabled`, so a disabled assist drew nothing at
+            // all -- the reference shows the off-state icon for all three (P2, MODLOG 440).
+            *vis = if on && active == selected { Visibility::Inherited } else { Visibility::Hidden };
             continue;
         }
         let Some(font_name) = item.font.clone() else {
@@ -614,6 +695,11 @@ fn drive(
             let Some((image, size, origin)) = raster_in(font, &s, em_px as f32, true) else {
                 img.image = Handle::default();
                 continue;
+            };
+            let image = if std::env::var("FH1_FM2_HUD_TEXT_GAMMA").is_ok_and(|v| v == "1") {
+                gamma_text(image)
+            } else {
+                image
             };
             let _ = origin;
             hud.cache.insert(key.clone(), (images.add(image), size, origin));

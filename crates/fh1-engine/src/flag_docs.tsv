@@ -434,7 +434,7 @@ FH1_RM_NIGHT_BATCH	Perf/logging	256	Number of scenery materials updated per fram
 FH1_RM_NIGHT_EV	Shadows/post/sky	-1.0	Exposure offset (in stops) blended in at full night in the remaster renderer.	More negative makes nights darker; positive brightens them.
 FH1_RM_PAINTCOLOR	Car paint/models	on	Tints non-body painted parts (plastics, emblems) with their ShaderSettings colour; set to 0 to skip.	Trim and badges take their proper colours.
 FH1_RM_PAINTSCALE	Car paint/models	on	Applies the game's per-surface paint scale (darkens rear panel, emblems, lamps); set to 0 for scale 1.	Some trim and panels look darker like the original; with 0 they use full paint brightness.
-FH1_RM_PAINT_ALBEDO	Car paint/models	1.0	Multiplier on paint colour brightness (0.6 was the old value).	Higher brightens body paint, lower darkens it.
+FH1_RM_PAINT_ALBEDO	Car paint/models	0.85	Multiplier on paint colour brightness (0.6 was the old value, 1.0 until 2026-11-08).	Higher brightens body paint, lower darkens it.
 FH1_RM_PAINT_DEBUG	Dev hooks	unset	Set to "mirror" to make car bodies white chrome mirrors.	Testing only: shows what environment light the car receives.
 FH1_RM_PAINT_METALLIC	Car paint/models	0.3	How metallic body paint is (0 to 1) in the sheen finish.	Higher gives shinier metal reflections, lower more plain gloss.
 FH1_RM_PAINT_METAL_ROUGH	Car paint/models	0.55	Roughness of metallic body paint in the sheen finish.	Lower gives sharper reflections, higher blurrier ones.
@@ -722,3 +722,16 @@ FH1_STATUS_HUD	UI/HUD	on	Small, low-contrast strip in the top right of the free-
 FH1_SKILLNAME_LAYOUT	UI/HUD	on	Lays the skill name and its value out side by side from their measured widths (centred as authored), so long names like GREAT NEAR MISS no longer run through the number; set to 0 for the authored fixed positions.	Points HUD skill rows only.
 FH1_FX_PRELOAD	Effects	on	Loads race effects (finish cannons, confetti) while the grid forms instead of on their first use; set to 0 for the old first-use loading.	On: no load stall at the race finish; no visual change.
 FH1_SW_PREPASS_NOMAT	Static world	on	Set to 0 so the scenery depth pre-pass binds the material slabs again and reads each material in the shader (old).	On: the pre-pass decides from a per-record flag set on the CPU (less render-thread time); no visual change.
+FH1_PROP_ORACLE	Dev hooks	off	Set to 1 to draw one loaded prop template three ways in front of the camera (production material, two-sided magenta, back-face cyan) and log it.	Testing only: three fixed shapes in the middle of the view, for diagnosing why a prop does not draw.
+FH1_PROP_COMPLETE	Dev hooks	off	Set to 1 to log, per prop tile placed, how many placements produced entities and how many were merged or skipped.	Log lines only; no visual change.
+FH1_PROP_HIDE	Dev hooks	off	Set to 1 to hide the placed prop tiles after streaming, so only their on-screen contribution changes (unlike FH1_PROPS=0, which also changes streaming).	Testing only: props vanish; the clean presence test.
+FH1_FM2_HUD_LAYER	Dev hooks	unset	Set to text or models to draw only that layer of the FM2 in-race HUD (ll = both).	Testing only: the gauge glyphs can be measured without the tach plate under them.
+FH1_FM2_HUD_TEXT_GAMMA	Dev hooks	off	Set to 1 to convert FM2 HUD glyph coverage from gamma space to linear.	Testing only: measured to change nothing (1.06 -> 1.04), kept for the experiment.
+FH1_FM2_HUD_PANEL	Dev hooks	0.85	Coverage multiplier for the FM2 HUD's dark panels (LAPS, PLACE and the tach plate).	Higher makes the panels darker and more opaque; 0.85 is the value measured against the Xenia references.
+FH1_PROP_OFFSET	Dev hooks	unset	Set to x,y,z to move every prop placement by that many metres.	Testing only: props shift together, for placement sweeps.
+FH1_PROP_SCALE	Dev hooks	unset	Multiplier on every prop placement's size.	Testing only: props grow or shrink together, for size sweeps.
+FH1_PROP_SIMPLE	Scenery/props/zones	on	Set to 0 to draw props through the remaster material instead of the standard one.	Standard is the default: a prop's material index is matched against the scenery materials, so the remaster record behind it carries another draw's brightness.
+FH1_PROP_UNLIT	Dev hooks	off	Set to 1 to draw props unlit (their texture colour, no sun).	Testing only: fixes Laguna's prop brightness and ruins Nordschleife's, so it is not a default.
+FH1_SHOT_LOCK	Dev hooks	off	Set to 1 to lock a capture's camera to the recorded reference pose without waiting for the readiness gate.	Testing only: captures stay at the reference pose but are taken sooner.
+FH1_RM_MIP_BIAS	Scenery/props/zones	0.35	Mip bias on every scenery texture (below 1 sharpens, above 1 blurs); the default 0.35 matches the references' near-field detail on 8 of 12 tracks.	Higher softens the ground detail, lower sharpens it; 1.0 is the old behaviour.
+FH1_RM_MATID	Dev hooks	off	Set to 1 to paint each scenery surface class flat (opaque red, cutout green, decal blue, water cyan, unlit yellow, additive magenta).	Testing only: the scene becomes flat class colours, for per-class masking.

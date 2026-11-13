@@ -43,6 +43,29 @@ use bevy::shader::ShaderRef;
 use fh1_formats::crowd::anim;
 use fh1_render::car_material::{FxRawOutput, FxRawStandard};
 
+/// The crowd's clock (s), pinned under `FH1_SHOT`.
+///
+/// The screenshot freezes the *physics* at `FH1_SHOT_AT` x the step rate, but the walkers move from real elapsed
+/// time, so two runs of the same build catch them at different phases. Measured (MODLOG 506): two identical runs
+/// differed by **9,893 px** (1.4 % of the frame) with the crowd on and **0 px** with `FH1_CROWD=0` -- the crowd was
+/// the entire capture noise floor, and it is larger than everything the parity campaign is trying to measure.
+///
+/// A still frame loses nothing from a frozen walker, and determinism is worth more than a fraction of a second of
+/// animation: the value is the shot time, so it is the same on every run of the same command.
+pub(crate) fn shot_pin() -> Option<f32> {
+    static PIN: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *PIN.get_or_init(|| {
+        std::env::var_os("FH1_SHOT").map(|_| {
+            std::env::var("FH1_SHOT_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(8.0)
+        })
+    })
+}
+
+/// The crowd clock: pinned under `FH1_SHOT`, real time otherwise.
+fn clock(time: &Time) -> f32 {
+    shot_pin().unwrap_or_else(|| time.elapsed_secs())
+}
+
 /// Objects are spawned when the camera is within this distance of their bounds (m).
 const RANGE: f32 = 600.0;
 /// Extra distance before an object is removed again (hysteresis).
@@ -867,12 +890,12 @@ fn stream(
         let (texture, params) = materials.get(&w.material).map(|m| (m.texture.clone(), m.params)).unzip();
         if let (Some(texture), Some(params)) = (texture, params) {
             let mut g = walk_gpu::GpuAssets { materials: &mut walk_mats, texture, params };
-            walk_gpu::stream(&mut commands, w, here, time.elapsed_secs(), &mut a3, &mut g);
+            walk_gpu::stream(&mut commands, w, here, clock(&time), &mut a3, &mut g);
         }
     } else if w.per_object {
-        stream_walkers(&mut commands, w, here, time.elapsed_secs(), &mut walkers, &mut a3);
+        stream_walkers(&mut commands, w, here, clock(&time), &mut walkers, &mut a3);
     } else {
-        stream_walkers_merged(&mut commands, w, here, time.elapsed_secs(), &mut a3);
+        stream_walkers_merged(&mut commands, w, here, clock(&time), &mut a3);
     }
 
     // Near: 3D models for the nearest spectators within `near` (SpriteDistance), at most lod0..lod3 of them,
@@ -1029,7 +1052,9 @@ fn crowd_spawns_per_frame() -> usize {
 /// = bind local + the clip's offset (fh1_formats::crowd::anim; the game's own frame interpolation is not
 /// traced).
 fn animate(time: Res<Time>, mut crowd: Query<&mut CrowdAnimated>, mut joints: Query<&mut Transform>) {
-    let now = time.elapsed_secs();
+    // Pinned under FH1_SHOT (see `clock`): the clip phase is otherwise real time, so two identical captures catch
+    // every 3D spectator mid-clip at a different pose.
+    let now = clock(&time);
     for mut a in &mut crowd {
         let phase = a.phase;
         let start = *a.start.get_or_insert(now - phase);

@@ -181,6 +181,10 @@ fn spawn(sky: Option<Res<Fm2Sky>>, mut commands: Commands, mut meshes: ResMut<As
         mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, d.uv.iter().map(|t| if flip { [t[0], 1.0 - t[1]] } else { *t }).collect::<Vec<[f32; 2]>>());
         mesh.insert_indices(Indices::U32(idx));
         let sky_gain: f32 = std::env::var("FH1_FM2_SKY_GAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        // `FH1_FM2_SKY_DEPTH=<bias>` (plan v12 phase 4.2, MODLOG 355/356): extra depth bias on every sky layer, for the
+        // Mugello horizon test -- the dome's error at the horizon is 12.7 levels worse than no dome, so the question is
+        // whether it is painting in front of terrain it should be behind. Positive = pushed away from the camera.
+        let extra_depth: f32 = std::env::var("FH1_FM2_SKY_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let material = StandardMaterial {
             base_color: Color::linear_rgb(sky_gain, sky_gain, sky_gain),
             base_color_texture: Some(images.add(img)),
@@ -190,7 +194,7 @@ fn spawn(sky: Option<Res<Fm2Sky>>, mut commands: Commands, mut meshes: ResMut<As
             // The panoramas of one dome are passes over the same sphere (Tsukuba's five share one bounding box): sky and clouds with their own
             // alpha, drawn in file order, each over the last. `FH1_FM2_SKY_LAYERS=0` = the old opaque panoramas.
             alpha_mode: if d.cap || layered { AlphaMode::Blend } else { AlphaMode::Opaque },
-            depth_bias: order as f32,
+            depth_bias: order as f32 + extra_depth,
             ..default()
         };
         // `FH1_FM2_SKY_PASSES=n` draws each layer n times (alpha ~ n x): the textures' alpha tops out at 0.44.

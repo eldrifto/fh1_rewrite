@@ -124,8 +124,10 @@ pub(super) struct GpuFigures {
 }
 
 /// Engine clock as the shaders see it (`globals.time` = Time::elapsed_secs_wrapped, 3600 s period).
+/// Pinned under `FH1_SHOT` (see `crowd::shot_pin`): a frozen physics step with a running figure clock makes two
+/// identical captures differ, which is the whole noise floor of the parity harness.
 pub(super) fn clock(time: &Time) -> f32 {
-    time.elapsed_secs_wrapped()
+    super::shot_pin().unwrap_or_else(|| time.elapsed_secs_wrapped())
 }
 
 fn wrap(t: f32) -> f32 {

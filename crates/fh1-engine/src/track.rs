@@ -184,6 +184,23 @@ pub fn fm2_lighting(t: &mut fh1_render::lighting::FxTimeOfDay, assets: &Path, id
         Some([g("r")?, g("g")?, g("b")?])
     };
     if std::env::var("FH1_FM2_COLOURS").map_or(true, |v| v != "0") {
+        // The car's hemisphere: `update_car_fill` reads `HLTopColour` / `HLBottomColour` from the TOD, and an FM2 map has
+        // no `TimeOfDayA.xml`, so it fell back to **Colorado's** -- the car was lit by another track's sky (measured:
+        // top 0.170/0.225/0.277, bottom 0.178/0.172/0.102 against Tsukuba's own 0.250/0.240/0.230 and 0.100/0.120/0.150,
+        // MODLOG 346). The FM2 disc carries the pair per track in `<SHLighting>`; use it.
+        let sh_rgb = |key: &str| -> Option<[f32; 3]> {
+            let a = |n: &str| -> Option<f32> {
+                let k = format!("{key}{n}=\"");
+                let p = xml.find(&k)? + k.len();
+                xml[p..].split('"').next()?.parse().ok()
+            };
+            Some([a("Red")?, a("Green")?, a("Blue")?])
+        };
+        for (channel, key) in [("HLTopColour", "SHTop"), ("HLBottomColour", "SHBottom")] {
+            if let Some(c) = sh_rgb(key) {
+                t.tod.channels.insert(channel.into(), fh1_render::tod::Curve { keys: vec![(0.0, c)] });
+            }
+        }
         if let Some(mut c) = rgb(&xml, "<LightColor") {
             // `FH1_FM2_SUN_WHITE=1` (experiment): the scenery shaders' light colour register c102 is (1, 1, 1) on every track (STATUS), not `LightColor`.
             if std::env::var_os("FH1_FM2_SUN_WHITE").is_some() {
