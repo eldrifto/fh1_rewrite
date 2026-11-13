@@ -604,8 +604,20 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
 
     // Textures: every candidate with a file on the disc (.bix pair = flags & 4, else a .bin).
     let dir = out.join(&src.name);
-    if let Err(e) = crate::fm2_sky::import(ar, &by_name, &pvs, &dir) {
+    // The track's own `GlobalSpecularLevel` (`c104` in the shader) and `skyGain` (`c188`, the sky multiplier), both
+    // read from the DISC: at this point the output's `tracks/` has not been written yet.
+    let (gsl, gain) = match std::fs::read_to_string(src.dir.join("TrackSettings.xml")) {
+        Ok(x) => (crate::fm2_sky::global_specular_level(&x), crate::fm2_sky::sky_gain(&x)),
+        Err(_) => (None, None),
+    };
+    if let Err(e) = crate::fm2_sky::import(ar, &by_name, &pvs, &dir, gsl, gain) {
         println!("[fm2] sky: {e}");
+    }
+    // Props: `<track>/<ribbon>/CollObjs.xml` places the objects the `.rmb` scenery does not carry -- the cones, poles
+    // and brake markers. Parsed and counted here; their templates and placements are written at the end of the import.
+    let collobjs = crate::fm2_props::read(&src.dir);
+    if !collobjs.is_empty() {
+        println!("[fm2] props: {}", crate::fm2_props::summary(&collobjs));
     }
     std::fs::create_dir_all(dir.join("textures"))?;
     std::fs::create_dir_all(dir.join("tiles"))?;
@@ -1543,6 +1555,10 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             Some(a) => (grain.unwrap_or(0), [enc01(a[0]), enc01(a[1]), enc01(a[2])], 9999),
             None => (grain.unwrap_or(0), [enc(c1[0]), enc(c1[1]), enc(c1[2])], (tex_gain * 100.0).round() as u32),
         };
+        // Per-texel road bake, OPT-IN (`FM2_ROAD_PX=1`): it fixes the fine detail where it applies (Tsukuba 0.59x ->
+        // 1.08x the game's high-frequency energy, band total 16.97 -> 16.83, road mask 5.13 -> 4.77) but leaves the other
+        // tracks unchanged (median detail 0.64, only 3 of 12 at parity) and moves the masked scene median 1.040 -> 1.078,
+        // so it is not the default (MODLOG 491).
         let px = if std::env::var("FM2_ROAD_PX").map_or(false, |v| v != "0") {
             albedo.and_then(|_| bake_road_px(p, &dir.join("textures"), &mut road_tex_cache))
         } else {
@@ -2423,7 +2439,53 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
             p.positions.iter().map(|q| [q[0] / m, q[2] / m]).collect()
         });
         let colour_uv = colour_uv.or(planar_grain.as_ref());
-        let mask_uv = if blend { masks.first().and_then(|m| slot_uv(m.0)) } else { None };
+        let resolved_mask_uv = masks.first().and_then(|m| slot_uv(m.0));
+        // `FM2_MASK_UV` (experiment): `colour` every blend, `stretched` only the draws whose mask uv is the
+        // lightmap's range, or a comma list of model numbers. The global `colour` mode fixed Tsukuba's near band
+        // (0.52 -> 0.90) but worsened the road mask (0.73 -> 0.77) by moving draws that were already tiled, so the
+        // narrowing matters (MODLOG 514).
+        let range = |v: &[[f32; 2]]| {
+            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for q in v {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(q[k]);
+                    hi[k] = hi[k].max(q[k]);
+                }
+            }
+            (lo, hi)
+        };
+        let same_range = |a: &[[f32; 2]], b: &[[f32; 2]]| {
+            let ((la, ha), (lb, hb)) = (range(a), range(b));
+            (0..2).all(|k| (la[k] - lb[k]).abs() < 0.02 && (ha[k] - hb[k]).abs() < 0.02)
+        };
+        let shader_name = materials[material as usize]["shader"].as_str().unwrap_or("").to_ascii_lowercase();
+        let forced = match std::env::var("FM2_MASK_UV").unwrap_or_default().as_str() {
+            "colour" | "all" => true,
+            "stretched" => resolved_mask_uv.is_some_and(|m| same_range(m, &p.lm_uv)),
+            "" => false,
+            // `family=<substr>[|<substr>...]` keys by the material's shader file (e.g. `family=h_blnd`), and
+            // `mat=<id>,<id>` by material index. Both are track-independent, unlike the model-number list: model
+            // numbers are per-track draw indices (MODLOG 518).
+            m if m.starts_with("family=") => m[7..].split('|').any(|s| !s.is_empty() && shader_name.contains(&s.to_ascii_lowercase())),
+            m if m.starts_with("mat=") => m[4..].split(',').filter_map(|s| s.trim().parse::<u32>().ok()).any(|x| x == material),
+            // `ratio=<k>`: the surface-role key. The mask's uv span divided by the colour's -- 0.196 at most among
+            // the 168 stretched draws (median 0.079), so a low threshold selects the draws whose mask is far coarser
+            // than their surface, i.e. the ones where a stretched mask loses the most detail (MODLOG 529).
+            m if m.starts_with("ratio=") => {
+                let k: f32 = m[6..].trim().parse().unwrap_or(0.05);
+                match (resolved_mask_uv, colour_uv) {
+                    (Some(mm), Some(cc)) => {
+                        let ((mlo, mhi), (clo, chi)) = (range(mm), range(cc));
+                        let mspan = (mhi[0] - mlo[0]).max(mhi[1] - mlo[1]);
+                        let cspan = (chi[0] - clo[0]).max(chi[1] - clo[1]);
+                        cspan > 0.0 && mspan / cspan < k
+                    }
+                    _ => false,
+                }
+            }
+            list => list.split(',').filter_map(|s| s.trim().parse::<usize>().ok()).any(|m| m == p.model),
+        };
+        let mask_uv = if blend { if forced { colour_uv } else { resolved_mask_uv } } else { None };
         shader_uv_draws += colour_uv.is_some() as usize;
         // A baked road with no grain mask is one flat colour: its coordinate does not matter.
         let flat_road = colours.first().is_some_and(|c| c.0 >= 0xFFFF_2000) && !p.candidates.iter().any(|c| mask(c.0) && Some(c.0) != wear_id);
@@ -2446,6 +2508,31 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
                 }
                 *fallback_why.entry(format!("{why}; model {}", if slots.is_empty() { 0 } else { p.model })).or_default() += 1;
             }
+        }
+        if blend && std::env::var_os("FM2_BLEND_DBG").is_some() {
+            let rng = |v: &[[f32; 2]]| {
+                let mut lo = [f32::MAX; 2];
+                let mut hi = [f32::MIN; 2];
+                for q in v {
+                    for k in 0..2 {
+                        lo[k] = lo[k].min(q[k]);
+                        hi[k] = hi[k].max(q[k]);
+                    }
+                }
+                [lo, hi]
+            };
+            let u0 = colour_uv.unwrap_or(&p.uv);
+            println!(
+                "[fm2] blend uv: model {} mat {} {} masktex {:?} tris {} uv0 {:?} mask {:?} lm {:?}",
+                p.model,
+                material,
+                materials[material as usize]["shader"].as_str().unwrap_or(""),
+                masks.first(),
+                p.indices.len() / 3,
+                rng(u0),
+                rng(mask_uv.or(p.mask_raw.as_ref()).unwrap_or(&p.raw)),
+                rng(&p.lm_uv)
+            );
         }
         b.uvs[0].extend_from_slice(colour_uv.unwrap_or(if sprite.is_some() { &p.raw } else { &p.uv }));
         if blend {
@@ -2506,9 +2593,12 @@ pub fn build_track(src: &TrackSrc, out: &Path, ar: &mut Archive<std::fs::File>, 
     let tex_index: Vec<_> = textures.iter().map(|(id, (alpha, _))| json!({"id": id, "file": format!("textures/{id:08x}.dds"), "alpha": alpha})).collect();
     std::fs::create_dir_all(dir.join("props/templates"))?;
     std::fs::create_dir_all(dir.join("props/tiles"))?;
+    // Props (MODLOG 487): the cones, poles and brake markers from `CollObjs.xml`. One template tile per model, then one
+    // FH1PROP3 placement file per 256 m tile -- the format the engine's prop system already reads.
+    let (prop_templates, prop_tiles) = crate::fm2_props::write_collobj_props(&dir, &src.dir, &collobjs, &pvs, &materials)?;
     let index_json = json!({
         "tile_size": TILE, "tiles": index, "far": null, "textures": tex_index, "zones": null,
-        "props": {"tile_size": TILE, "tiles": [], "templates": [], "lods": [], "collision": {"smash": [], "solid": [], "bounds": {}}, "glows": null},
+        "props": {"tile_size": TILE, "tiles": prop_tiles, "templates": prop_templates, "lods": [], "collision": {"smash": [], "solid": [], "bounds": {}}, "glows": null},
         "single_channel": "replicate",
     });
     std::fs::write(dir.join("index.json"), serde_json::to_vec_pretty(&index_json)?)?;

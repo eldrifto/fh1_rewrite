@@ -8,8 +8,9 @@ use std::path::Path;
 use anyhow::Result;
 use fh1_formats::{fm2, zip::{Archive, Entry}};
 use serde_json::json;
+use texpresso::{Algorithm, Format, Params};
 
-pub fn import(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>, pvs: &fm2::Pvs, dir: &Path) -> Result<()> {
+pub fn import(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>, pvs: &fm2::Pvs, dir: &Path, gsl: Option<f32>, tune_sky_gain: Option<f32>) -> Result<()> {
     let Some(e) = ar.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(".sky.rmb.bin")).cloned() else { return Ok(()) };
     let raw = ar.read(&e)?;
     let model = fm2::parse_model(&raw)?;
@@ -63,6 +64,30 @@ pub fn import(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>,
     if std::env::var_os("FM2_DUMP_SKY_PS").is_some() {
         crate::fm2_uv::dump_shaders(&raw, &model);
         let uvs = crate::fm2_uv::resolve(&raw, &model, &|_| crate::fm2_uv::ItemKind::Other);
+        // Container header words (MODLOG 337): magic, virtual_size, physical_size, ctab, defs, shader_off. A shader
+        // whose disassembly comes out as nothing usually has a bogus physical_size or shader_off here.
+        // NOTE: `section` returns the section SIZE, and `.data` starts at 0x190 + size(.gpu) -- not at 0x190 + size(.data).
+        if let (Some(g), Some(_dt)) = (crate::fm2_uv::section(&raw, b".gpu"), crate::fm2_uv::section(&raw, b".data")) {
+            let base = 0x190 + g;
+            for (i, d) in model.draws.iter().enumerate() {
+                let Some(off) = d.ps_container else { continue };
+                let w = |o: usize| raw.get(base + o..base + o + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
+                let hdr: Vec<String> = (0..7).map(|k| format!("{:#010x}", w(off + k * 4).unwrap_or(0))).collect();
+                // Program header at `shader_off` (word 6): physical_offset, code_size, ?, fieldC.
+                let sh_off = w(off + 6 * 4).unwrap_or(0) as usize;
+                let prog: Vec<String> = (0..6).map(|k| format!("{:#010x}", w(off + sh_off + k * 4).unwrap_or(0))).collect();
+                // Two candidate microcode bases: `virtual_size + physical_offset` (what parse uses) and `physical_offset`
+                // itself. Print the first dwords of each so a wrong one is visible as zeros.
+                let virt = w(off + 4).unwrap_or(0) as usize;
+                let po = w(off + sh_off).unwrap_or(0) as usize;
+                let dump8 = |base: usize| -> String {
+                    (0..8).map(|k| format!("{:08x}", w(off + base + k * 4).unwrap_or(0))).collect::<Vec<_>>().join(" ")
+                };
+                println!("[fm2 sky] draw {i}: container header at {off:#x}: {}  program @{sh_off:#x}: {}", hdr.join(" "), prog.join(" "));
+                println!("[fm2 sky] draw {i}:   microcode @virt+po ({:#x}): {}", virt + po, dump8(virt + po));
+                println!("[fm2 sky] draw {i}:   microcode @po      ({:#x}): {}", po, dump8(po));
+            }
+        }
         for (i, u) in uvs.iter().enumerate() {
             if let Some(ps) = &u.ps {
                 println!("[fm2 sky] draw {i}: consts {:?}
@@ -77,9 +102,10 @@ pub fn import(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>,
     // record, which this importer has never read. Locate the block by searching `.data` for one of the draw's own
     // non-zero constants and print the float4s around it, so the >= 100 registers can be read off.
     if std::env::var_os("FM2_SKY_MAT").is_some() {
-        let dt = crate::fm2_uv::section(&raw, b".data");
+        // `.data` starts at 0x190 + size(.gpu) (section() returns a size, not an offset) -- corrected in MODLOG 337.
+        let gt = crate::fm2_uv::section(&raw, b".gpu");
         let uvs = crate::fm2_uv::resolve(&raw, &model, &|_| crate::fm2_uv::ItemKind::Other);
-        if let Some(data) = dt.and_then(|dt| raw.get(0x190 + dt..)) {
+        if let Some(data) = gt.and_then(|g| raw.get(0x190 + g..)) {
             for (i, u) in uvs.iter().enumerate() {
                 let Some(ps) = &u.ps else { continue };
                 let Some((k, v)) = ps.consts.iter().find(|(_, v)| v.iter().any(|x| *x != 0.0)) else { continue };
@@ -136,6 +162,85 @@ pub fn import(ar: &mut Archive<std::fs::File>, by_name: &HashMap<String, Entry>,
             out[i]["glow"] = json!("sky/glow.png");
         }
     }
+    // The game's sky formula, baked into each dome texture (MODLOG 337). The pixel shader computes
+    //   out.rgb = tex.rgb * (1 + alpha * m * (1 - w))
+    // with `m` = c188.x (c_skyMultiplier, the per-draw constant in `constants` slot 1) and `w` = c104.w
+    // (c_globalSpecularLevel). Our renderer draws the colour alone, so the alpha term never reaches the screen;
+    // baking it here keeps the engine path unchanged and stays inside the game's own numbers.
+    // The value is the track's own `GlobalSpecularLevel` (TrackSettings.xml), which is what the shader's
+    // `c104` register is named for; the engine does not pass it, so it is applied here. `w = 1` is the identity,
+    // which is also the fallback when the track has no such setting. `FH1_FM2_SKY_W` overrides it for sweeps and
+    // `FH1_FM2_SKY_BAKE=0` turns the whole step off.
+    //
+    // MEASURED (MODLOG 341): at the track's own level, Nurburgring's sky band goes 26.33 -> 24.66 and the frame
+    // 34.81 -> 33.90; Mugello 40.50 -> 39.28 and 31.06 -> 30.60. The ten other tracks cannot respond at all --
+    // their drawn colour textures carry `m = 0`, or the only `m > 0` draw is the zenith cap, whose texture is BC4
+    // (a mask, not a colour image) and is skipped here exactly as the engine skips it.
+    // OFF by default: the mechanism is verified (MODLOG 341: applying this to the imported textures moves the
+    // twelve-track mean 30.519 -> 30.410), but THIS implementation is not -- the importer's own texture rewrite
+    // produces a different level 0 from the verified standalone tool (mean RGB 109 vs 133 where the tool gives
+    // 133/150/158), and the resulting capture is worse than shipped (34.34 vs 34.81 frame). Do not turn this on
+    // until the two paths agree. `FH1_FM2_SKY_BAKE=1` enables it for that comparison.
+    if std::env::var("FH1_FM2_SKY_BAKE").is_ok_and(|v| v == "1") {
+        let w: f32 = std::env::var("FH1_FM2_SKY_W").ok().and_then(|v| v.parse().ok()).or(gsl).unwrap_or(1.0);
+        let mut baked = 0usize;
+        let mut seen: Vec<u32> = Vec::new();
+        for d in &model.draws {
+            // The model's own c188.x when it carries one; otherwise the track's `skyGain`, which IS the runtime
+            // c188.x (MODLOG 456: exact on the three dumped tracks) and which the model does not carry on ten of
+            // twelve -- that is why the old bake could only respond on two tracks.
+            let m = d.constants.get(&1).map(|v| v[0]).filter(|&v| v > 0.0).or(tune_sky_gain).unwrap_or(0.0);
+            if m <= 0.0 {
+                continue;
+            }
+            let Some(&first) = d.items.first().and_then(|&it| free.get(it as usize)) else { continue };
+            let id = pvs.textures[first].file_id;
+            // One texture can be drawn by several passes; baking it once per draw would compound the gain.
+            if seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+            let p = tex_dir.join(format!("{id:08x}.dds"));
+            let Ok(mut dds) = std::fs::read(&p) else { continue };
+            let u = |o: usize| u32::from_le_bytes(dds.get(o..o + 4).unwrap_or(&[0; 4]).try_into().unwrap()) as usize;
+            // The data starts after the 128-byte legacy header, plus the DX10 extension when present -- the old code
+            // assumed 148 unconditionally (MODLOG 461).
+            let off = if dds.get(84..88) == Some(b"DX10") { 148 } else { 128 };
+            let (h, wpx) = (u(12), u(16));
+            let fmt = match u(128) {
+                77 => Format::Bc3,
+                71 => Format::Bc1,
+                _ => continue,
+            };
+            let len = fmt.compressed_size(wpx, h);
+            let Some(src) = dds.get(off..off + len).map(|s| s.to_vec()) else { continue };
+            let mut rgba = vec![0u8; wpx * h * 4];
+            fmt.decompress(&src, wpx, h, &mut rgba);
+            let k = 1.0 - w;
+            for px in rgba.chunks_exact_mut(4) {
+                let f = 1.0 + (px[3] as f32 / 255.0) * m * k;
+                for c in 0..3 {
+                    // The gain is a light-transport value, so it applies in LINEAR light: the console fetches the
+                    // sRGB texture into linear, does this arithmetic there, and the sRGB framebuffer converts back.
+                    px[c] = linear_to_srgb8(srgb8_to_linear(px[c]) * f);
+                }
+            }
+            // Re-encode LEVEL 0 IN PLACE, exactly as the verified standalone tool does (`examples/sky_bake.rs`):
+            // the header and every stored mip level are copied through byte for byte. The old path re-encoded the
+            // whole file with `rgba_to_dds`, which dropped the mips and produced a different level (mean 109
+            // against the tool's 133) -- the mismatch that kept this bake off (MODLOG 459/461).
+            let params = Params { algorithm: Algorithm::RangeFit, ..Default::default() };
+            let mut out = vec![0u8; len];
+            fmt.compress(&rgba, wpx, h, params, &mut out);
+            dds[off..off + len].copy_from_slice(&out);
+            if std::fs::write(&p, &dds).is_ok() {
+                baked += 1;
+            }
+        }
+        if baked > 0 {
+            println!("[fm2] sky: alpha term baked into {baked} dome textures (w = {w:.3})");
+        }
+    }
     std::fs::write(dir.join("sky.json"), serde_json::to_vec(&json!({ "draws": out }))?)?;
     println!("[fm2] sky: {} draws, {} textures", out.len(), wanted.len());
     Ok(())
@@ -177,4 +282,39 @@ fn swap_red_blue(path: &Path) {
     if let Ok(c) = crate::textures::rgba_to_dds(rgba, w as u32, h as u32) {
         let _ = std::fs::write(path, &c.dds);
     }
+}
+
+/// An 8-bit sRGB value as linear light (the curve the GPU's sRGB fetch applies).
+fn srgb8_to_linear(v: u8) -> f32 {
+    let c = v as f32 / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// Linear light back to an 8-bit sRGB value, rounded.
+fn linear_to_srgb8(lin: f32) -> u8 {
+    let c = lin.clamp(0.0, 1.0);
+    let s = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    (s * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// A track's `GlobalSpecularLevel` out of its `TrackSettings.xml` -- the setting the sky shader's `c104` register
+/// is named for (`c_globalSpecularLevel`). `None` when the track has no such setting, in which case the alpha term
+/// is the identity and nothing is baked.
+pub fn global_specular_level(xml: &str) -> Option<f32> {
+    // The shader's `w` is `c104.W` (MODLOG 397: captured as 1 on one sky draw and 0 on another, never 1.2), so this
+    // must read the **alpha** component. It used to read `g=`, which is 1.2 on Mugello and 1.2 on New York -- giving
+    // k = 1 - w = -0.2 and DARKENING those skies where the game leaves them alone (MODLOG 420).
+    let i = xml.find("<GlobalSpecularLevel")?;
+    let seg = &xml[i..];
+    let a = seg.find("a=\"")? + 3;
+    seg[a..].split('"').next()?.parse().ok()
+}
+
+/// A track's `skyGain` out of its `TrackSettings.xml`. **This is the shader's `c188.x` exactly** (MODLOG 456: 0.40 /
+/// 0.00 / 2.25 on the three tracks with a verified runtime dump) -- the `c_skyMultiplier` the alpha-term bake needs.
+pub fn sky_gain(xml: &str) -> Option<f32> {
+    let i = xml.find("<skyGain")?;
+    let seg = &xml[i..];
+    let a = seg.find("value=\"")? + 7;
+    seg[a..].split('"').next()?.parse().ok()
 }

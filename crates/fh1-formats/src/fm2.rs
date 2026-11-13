@@ -370,11 +370,128 @@ fn build_draw(gpu: &[u8], data: &[u8], vb: usize, count: usize, key: u32, items:
     Ok(Draw { stride, positions, vertices, indices, items, constants, state, buffer_end: (goff + size).max(ioff + count * 2), ps_container, ps_alt })
 }
 
+/// One prop placement from a track's `CollObjs.xml` (the cones, poles and brake markers the scenery does not carry).
+#[derive(Clone, Debug, PartialEq)]
+pub struct CollObj {
+    /// `PhysicsType` (Cone, Pole, BrakeMarker, ...).
+    pub kind: String,
+    /// `GraphicsName`: the model file, at the track root (e.g. `co_Orgcone.bin`).
+    pub model: String,
+    pub pos: [f32; 3],
+    /// The object's three orthonormal axes in the game's order (X, Y, Z).
+    pub axes: [[f32; 3]; 3],
+}
+
+fn xml_attr(s: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=\"");
+    let i = s.find(&key)? + key.len();
+    Some(s[i..].split('"').next()?.to_string())
+}
+
+/// `<track>/<ribbon>/CollObjs.xml`: every prop placement as `ObjN` with `PhysicsType`, `GraphicsName`, `<Pos x y z>`
+/// and `<Orientation>` with `XAxis` / `YAxis` / `ZAxis`.
+///
+/// The `.rmb` models the importer already converts are the static world; these are the separate per-track objects the
+/// game places on top of it (cones, poles, brake markers), and they are not in any `.rmb`.
+pub fn parse_collobjs(d: &str) -> Vec<CollObj> {
+    let mut out = Vec::new();
+    let mut rest = d;
+    while let Some(i) = rest.find("<Obj") {
+        rest = &rest[i..];
+        let end = rest.find("</Obj").unwrap_or(rest.len());
+        let block = &rest[..end];
+        let head = block.split('>').next().unwrap_or("");
+        if let (Some(kind), Some(model)) = (xml_attr(head, "PhysicsType"), xml_attr(head, "GraphicsName")) {
+            let vec3 = |tag: &str| -> Option<[f32; 3]> {
+                let i = block.find(&format!("<{tag}"))?;
+                let seg = &block[i..];
+                let head = seg.split('>').next().unwrap_or("");
+                Some([xml_attr(head, "x")?.parse().ok()?, xml_attr(head, "y")?.parse().ok()?, xml_attr(head, "z")?.parse().ok()?])
+            };
+            let pos = match vec3("Pos") {
+                Some(p) => p,
+                None => continue,
+            };
+            let axes = match (vec3("XAxis"), vec3("YAxis"), vec3("ZAxis")) {
+                (Some(x), Some(y), Some(z)) => [x, y, z],
+                _ => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            };
+            out.push(CollObj { kind, model, pos, axes });
+        }
+        if end >= rest.len() { break; }
+        rest = &rest[end..];
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(super::parse_pvs(b"nope").is_err());
         assert!(super::parse_model(b"nope").is_err());
+    }
+
+    #[test]
+    fn collobjs_reads_a_placement() {
+        let x = r#"<CollObjs>
+<Obj0 PhysicsType="Cone" GraphicsName="co_Orgcone.bin">
+<Pos x="1.5" y="2.5" z="3.5"/>
+<Orientation>
+<XAxis x="1" y="0" z="0"/>
+<YAxis x="0" y="1" z="0"/>
+<ZAxis x="0" y="0" z="1"/>
+</Orientation>
+</Obj0>
+</CollObjs>"#;
+        let o = super::parse_collobjs(x);
+        assert_eq!(o.len(), 1);
+        assert_eq!(o[0].kind, "Cone");
+        assert_eq!(o[0].model, "co_Orgcone.bin");
+        assert_eq!(o[0].pos, [1.5, 2.5, 3.5]);
+        assert_eq!(o[0].axes[1], [0.0, 1.0, 0.0]);
+    }
+
+    /// What a prop model references, when `FM2_PROP_PROBE=<track dir>` points at an extracted FM2 track.
+    /// Prints the draws of the first `CollObjs.xml` model and which PVS textures its items resolve to.
+    #[test]
+    fn prop_model_probe_when_asked() {
+        let Ok(dir) = std::env::var("FM2_PROP_PROBE") else { return };
+        let pvs = std::fs::read(format!("{dir}/Ribbon_00/{}_00.pvs", dir.rsplit('/').next().unwrap_or(""))).or_else(|_| {
+            // fall back: the first .pvs under the track
+            let mut found = None;
+            for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    for f in std::fs::read_dir(e.path()).into_iter().flatten().flatten() {
+                        if f.path().extension().map(|x| x == "pvs").unwrap_or(false) {
+                            found = Some(std::fs::read(f.path()).unwrap_or_default());
+                        }
+                    }
+                }
+            }
+            found.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no pvs"))
+        }).expect("pvs");
+        let p = super::parse_pvs(&pvs).expect("pvs parse");
+        let xml = std::fs::read_to_string(format!("{dir}/Ribbon_00/CollObjs.xml")).unwrap_or_default();
+        let objs = super::parse_collobjs(&xml);
+        let model = objs.first().map(|o| o.model.clone()).unwrap_or_default();
+        let raw = std::fs::read(format!("{dir}/{model}")).expect("prop model");
+        let m = super::parse_model(&raw).expect("model parse");
+        println!("probe {model}: {} draws, {} skipped, pvs textures {}", m.draws.len(), m.skipped.len(), p.textures.len());
+        for (i, d) in m.draws.iter().enumerate() {
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for q in &d.positions {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(q[k]);
+                    hi[k] = hi[k].max(q[k]);
+                }
+            }
+            let ids: Vec<String> = d.items.iter().map(|&it| match p.textures.get(it as usize) {
+                Some(t) => format!("{it}->{:08x}", t.file_id),
+                None => format!("{it}->oob"),
+            }).collect();
+            println!("  draw {i}: {} verts, {} tris, items {:?}, ps {:?}, bbox {:?}..{:?}", d.positions.len(), d.indices.len() / 3, ids, d.ps_container, lo, hi);
+        }
     }
 }

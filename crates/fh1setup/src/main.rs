@@ -54,6 +54,8 @@ mod fm1;
 mod fm6;
 mod fm2_cars;
 mod fm2_crowd;
+#[cfg(feature = "fm2")]
+mod fm2_props;
 #[cfg(feature = "fm4")]
 mod fm4_merge;
 mod grass;
@@ -77,7 +79,7 @@ use std::path::PathBuf;
 use anyhow::{bail, Context, Result};
 
 /// Asset groups and their pipeline versions. Bump a version when its output changes.
-pub const GROUPS: &[(&str, &str)] = &[("cars", "cars-18"), ("world", "world-3"), ("scenery", "scenery-33"), ("shaders", "shaders-2"), ("tracks", "tracks-3"), ("dynamicpost", "dynamicpost-2"), ("audio", "audio-3"), ("radio", "radio-3"), ("ui", "ui-5"), ("grass", "grass-1"), ("crowd", "crowd-2"), ("anim", "anim-2"), ("sky", "sky-1"), ("camera", "camera-1"), ("effects", "effects-1"), ("events", "events-8"), ("ailines", "ailines-2"), ("traffic", "traffic-1"), ("upgrades", "upgrades-3"), ("variants", "variants-2"), ("remaster", "remaster-5"), ("fmv", "fmv-2"), ("story", "story-1"), ("missions", "missions-2")];
+pub const GROUPS: &[(&str, &str)] = &[("cars", "cars-18"), ("world", "world-3"), ("scenery", "scenery-34"), ("shaders", "shaders-2"), ("tracks", "tracks-3"), ("dynamicpost", "dynamicpost-2"), ("audio", "audio-3"), ("radio", "radio-3"), ("ui", "ui-5"), ("grass", "grass-1"), ("crowd", "crowd-2"), ("anim", "anim-2"), ("sky", "sky-1"), ("camera", "camera-1"), ("effects", "effects-1"), ("events", "events-8"), ("ailines", "ailines-2"), ("traffic", "traffic-1"), ("upgrades", "upgrades-3"), ("variants", "variants-2"), ("remaster", "remaster-5"), ("fmv", "fmv-2"), ("story", "story-1"), ("missions", "missions-2")];
 
 struct Args {
     source: PathBuf,

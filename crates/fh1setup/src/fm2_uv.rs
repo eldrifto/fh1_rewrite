@@ -133,10 +133,13 @@ pub fn dump_shaders(raw_model: &[u8], model: &fm2::Model) {
     while t + 16 <= gpu.len() && shown < 6 {
         let words: Vec<u32> = (t..gpu.len().min(t + 0xB8)).step_by(4).filter_map(|k| gpu.get(k..k + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()))).collect();
         if words.len() >= 40 {
-            let text = fh1_shaders::fm2::disassemble(words, false);
+            let text = fh1_shaders::fm2::disassemble(words.clone(), false);
             if text.contains("tfetch2D") && text.contains("oC0") {
+                // The raw words, so a swizzle in the text above can be checked against the encoding.
+                let hex: Vec<String> = words.iter().take(24).map(|w| format!("{w:08x}")).collect();
                 println!("[fm2 sky] pixel-looking block at gpu+{t:#x}:
-{text}");
+[raw] {}
+{text}", hex.join(" "));
                 shown += 1;
                 t += 0xB8;
                 continue;

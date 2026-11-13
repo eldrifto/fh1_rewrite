@@ -115,6 +115,232 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
     }
 }
 
+
+/// Plan v13 phase A: read a constants dump written by the instrumented Xenia (`XE_CONSTDUMP`).
+///
+/// The dump holds, per draw, the guest float constants the shaders were issued with: `SQ_VS_CONST` /
+/// `SQ_PS_CONST` give the base and the vec4 count, and the values follow. Returns the pixel-shader block as
+/// (base, values[0..size], first ucode dwords) for the draw whose ucode starts with `want_words` -- matching on the
+/// ucode is what ties a dump draw to a draw this program can render; the index alone does not.
+
+/// Plan v13 phase A: the whole dump, parsed once -- (draw index, ps base, values, first ucode dwords).
+fn load_const_dump(path: &str) -> Vec<(usize, u32, Vec<[f32; 4]>, Vec<u32>)> {
+    let mut out = Vec::new();
+    let Ok(txt) = std::fs::read_to_string(path) else { return out };
+    let mut draw_index = 0usize;
+    let mut stage: Option<&'static str> = None;
+    let mut base = 0u32;
+    let mut size = 0u32;
+    let mut words: Vec<u32> = Vec::new();
+    let mut values: Vec<[f32; 4]> = Vec::new();
+    for line in txt.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("draw ") {
+            if let Some(idx) = rest.split_whitespace().next().and_then(|v| v.parse::<usize>().ok()) {
+                draw_index = idx;
+            }
+            stage = None;
+            continue;
+        }
+        if t == "end" {
+            if stage == Some("ps") && !words.is_empty() {
+                out.push((draw_index, base, values.clone(), words.clone()));
+            }
+            stage = None;
+            continue;
+        }
+        if t.starts_with("ps base ") || t.starts_with("vs base ") {
+            let is_ps = t.starts_with("ps base ");
+            let mut it = t.split_whitespace();
+            it.next();
+            it.next();
+            let b: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            it.next();
+            let n: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            it.next();
+            it.next();
+            it.next();
+            let w: Vec<u32> = it.filter_map(|x| u32::from_str_radix(x, 16).ok()).collect();
+            stage = Some(if is_ps { "ps" } else { "vs" });
+            if is_ps {
+                base = b;
+                size = n;
+                words = w;
+                values = vec![[0.0f32; 4]; n as usize];
+            }
+            continue;
+        }
+        if stage == Some("ps") && t.starts_with("ps") && t.as_bytes().get(2).is_some_and(|c| c.is_ascii_digit()) {
+            let mut it = t[2..].split_whitespace();
+            let idx: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+            let mut v = [0f32; 4];
+            let mut ok = true;
+            for k in 0..4 {
+                match it.next().and_then(|x| x.parse::<f32>().ok()) {
+                    Some(x) => v[k] = x,
+                    None => { ok = false; break; }
+                }
+            }
+            if ok && idx < values.len() {
+                values[idx] = v;
+            }
+        }
+    }
+    let _ = size;
+    out
+}
+
+/// True when a dump draw's microcode starts with the shader's words.
+fn ucode_matches(cap: &[u32], shader: &[u32]) -> bool {
+    !cap.is_empty() && shader.len() >= cap.len() && shader[..cap.len()] == *cap
+}
+
+
+/// Plan v13 phase A.3: the constants of one stage (vs or ps) for the dump draw whose microcode matches `want`.
+/// Returns (draw index, base, values as the shader's own c# indices).
+fn load_stage_consts(path: &str, want: &[u32], stage: &str, pin_draw: Option<usize>) -> Option<(usize, u32, Vec<[f32; 4]>)> {
+    let mut pinned: Option<(usize, u32, Vec<[f32; 4]>)> = None;
+    let mut cur_draw = 0usize;
+    let mut cur_stage: Option<String> = None;
+    let mut base = 0u32;
+    let mut words: Vec<u32> = Vec::new();
+    let mut values: Vec<[f32; 4]> = Vec::new();
+    for line in std::fs::read_to_string(path).ok()?.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("draw ") {
+            if let Some((d, b, v)) = pinned.take() {
+                if pin_draw.is_some() && Some(d) == pin_draw {
+                    return Some((d, b, v));
+                }
+            }
+            cur_draw = rest.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            cur_stage = None;
+            continue;
+        }
+        if t == "end" {
+            if cur_stage.as_deref() == Some(stage) && pin_draw == Some(cur_draw) && !values.is_empty() {
+                pinned = Some((cur_draw, base, values.clone()));
+            }
+            cur_stage = None;
+            continue;
+        }
+        if t.starts_with("ps base ") || t.starts_with("vs base ") {
+            // The dump writes VS then PS inside one draw, so the second stage's header is where the first stage's
+            // block ends -- capture the pinned draw here, not only at `end` (that is why the pin returned nothing).
+            if cur_stage.as_deref() == Some(stage) && pin_draw == Some(cur_draw) && !values.is_empty() {
+                pinned = Some((cur_draw, base, values.clone()));
+            }
+            let st = &t[..2];
+            let mut it = t.split_whitespace();
+            it.next(); it.next();
+            let b: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            it.next();
+            let n: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            it.next(); it.next(); it.next();
+            let w: Vec<u32> = it.filter_map(|x| u32::from_str_radix(x, 16).ok()).collect();
+            if st == stage {
+                base = b;
+                words = w;
+                values = vec![[0.0f32; 4]; n as usize];
+                cur_stage = Some(st.to_string());
+            } else {
+                cur_stage = None;
+            }
+            continue;
+        }
+        if cur_stage.as_deref() == Some(stage) && t.starts_with(stage) && t.as_bytes().get(2).is_some_and(|c| c.is_ascii_digit()) {
+            let mut it = t[2..].split_whitespace();
+            let idx: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+            let mut v = [0f32; 4];
+            let mut ok = true;
+            for k in 0..4 {
+                match it.next().and_then(|x| x.parse::<f32>().ok()) {
+                    Some(x) => v[k] = x,
+                    None => { ok = false; break; }
+                }
+            }
+            if ok && idx < values.len() { values[idx] = v; }
+        }
+    }
+    if let Some((d, b, v)) = pinned {
+        if Some(d) == pin_draw {
+            return Some((d, b, v));
+        }
+    }
+    if !words.is_empty() && ucode_matches(&words, want) { Some((cur_draw, base, values)) } else { None }
+}
+
+fn find_captured_ps(path: &str, want_words: &[u32]) -> Option<(u32, Vec<[f32; 4]>, usize)> {
+    let txt = std::fs::read_to_string(path).ok()?;
+    let mut draw_index = 0usize;
+    let mut stage: Option<&'static str> = None;
+    let mut base = 0u32;
+    let mut size = 0u32;
+    let mut words: Vec<u32> = Vec::new();
+    let mut values: Vec<[f32; 4]> = Vec::new();
+    let mut found: Option<(u32, Vec<[f32; 4]>, usize)> = None;
+    let prefix_matches = |w: &[u32]| -> bool {
+        !w.is_empty() && want_words.len() >= w.len() && want_words[..w.len()] == *w
+    };
+    for line in txt.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("draw ") {
+            if let Some(idx) = rest.split_whitespace().next().and_then(|v| v.parse::<usize>().ok()) {
+                draw_index = idx;
+            }
+            stage = None;
+            continue;
+        }
+        if t == "end" {
+            if stage == Some("ps") && prefix_matches(&words) && found.is_none() {
+                found = Some((base, values.clone(), draw_index));
+            }
+            stage = None;
+            continue;
+        }
+        if t.starts_with("ps base ") || t.starts_with("vs base ") {
+            let is_ps = t.starts_with("ps base ");
+            let mut it = t.split_whitespace();
+            it.next();
+            it.next();
+            let b: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            it.next();
+            let n: u32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            it.next();
+            it.next();
+            it.next();
+            let w: Vec<u32> = it.filter_map(|x| u32::from_str_radix(x, 16).ok()).collect();
+            stage = Some(if is_ps { "ps" } else { "vs" });
+            if is_ps {
+                base = b;
+                size = n;
+                words = w;
+                values = vec![[0.0f32; 4]; n as usize];
+            }
+            continue;
+        }
+        if stage == Some("ps") && t.starts_with("ps") && t.as_bytes().get(2).is_some_and(|c| c.is_ascii_digit()) {
+            let mut it = t[2..].split_whitespace();
+            let idx: usize = it.next().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+            let mut v = [0f32; 4];
+            let mut ok = true;
+            for k in 0..4 {
+                match it.next().and_then(|x| x.parse::<f32>().ok()) {
+                    Some(x) => v[k] = x,
+                    None => { ok = false; break; }
+                }
+            }
+            if ok && idx < values.len() {
+                values[idx] = v;
+            }
+        }
+    }
+    if stage == Some("ps") && prefix_matches(&words) && found.is_none() {
+        found = Some((base, values, draw_index));
+    }
+    found
+}
+
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     // `--validate-all`: translate every pixel shader in every model of an archive and parse the result with naga
@@ -565,19 +791,93 @@ fn main() {
                 }
             };
             put(&mut attr, 0, [f(0), f(4), f(8), 1.0]);
+            // The shader's own literals include 1/32767 (measured: c254.x = 3.052e-5), so at least one attribute is
+            // expected as a RAW 16-bit value that the shader normalises itself. The tool used to pre-normalise the
+            // packed pairs, which double-scales them to ~0. `FM2_ATTR_RAW=1` uploads the raw integers to test it.
+            let raw_attrs = std::env::var_os("FM2_ATTR_RAW").is_some();
             for p in 0..5 {
                 let raw = u32w(12 + 4 * p);
-                let u = (raw >> 16) as u16 as i16 as f32 / 32767.0;
-                let vv = (raw & 0xFFFF) as u16 as i16 as f32 / 32767.0;
+                let scale = if raw_attrs { 1.0 } else { 1.0 / 32767.0 };
+                let u = (raw >> 16) as u16 as i16 as f32 * scale;
+                let vv = (raw & 0xFFFF) as u16 as i16 as f32 * scale;
                 put(&mut attr, 1 + p, [u, vv, 0.0, 1.0]);
             }
         }
+        // Plan v15 follow-up: does the position the SHADER fetches equal the one the archive parser calls `positions`?
+        // They are built independently (the attribute is read from `dr.vertices` at the draw's stride; `positions` comes
+        // from `fm2::parse_model`), and every on-screen-area number depends on them being the same point.
+        if std::env::var_os("FM2_CMP_POS").is_some() {
+            let mut worst = 0f32;
+            for v in 0..count {
+                let base = v * stride;
+                let p = [
+                    f32::from_bits(be(&dr.vertices, base).unwrap_or(0)),
+                    f32::from_bits(be(&dr.vertices, base + 4).unwrap_or(0)),
+                    f32::from_bits(be(&dr.vertices, base + 8).unwrap_or(0)),
+                ];
+                let q = dr.positions.get(v).copied().unwrap_or([f32::NAN; 3]);
+                let e = (0..3).map(|k| (p[k] - q[k]).abs()).fold(0f32, f32::max);
+                if v < 3 {
+                    println!(
+                        "  cmp v{v}: attribute [{:.4},{:.4},{:.4}]  dr.positions [{:.4},{:.4},{:.4}]  err {e:.4}",
+                        p[0], p[1], p[2], q[0], q[1], q[2]
+                    );
+                }
+                if e.is_finite() {
+                    worst = worst.max(e);
+                }
+            }
+            println!("  cmp: {count} vertices, worst |attribute - dr.positions| = {worst:.6}");
+        }
         let mut ub = vec![0u8; 256 * 16 + 16 * 16 + 64 * 16 + 32 * 16 + 16];
-        for (reg, val) in [(0u32, [0f32; 4])].iter() {
-            let _ = (reg, val);
+        // Plan v13 phase A.3: `--constants <dump>` fills the uniform with the constants the game was issued for this
+        // vertex shader. Without it every c# is zero, which is why this mode could not place a draw before.
+        if let Some(ci) = a.iter().position(|x| x == "--constants") {
+            let pinned: Option<usize> = a.iter().position(|x| x == "--constants-draw").and_then(|j| a.get(j + 1)).and_then(|v| v.parse().ok());
+            if pinned.is_some() {
+                println!("  --constants-draw: pairing by DRAW INDEX -- the vertex microcode is patched by Xenia, so exact ucode matching cannot work for vertex shaders (MODLOG 365)");
+            }
+            match a.get(ci + 1).map(|p| load_stage_consts(p, &words, "vs", pinned)) {
+                Some(Some((draw, base, vals))) => {
+                    let mut n = 0usize;
+                    for (i, v) in vals.iter().enumerate() {
+                        let reg = i;
+                        if reg < 256 {
+                            for k in 0..4 {
+                                ub[reg * 16 + k * 4..reg * 16 + k * 4 + 4].copy_from_slice(&v[k].to_le_bytes());
+                            }
+                            n += 1;
+                        }
+                    }
+                    println!("  --constants: {n} vertex constants from draw {draw} (base {base})");
+                }
+                Some(None) => println!("  --constants: no draw in the dump matches this vertex shader's ucode"),
+                None => {}
+            }
         }
         let n = count as u32;
         ub[256 * 16 + 16 * 16 + 64 * 16 + 32 * 16..][..4].copy_from_slice(&n.to_le_bytes());
+        // The vertex shader's literals live at the TOP of the constant file (256 - count .. 255) and are part of its
+        // microcode, not of the per-draw constants -- this branch was not uploading them at all, so any shader that
+        // multiplies by a literal (c254/c255) ran with zeros (MODLOG 398 -> this fix).
+        {
+            let nl = vs.literals.len();
+            for (k, l) in vs.literals.iter().enumerate() {
+                let reg = 256 - nl + k;
+                for c in 0..4 {
+                    ub[reg * 16 + c * 4..reg * 16 + c * 4 + 4].copy_from_slice(&l[c].to_le_bytes());
+                }
+            }
+            // Probe the uniform as the shader will read it (plan v15 A2.1's fork).
+            let read = |reg: usize| -> [f32; 4] {
+                let mut v = [0f32; 4];
+                for c in 0..4 {
+                    v[c] = f32::from_le_bytes(ub[reg * 16 + c * 4..reg * 16 + c * 4 + 4].try_into().unwrap());
+                }
+                v
+            };
+            println!("  uniform probe: c254 {:?}  c255 {:?}  (literals {nl})", read(254), read(255));
+        }
         let mk = |size: u64, usage: wgpu::BufferUsages| device.create_buffer(&wgpu::BufferDescriptor { label: None, size, usage, mapped_at_creation: false });
         let uniform = mk(ub.len() as u64, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST);
         queue.write_buffer(&uniform, 0, &ub);
@@ -627,9 +927,31 @@ fn main() {
         staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         let raw = staging.slice(..).get_mapped_range().to_vec();
+        // Plan v13 phase A.3: `--vs-out <file>` writes the whole buffer (17 vec4 per vertex: clip position then
+        // o0..o15) so the render pass can use the GAME's vertex transform without re-deriving it in WGSL.
+        if let Some(oi) = a.iter().position(|x| x == "--vs-out") {
+            if let Some(op) = a.get(oi + 1) {
+                let mut out = String::with_capacity(raw.len() / 2);
+                out.push_str(&format!("vs_out count {} stride 17\n", count));
+                for v in 0..count {
+                    for reg in 0..17usize {
+                        let f = |k: usize| f32::from_le_bytes(raw[(v * 17 + reg) * 16 + k * 4..][..4].try_into().unwrap());
+                        out.push_str(&format!("{v} {reg} {:.6} {:.6} {:.6} {:.6}\n", f(0), f(1), f(2), f(3)));
+                    }
+                }
+                match std::fs::write(op, out) {
+                    Ok(()) => println!("  --vs-out: wrote {} vertices x 17 vec4 to {}", count, op),
+                    Err(e) => println!("  --vs-out: {e}"),
+                }
+            }
+        }
         let val = |v: usize, reg: usize, k: usize| f32::from_le_bytes(raw[(v * 17 + reg) * 16 + k * 4..][..4].try_into().unwrap());
         for v in 0..count {
-            println!("VS vertex {v}: pos [{:.4},{:.4},{:.4},{:.4}]", val(v, 0, 0), val(v, 0, 1), val(v, 0, 2), val(v, 0, 3));
+            let wp = dr.positions.get(v).copied().unwrap_or([0.0; 3]);
+            println!(
+                "VS vertex {v}: world [{:.4},{:.4},{:.4}] -> pos [{:.4},{:.4},{:.4},{:.4}]",
+                wp[0], wp[1], wp[2], val(v, 0, 0), val(v, 0, 1), val(v, 0, 2), val(v, 0, 3)
+            );
             for reg in 0..16usize {
                 let x = [val(v, reg + 1, 0), val(v, reg + 1, 1), val(v, reg + 1, 2), val(v, reg + 1, 3)];
                 if x.iter().any(|c| c.abs() > 1e-6) {
@@ -639,10 +961,303 @@ fn main() {
         }
         return;
     }
+    // Plan v15 A2.1: `--dump-verts <n>` prints the first n vertices of a draw as raw 32-bit words, so the attribute
+    // layout (where the normal/tangent streams sit and how they are packed) can be read instead of guessed.
+    if let Some(di) = a.iter().position(|x| x == "--dump-verts") {
+        let n: usize = a.get(di + 1).and_then(|v| v.parse().ok()).unwrap_or(4);
+        let model: usize = a[2].parse().unwrap();
+        let mut ar = Archive::open(&a[1]).unwrap();
+        let suffix = format!(".{:0>5}.rmb.bin", model);
+        let e = ar.entries.iter().find(|e| e.name.to_ascii_lowercase().ends_with(&suffix)).unwrap().clone();
+        let d = ar.read(&e).unwrap();
+        let (g, dt) = (section(&d, b".gpu").unwrap(), section(&d, b".data").unwrap());
+        let m = fm2::parse_model(&d).unwrap();
+        let draw: usize = a.iter().position(|x| x == "--draw").and_then(|j| a.get(j + 1)).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let dr = &m.draws[draw];
+        println!("model {model} draw {draw}: stride {} words {} vertices {}", dr.stride, dr.stride / 4, dr.positions.len());
+        for v in 0..n.min(dr.positions.len()) {
+            let base = v * dr.stride;
+            let words: Vec<u32> = (0..dr.stride / 4).map(|k| be(&dr.vertices, base + 4 * k).unwrap_or(0)).collect();
+            println!(
+                "  v{v:<3} pos [{:.3},{:.3},{:.3}]  words {words:08X?}",
+                dr.positions[v][0], dr.positions[v][1], dr.positions[v][2]
+            );
+        }
+        return;
+    }
     // `--render <draw>`: draw one FM2 draw properly -- our own vertex shader over the draw's real vertices
     // (MEASURED layout, MODLOG 268) and the GAME'S OWN pixel shader per pixel. The vertex shader is ours only because
     // the game's is unreproducible from the disc (its matrices are not stored, MODLOG 269); everything that decides
     // what a surface looks like is still the game's code. Writes `data/work/fm2_draw.ppm` and prints statistics.
+
+    // Plan v13 phase A: `--scan-models <zip> --constants <dump>` prints, for every model in the archive, the
+    // groups whose pixel-shader microcode matches a draw in the dump. That is how a captured draw is paired with
+    // the model this program can render -- by code, never by guess. No GPU work.
+    if a.iter().any(|x| x == "--scan-models") {
+        let mode_arg = |k: &str| -> Option<String> { a.iter().position(|x| x == k).and_then(|j| a.get(j + 1)).cloned() };
+        let Some(dpath) = mode_arg("--constants") else {
+            println!("--scan-models needs --constants <dump>");
+            return;
+        };
+        let caps = load_const_dump(&dpath);
+        // Plan v15 B.1: rank matched pairs by ON-SCREEN AREA in pixels, not by index count. --rank-area also prints
+        // pairs that fail the index-count test, because the road's importer-built tile need not equal the game's chunk.
+        let rank_area = a.iter().any(|x| x == "--rank-area");
+        let top_n: usize = mode_arg("--top").and_then(|v| v.parse().ok()).unwrap_or(12);
+        let mut area_rows: Vec<(f32, bool, String)> = Vec::new();
+        // Plan v14 phase 2.2: a model's shader can only be a draw whose bound fetch indices CONTAIN its sampler
+        // indices -- set inclusion on data both sides already hold (MODLOG 385).
+        let mut fetches: std::collections::HashMap<usize, std::collections::BTreeSet<u32>> = std::collections::HashMap::new();
+        let mut index_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut vs_consts: std::collections::HashMap<usize, Vec<[f32; 4]>> = std::collections::HashMap::new();
+        let mut cur_draw = 0usize;
+        let mut in_vs = false;
+        for line in std::fs::read_to_string(&dpath).unwrap_or_default().lines() {
+            let t2 = line.trim();
+            if let Some(rest) = t2.strip_prefix("draw ") {
+                let mut it = rest.split_whitespace();
+                cur_draw = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                // "draw <n> prim <p> index_count <c>"
+                let v: Vec<&str> = rest.split_whitespace().collect();
+                if v.len() >= 5 {
+                    if let Some(c) = v[4].parse::<usize>().ok() {
+                        index_counts.insert(cur_draw, c);
+                    }
+                }
+                continue;
+            }
+            if t2.starts_with("ps base ") {
+                in_vs = false;
+                continue;
+            }
+            if let Some(rest) = t2.strip_prefix("vs base ") {
+                // "base <b> size <n> ucode_hash <h> udwords ..."
+                let v: Vec<&str> = rest.split_whitespace().collect();
+                // rest = "<base> size <n> ucode_hash <h> udwords ..."
+                let n: usize = v.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
+                vs_consts.insert(cur_draw, vec![[0.0f32; 4]; n]);
+                in_vs = true;
+                continue;
+            }
+            if in_vs {
+                if let Some(num) = t2.strip_prefix("vs").and_then(|r| r.split_whitespace().next()).and_then(|x| x.parse::<usize>().ok()) {
+                    let vals: Vec<f32> = t2.split_whitespace().skip(1).take(4).filter_map(|x| x.parse().ok()).collect();
+                    if vals.len() == 4 {
+                        if let Some(arr) = vs_consts.get_mut(&cur_draw) {
+                            if let Some(slot) = arr.get_mut(num) {
+                                *slot = [vals[0], vals[1], vals[2], vals[3]];
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+            if let Some(rest) = t2.strip_prefix("texfetch ") {
+                if let Some(tf) = rest.split_whitespace().next().and_then(|v| v.parse::<u32>().ok()) {
+                    fetches.entry(cur_draw).or_default().insert(tf);
+                }
+            }
+        }
+        // Plan v14 phase 2.2: the dump spans many frames, so a draw's camera must match the capture's. The camera is
+        // the c10 row (clip.w is a direct affine function of world position with rows c0,c1,c9,c10 -- MODLOG 390), so
+        // draws cluster by it and only the dominant cluster is the frame we compare against.
+        let mut clusters: std::collections::HashMap<[u32; 4], usize> = std::collections::HashMap::new();
+        for vs in vs_consts.values() {
+            if vs.len() > 10 {
+                *clusters.entry(vs[10].map(|x| x.to_bits())).or_insert(0) += 1;
+            }
+        }
+        let dominant: Option<[u32; 4]> = clusters.iter().max_by_key(|(_, n)| **n).map(|(k, _)| *k);
+        println!(
+            "scan: {} draws with pixel-shader microcode in {}, {} draws carry texture fetches, {} camera clusters (dominant {} draws)",
+            caps.len(), dpath, fetches.len(), clusters.len(), dominant.and_then(|k| clusters.get(&k)).copied().unwrap_or(0)
+        );
+        let mut ar = Archive::open(&a[1]).unwrap();
+        let entries = ar.entries.clone();
+        let mut found = 0usize;
+        for e in entries.iter() {
+            let lower = e.name.to_ascii_lowercase();
+            if !lower.ends_with(".rmb.bin") {
+                continue;
+            }
+            let Ok(d) = ar.read(e) else { continue };
+            let (Some(g), Some(dt)) = (section(&d, b".gpu"), section(&d, b".data")) else { continue };
+            let Ok(m) = fm2::parse_model(&d) else { continue };
+            let gpu = &d[0x190..0x190 + g];
+            let data = &d[0x190 + g..0x190 + g + dt];
+            let shaders = sh::tail_shaders(gpu, m.tail_start);
+            let pairs = sh::pair_groups(&sh::data_groups(data), &shaders);
+            for (gi, pr) in pairs.iter().enumerate() {
+                let Some(ps_index) = pr.1 else { continue };
+                let ps = &shaders[ps_index];
+                let words: Vec<u32> = (0..ps.dwords).filter_map(|k| be(gpu, ps.code_offset + 4 * k)).collect();
+                // Plan v15 B.1: a model's shader usually appears in many draws across many frames, and taking the
+                // first match described a frame that is not the reference. Prefer the draw in the DOMINANT camera
+                // cluster, falling back to the first match. (No content hash: `ucode_matches` accepts the captured
+                // shader as a PREFIX of the model's, so the two word vectors need not have equal length.)
+                let is_dominant = |d: &usize| {
+                    vs_consts
+                        .get(d)
+                        .map_or(false, |vs| vs.len() > 10 && Some(vs[10].map(|x| x.to_bits())) == dominant)
+                };
+                let hit = caps
+                    .iter()
+                    .find(|(d, _, _, w)| ucode_matches(w, &words) && is_dominant(d))
+                    .or_else(|| caps.iter().find(|(_, _, _, w)| ucode_matches(w, &words)));
+                if let Some((draw, _, _, _)) = hit {
+                    let max_stride = m.draws.iter().map(|d| d.stride).max().unwrap_or(0);
+                    let big = m.draws.iter().enumerate().max_by_key(|(_, d)| d.indices.len());
+                    // Plan v14 phase 2.2: sampler-set test -- the draw must bind every texture this shader samples.
+                    let samplers_v: Vec<u32> = sh::ps_samplers(ps).iter().map(|s| s.index).collect();
+                    let bound = fetches.get(draw).cloned().unwrap_or_default();
+                    let missing: Vec<u32> = samplers_v.iter().copied().filter(|x| !bound.contains(x)).collect();
+                    let model_ic = big.map(|(_, d)| d.indices.len()).unwrap_or(0);
+                    let draw_ic = index_counts.get(draw).copied().unwrap_or(0);
+                    // The third condition: the same piece of geometry has the same index count in both worlds. Exact,
+                    // and it needs no matrix convention (a transform test would need one).
+                    // The discriminator: do the model's world positions land on screen under THIS draw's transform?
+                    let on_screen = match (vs_consts.get(draw), big) {
+                        (Some(vs), Some((_, d))) if vs.len() > 10 && !d.positions.is_empty() => {
+                            // CALIBRATED against the game's own vertex shader: `dp4 oPos.x, r2.wzxy, c7.wzxy` and the
+                            // matching y/z/w lines use rows c7, c8, c9, c10. (MODLOG 390 said c0, c1 -- that was a
+                            // misread: c0/c1/c2 are the TANGENT basis in the same shader. Corrected in MODLOG 404.)
+                            let dot4 = |p: &[f32; 3], r: &[f32; 4]| p[0] * r[0] + p[1] * r[1] + p[2] * r[2] + r[3];
+                            let (mut mnx, mut mxx, mut mny, mut mxy) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                            let mut ok = true;
+                            for p in &d.positions {
+                                let w = dot4(p, &vs[10]);
+                                if !(w > 1e-3) {
+                                    ok = false;
+                                    break;
+                                }
+                                let x = dot4(p, &vs[7]) / w;
+                                let y = dot4(p, &vs[8]) / w;
+                                mnx = mnx.min(x); mxx = mxx.max(x); mny = mny.min(y); mxy = mxy.max(y);
+                            }
+                            ok && mxx > -1.0 && mnx < 1.0 && mxy > -1.0 && mny < 1.0
+                        }
+                        _ => false,
+                    };
+                    // Plan v15 B.1: project the model's own vertices with THIS draw's captured transform
+                    // (rows c0, c1, c9, c10 -- MODLOG 390). Two areas are reported because they answer different
+                    // questions: the CLIPPED BBOX area says how much of the screen the object reaches, and the summed
+                    // triangle area says how much it would paint (it double-counts overlaps and runs away on wild
+                    // projections, so it is only trustworthy alongside the bbox and the behind-camera count).
+                    // World-space extent of the model's own vertices: a small extent means a small prop, a large one
+                    // means the projection is at fault. This separates "not the road" from "the transform is wrong".
+                    let world_ext = big.map(|(_, d)| {
+                        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                        for p in &d.positions {
+                            for k in 0..3 {
+                                lo[k] = lo[k].min(p[k]);
+                                hi[k] = hi[k].max(p[k]);
+                            }
+                        }
+                        [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]
+                    }).unwrap_or([0.0; 3]);
+                    let (tri_area, bbox_area, front, total_v) = match (vs_consts.get(draw), big) {
+                        (Some(vs), Some((_, d))) if vs.len() > 10 && !d.positions.is_empty() => {
+                            let dot4 = |p: &[f32; 3], r: &[f32; 4]| p[0] * r[0] + p[1] * r[1] + p[2] * r[2] + r[3];
+                            let n = d.positions.len();
+                            let mut proj = vec![[0f32; 3]; n];
+                            let mut front = 0usize;
+                            let (mut mnx, mut mxx, mut mny, mut mxy) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                            for (i, p) in d.positions.iter().enumerate() {
+                                let w = dot4(p, &vs[10]);
+                                if w <= 1e-3 {
+                                    proj[i] = [f32::NAN; 3];
+                                    continue;
+                                }
+                                front += 1;
+                                let x = dot4(p, &vs[7]) / w;
+                                let y = dot4(p, &vs[8]) / w;
+                                proj[i] = [x, y, w];
+                                mnx = mnx.min(x); mxx = mxx.max(x); mny = mny.min(y); mxy = mxy.max(y);
+                            }
+                            let mut tri_sum = 0f64;
+                            for t in d.indices.chunks_exact(3) {
+                                let (a0, a1, a2) = (t[0] as usize, t[1] as usize, t[2] as usize);
+                                if a0 >= n || a1 >= n || a2 >= n {
+                                    continue;
+                                }
+                                let (p0, p1, p2) = (proj[a0], proj[a1], proj[a2]);
+                                if p0[2].is_nan() || p1[2].is_nan() || p2[2].is_nan() {
+                                    continue;
+                                }
+                                let tri = ((p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1])).abs() * 0.5;
+                                tri_sum += tri.min(4.0) as f64;
+                            }
+                            let bbox = if front == 0 {
+                                0f64
+                            } else {
+                                let cx0 = mnx.max(-1.0) as f64;
+                                let cx1 = mxx.min(1.0) as f64;
+                                let cy0 = mny.max(-1.0) as f64;
+                                let cy1 = mxy.min(1.0) as f64;
+                                ((cx1 - cx0).max(0.0) * (cy1 - cy0).max(0.0)) * 0.25
+                            };
+                            (tri_sum * 0.25 * 1280.0 * 720.0, bbox * 1280.0 * 720.0, front, n)
+                        }
+                        _ => (0.0, 0.0, 0, 0),
+                    };
+                    let tri_area = tri_area as f32;
+                    let bbox_area = bbox_area as f32;
+                    let same_camera = vs_consts
+                        .get(draw)
+                        .map_or(false, |vs| vs.len() > 10 && Some(vs[10].map(|x| x.to_bits())) == dominant);
+                    let verdict = if !same_camera {
+                        "other-frame"
+                    } else if !missing.is_empty() {
+                        "samplers-not-bound"
+                    } else if draw_ic == model_ic && model_ic > 0 && on_screen {
+                        "PAIR4"
+                    } else if draw_ic == model_ic && model_ic > 0 {
+                        "index-count-same-but-offscreen"
+                    } else {
+                        "index-count-differs"
+                    };
+                    if rank_area {
+                        area_rows.push((
+                            bbox_area,
+                            same_camera,
+                            format!(
+                                "model {} group {} -> draw {}  bbox {:8.0} px  tri {:9.0} px  world {:.1}x{:.1}x{:.1}  front {}/{}  bigdraw {} model idx {} / draw idx {}  samplers {}  {}",
+                                e.name,
+                                gi,
+                                draw,
+                                bbox_area,
+                                tri_area,
+                                world_ext[0], world_ext[1], world_ext[2],
+                                front,
+                                total_v,
+                                big.map(|(i, _)| i).unwrap_or(0),
+                                model_ic,
+                                draw_ic,
+                                missing.is_empty(),
+                                if same_camera { "dominant-frame" } else { "other-frame" }
+                            ),
+                        ));
+                    }
+                    println!(
+                        "  [{}] model {} group {} -> dump draw {}  ({} draws, stride {:?}, biggest draw {} with {} indices, ps {} bytes, samplers {:?}, bound {:?})",
+                        verdict, e.name, gi, draw, m.draws.len(), m.draws.iter().map(|d| d.stride).collect::<std::collections::BTreeSet<_>>(), big.map(|(i, _)| i).unwrap_or(0), big.map(|(_, d)| d.indices.len()).unwrap_or(0), words.len() * 4, samplers_v, bound
+                    );
+                    let _ = max_stride;
+                    found += 1;
+                }
+            }
+        }
+        println!("scan: {} (model, group) pairs match a captured draw", found);
+        if rank_area {
+            area_rows.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
+            println!("scan: top {} by on-screen area (dominant-frame rows first among equals)", top_n.min(area_rows.len()));
+            for (_, dominant_row, line) in area_rows.iter().take(top_n) {
+                println!("  [AREA{}] {line}", if *dominant_row { " D" } else { " O" });
+            }
+        }
+        return;
+    }
+
     if a.iter().any(|x| x == "--render") {
         let i = a.iter().position(|x| x == "--render").unwrap();
         let di: usize = a.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -706,19 +1321,194 @@ fn main() {
         // Textures from the draw's PVS items, as `--pvs`/`--draw` does.
         let arg = |k: &str| -> Option<String> { a.iter().position(|x| x == k).and_then(|j| a.get(j + 1)).cloned() };
         let texdir = std::path::PathBuf::from(&a[4]);
+        // Plan v13 phase A: `--constants <dump>` puts the GAME's own pixel-shader constants in place of the
+        // importer's/drawn values + the track defaults above. The dump draw is chosen by ucode, so this refuses to
+        // apply constants captured for a different shader. `--dump-draw <n>` pins a specific draw instead.
+        if let Some(dpath) = arg("--constants") {
+            let pinned: Option<usize> = arg("--dump-draw").and_then(|v| v.parse().ok());
+            let found = if let Some(want) = pinned {
+                // A pinned draw is used only if its ucode matches; find_captured_ps matches on ucode anyway, so a
+                // pin that does not match returns nothing and the run refuses below.
+                find_captured_ps(&dpath, &words).filter(|(_, _, idx)| *idx == want)
+            } else {
+                find_captured_ps(&dpath, &words)
+            };
+            match found {
+                Some((base, vals, idx)) => {
+                    let mut n = 0usize;
+                    for (i, v) in vals.iter().enumerate() {
+                        // the dump writes the index RELATIVE to SQ_PS_CONST.base, and that index IS the shader's c#
+                        let reg = i as u32;
+                        if reg < 256 {
+                            consts.insert(reg, *v);
+                            n += 1;
+                        }
+                    }
+                    println!("  --constants: {n} pixel-shader constants from draw {idx} of {}", dpath);
+                }
+                None => {
+                    eprintln!("--constants: no draw in {dpath} has this shader's ucode (or --dump-draw does not match it); refusing to render with the wrong constants");
+                    return;
+                }
+            }
+        }
         let mut tex: HashMap<u32, Tex> = HashMap::new();
+        // Plan v14 phase 1.3: bind the GAME's own textures straight from Xenia's guest dumps. The dump index
+        // (Xenia's decode: format, dimensions, pitch, tiling, endianness) plus the draw's texfetch records give an
+        // exact address; `xds::untile` -- the importer's own reader -- turns the bytes into RGBA. No DDS matching.
+        let mut guest_bound: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        if let Some(gd) = arg("--textures-from") {
+            let gd = std::path::PathBuf::from(gd);
+            let mut fetch_addr: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+            if let Some(dp) = arg("--constants") {
+                let text = std::fs::read_to_string(&dp).unwrap_or_default();
+                let want: Option<usize> = arg("--constants-draw").and_then(|v| v.parse().ok());
+                let mut cur = 0usize;
+                let mut seen_draw = false;
+                for line in text.lines() {
+                    let t = line.trim();
+                    if let Some(rest) = t.strip_prefix("draw ") {
+                        cur = rest.split_whitespace().next().and_then(|v| v.parse().ok()).unwrap_or(0);
+                        seen_draw = true;
+                        continue;
+                    }
+                    if !seen_draw || want.map_or(false, |w| w != cur) {
+                        continue;
+                    }
+                    if let Some(rest) = t.strip_prefix("texfetch ") {
+                        let f: Vec<&str> = rest.split_whitespace().collect();
+                        if f.len() < 18 {
+                            continue;
+                        }
+                        let tf: u32 = f[0].parse().unwrap_or(u32::MAX);
+                        let d1 = u32::from_str_radix(f[2], 16).unwrap_or(0);
+                        fetch_addr.insert(tf, ((d1 >> 12) & 0xFFFFF) << 12);
+                    }
+                }
+            }
+            let mut index: std::collections::HashMap<u32, (u32, u32, u32, u32, bool, u32)> = std::collections::HashMap::new();
+            if let Ok(txt) = std::fs::read_to_string(gd.join("dump_index.txt")) {
+                for line in txt.lines() {
+                    let f: Vec<&str> = line.split_whitespace().collect();
+                    if f.len() < 12 {
+                        continue;
+                    }
+                    let base = u32::from_str_radix(f[0].split('_').next().unwrap_or(""), 16).unwrap_or(0);
+                    // The index is keyword/value pairs: name base B fmt F w W h H pitch P tiled T endian E dim D mips M ...
+                    // Reading it positionally (an earlier version) put the width in the format field and made the
+                    // filenames wrong (MODLOG 391's "f512_0x128").
+                    let kv = |k: &str| -> Option<u32> {
+                        f.iter().position(|x| *x == k).and_then(|i| f.get(i + 1)).and_then(|v| v.parse().ok())
+                    };
+                    let (Some(fmt), Some(w), Some(h)) = (kv("fmt"), kv("w"), kv("h")) else { continue };
+                    index.insert(
+                        base,
+                        (fmt, w, h, kv("pitch").unwrap_or(w), kv("tiled").unwrap_or(0) != 0, kv("endian").unwrap_or(0)),
+                    );
+                }
+            }
+            println!(
+                "  --textures-from: {} fetches (tf {:?}), {} dumps indexed; shader samplers {:?}",
+                fetch_addr.len(),
+                {
+                    let mut v: Vec<u32> = fetch_addr.keys().copied().collect();
+                    v.sort();
+                    v
+                },
+                index.len(),
+                samplers.iter().map(|s| s.index).collect::<Vec<_>>()
+            );
+            for sm in &samplers {
+                let Some(&base) = fetch_addr.get(&sm.index) else {
+                    continue;
+                };
+                let Some(&(fmt, w, h, pitch, tiled, endian)) = index.get(&base) else {
+                    println!("  tex slot {}: fetch {:08X} not in the dump index", sm.index, base);
+                    continue;
+                };
+                let name = format!("{base:08X}_f{fmt}_{w}x{h}.bin");
+                let Ok(bytes) = std::fs::read(gd.join(&name)) else {
+                    println!("  tex slot {}: {name} missing", sm.index);
+                    continue;
+                };
+                match fh1_formats::xds::untile(&bytes, fh1_formats::xds::Format::from_raw(fmt), w, h, pitch, tiled, endian) {
+                    Ok(img) => match fh1_formats::xds::to_rgba8(&img) {
+                        Ok(rgba) => {
+                            println!("  tex slot {} <- {name} ({w}x{h} fmt {fmt})", sm.index);
+                            guest_bound.insert(sm.index);
+                            tex.insert(sm.index, Tex { w: w as usize, h: h as usize, rgba });
+                        }
+                        Err(e) => println!("  tex slot {}: {name} cannot be converted ({e:?})", sm.index),
+                    },
+                    Err(e) => println!("  tex slot {}: {name} cannot be untiled ({e:?})", sm.index),
+                }
+            }
+        }
         if let Some(pp) = arg("--pvs") {
             let pvs = fm2::parse_pvs(&std::fs::read(pp).unwrap()).unwrap();
             let list = &pvs.models[model];
+            if std::env::var_os("FM2_RENDER_TEXDUMP").is_some() {
+                println!("  pvs model {model}: {} textures", list.len());
+                for (k, ti) in list.iter().enumerate().take(24) {
+                    let t = &pvs.textures[*ti as usize];
+                    let sz = match load_tex(&texdir_early.join(format!("{:08x}.dds", t.file_id))) {
+                        Some(img) => format!("{}x{}", img.w, img.h),
+                        None => "missing".to_string(),
+                    };
+                    let _ = &texdir;
+                    println!("    list[{k}] -> pvs texture {ti}: file {:08x} {sz}", t.file_id);
+                }
+                println!("  draw items: {:?}", dr.items);
+                println!("  sampler slots: {:?}", samplers.iter().map(|s| s.index).collect::<Vec<_>>());
+            }
             let mut slots: Vec<u32> = samplers.iter().map(|s| s.index).collect();
             slots.sort();
             slots.dedup();
             for (k, item) in dr.items.iter().enumerate() {
                 let Some(&slot) = slots.get(k) else { continue };
+                if guest_bound.contains(&slot) {
+                    // already bound from the game's own dump (plan v14 phase 1.3) -- do not overwrite it
+                    continue;
+                }
                 let Some(&ti) = list.get(*item as usize) else { continue };
                 let t = &pvs.textures[ti as usize];
                 if let Some(img) = load_tex(&texdir.join(format!("{:08x}.dds", t.file_id))) {
+                    // Which texture each sampler actually got, and how colourful it is: a neutral-grey binding is
+                    // exactly what a neutral-grey render looks like (MODLOG 371), so this is the check for it.
+                    let n = (img.w * img.h).max(1) as f32;
+                    let mut sum = [0.0f32; 3];
+                    for px in img.rgba.chunks_exact(4) {
+                        sum[0] += px[0] as f32;
+                        sum[1] += px[1] as f32;
+                        sum[2] += px[2] as f32;
+                    }
+                    println!(
+                        "  tex slot {slot}: file {:08x} {}x{} mean RGB [{:.0},{:.0},{:.0}]  (draw item {k} -> pvs texture {ti})",
+                        t.file_id, img.w, img.h, sum[0] / n, sum[1] / n, sum[2] / n
+                    );
                     tex.insert(slot, img);
+                } else {
+                    println!("  tex slot {slot}: file {:08x} NOT FOUND in {}", t.file_id, texdir.display());
+                }
+                // `FM2_RENDER_TEX0=<hex>` forces the texture bound to the first sampler, to test a binding without
+                // rebuilding: the road material's own diffuse is a 256x256 map, the draw's PVS item is a 32x32 grey
+                // placeholder (MODLOG 372).
+                if slot == 0 {
+                    if let Ok(hex) = std::env::var("FM2_RENDER_TEX0") {
+                        if let Ok(id) = u32::from_str_radix(hex.trim_start_matches("0x"), 16) {
+                            if let Some(img) = load_tex(&texdir.join(format!("{:08x}.dds", id))) {
+                                let n = (img.w * img.h).max(1) as f32;
+                                let mut sum = [0.0f32; 3];
+                                for px in img.rgba.chunks_exact(4) {
+                                    sum[0] += px[0] as f32;
+                                    sum[1] += px[1] as f32;
+                                    sum[2] += px[2] as f32;
+                                }
+                                println!("  tex slot 0 FORCED to {:08x} {}x{} mean RGB [{:.0},{:.0},{:.0}]", id, img.w, img.h, sum[0]/n, sum[1]/n, sum[2]/n);
+                                tex.insert(0, img);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -812,8 +1602,13 @@ fn main() {
         };
         let mut r = GpuResolver::default();
         let t = wgsl::translate(&blob, "fm2_ps", &mut r);
-        const W: u32 = 512;
-        const H: u32 = 512;
+        let vs_file = arg("--render-vs");
+        let mut W: u32 = 512;
+        let mut H: u32 = 512;
+        if vs_file.is_some() {
+            W = 1280;
+            H = 720;
+        }
         let mut src = String::from("diagnostic(off, derivative_uniformity);\n");
         src += wgsl::PRELUDE;
         src += "struct Fx { pc: array<vec4<f32>, 256>, r: array<vec4<f32>, 16>, b: array<vec4<u32>, 64>, i: array<vec4<i32>, 32> }\n";
@@ -826,9 +1621,58 @@ fn main() {
             };
             src += &format!("@group(1) @binding({k}) var t{tf}_{dim}: {ty};\n");
         }
+        // Plan v15: dump the translated pixel shader so the terms that use an interpolator can be read, not guessed.
+        if std::env::var_os("FM2_DUMP_PS").is_some() {
+            let path = format!("data/work/p14_ps_{}_{}.wgsl", model, group);
+            std::fs::write(&path, &t.code).ok();
+            println!("  PS code written to {path}");
+        }
+        // Plan v15 A2.1: which interpolator registers this pixel shader actually READS. The translator copies `i.rN`
+        // into a temp `rN`; a register that appears only in that assignment is declared-but-unused, so count the body
+        // tokens `rN` and subtract the one assignment.
+        {
+            let mut counts: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+            for tok in t.code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+                if let Some(num) = tok.strip_prefix('r') {
+                    if let Ok(n) = num.parse::<u32>() {
+                        if n < 16 {
+                            *counts.entry(n).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+            let genuinely: Vec<u32> = counts.iter().filter(|(_, c)| **c > 2).map(|(r, _)| *r).collect();
+            println!("  PS interpolator inputs actually read: {genuinely:?}   (token counts rN {counts:?})");
+        }
+        // The translated pixel shader itself. (This line was dropped when the PS-dump and input-print blocks above
+        // were inserted, which made the module reference `fm2_ps` without defining it -- every render failed with
+        // "no definition in scope for identifier: fm2_ps". Restored.)
         src += &t.code;
         // Our vertex shader: position through a fixed transform, and one varying per register that measurement
         // mapped. The number of varyings comes from the fit, not from a constant, so this works on any draw.
+        let nuv = reg_fits.len();
+        if vs_file.is_some() {
+            // Plan v13 phase A.3: the GAME's vertex transform, evaluated by the game's own shader (`--vs --vs-out`)
+            // and forwarded here as 17 vec4 per vertex -- the clip position then o0..o15. No fitted projection.
+            let mut vin = String::from("struct Vin { @location(0) p: vec4<f32>");
+            let mut vout = String::from("struct Vout { @builtin(position) pos: vec4<f32>");
+            // The game's z/w lands just outside wgpu's 0..1 clip range (measured: 0.998-0.999 on one
+            // draw, 1.002-1.008 on another, so whole draws were clipped away). No depth buffer here, so
+            // depth is flattened and only x/y/w are kept.
+            let mut body = String::from("@vertex fn vs(v: Vin) -> Vout {\n  var o: Vout;\n  o.pos = vec4<f32>(v.p.x, v.p.y, 0.5 * v.p.w, v.p.w);\n");
+            for k in 0..15 {
+                vin += &format!(", @location({}) o{k}: vec4<f32>", k + 1);
+                vout += &format!(", @location({k}) o{k}: vec4<f32>");
+                body += &format!("  o.o{k} = v.o{k};\n");
+            }
+            vin += " };\n";
+            vout += " };\n";
+            body += "  return o;\n}\n";
+            src += &vin;
+            src += &vout;
+            src += &body;
+            println!("  vertex: the GAME's own outputs (--render-vs), no fitted projection");
+        } else {
         let nuv = reg_fits.len();
         let mut vin = String::from("struct Vin { @location(0) p: vec3<f32>");
         let mut vout = String::from("struct Vout { @builtin(position) pos: vec4<f32>");
@@ -872,28 +1716,51 @@ fn main() {
             src += &format!("  o.uv{k} = v.uv{k};\n");
         }
         src += "  return o;\n}\n";
+        }
         // The pixel shader: every register measurement could map gets its own varying; the rest get a constant that is
         // INFERRED, because the disc does not carry them (MODLOG 269/270).
         src += "@fragment fn main(o: Vout, @builtin(front_facing) ff: bool) -> @location(0) vec4<f32> {\n";
         src += "  var i: FxPsIn;\n";
-        for (k, f) in reg_fits.iter().enumerate() {
-            src += &format!("  i.r{} = vec4<f32>(o.uv{k}, 0.0, 1.0);\n", f.0);
-        }
-        for reg in 0..16usize {
-            if reg_fits.iter().any(|f| f.0 as usize == reg) {
-                continue;
+        if vs_file.is_some() {
+            // The interpolator registers the game's vertex shader exported, by index -- not a UV guess.
+            for reg in 0..15usize {
+                src += &format!("  i.r{reg} = o.o{reg};\n");
             }
-            if std::env::var("FM2_RENDER_NEUTRAL").is_ok() {
-                src += &format!("  i.r{reg} = vec4<f32>(0.5, 0.5, 0.5, 1.0);\n");
-            } else {
-                src += &format!("  i.r{reg} = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n");
+            src += "  i.r15 = vec4<f32>(0.0);\n";
+            src += "  i.vpos = o.pos; i.front_facing = ff;\n";
+        } else {
+            for (k, f) in reg_fits.iter().enumerate() {
+                src += &format!("  i.r{} = vec4<f32>(o.uv{k}, 0.0, 1.0);\n", f.0);
             }
+            for reg in 0..16usize {
+                if reg_fits.iter().any(|f| f.0 as usize == reg) {
+                    continue;
+                }
+                if std::env::var("FM2_RENDER_NEUTRAL").is_ok() {
+                    src += &format!("  i.r{reg} = vec4<f32>(0.5, 0.5, 0.5, 1.0);\n");
+                } else {
+                    src += &format!("  i.r{reg} = vec4<f32>(0.0, 0.0, 0.0, 1.0);\n");
+                }
+            }
+            src += "  i.vpos = vec4<f32>(0.0); i.front_facing = ff;\n";
         }
-        src += "  i.vpos = vec4<f32>(0.0); i.front_facing = ff;\n";
+
         if std::env::var("FM2_RENDER_FLAT").is_ok() {
             // Geometry check only: paint the interpolated coordinate instead of running the shader, so "nothing
             // drawn" can be told apart from "the shader returned black".
             src += "  return vec4<f32>(fract(o.uv0 * 8.0), 0.0, 1.0);\n}\n";
+        } else if let Ok(mode) = std::env::var("FM2_RENDER_PROBE") {
+            // Plan v15: render one of the shader's own inputs as the colour, so "the constant reaches the shader"
+            // can be tested inside the shader rather than inferred from the buffer contents.
+            let expr = match mode.as_str() {
+                "c114" => "fx.pc[114]",
+                "c32" => "fx.pc[32]",
+                "r0" => "i.r0",
+                "r1" => "i.r1",
+                "r2x" => "vec4<f32>(i.r2.xxx, 1.0)",
+                _ => "vec4<f32>(1.0, 0.0, 1.0, 1.0)",
+            };
+            src += &format!("  return vec4<f32>({expr}.xyz, 1.0);\n}}\n");
         } else {
             src += "  return fm2_ps(i).c0;\n}\n";
         }
@@ -911,14 +1778,34 @@ fn main() {
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("fm2_render"), ..Default::default() })).unwrap();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: None, source: wgpu::ShaderSource::Wgsl(src.into()) });
 
-        // Vertex buffer: position, then one fitted coordinate pair per mapped register.
-        let mut vb: Vec<f32> = Vec::with_capacity(dr.positions.len() * (3 + 2 * nuv));
-        for v in 0..dr.positions.len() {
-            let base = v * dr.stride;
-            let f = |o: usize| f32::from_bits(be(&dr.vertices, base + o).unwrap_or(0));
-            vb.extend_from_slice(&[f(0), f(4), f(8)]);
-            for f2 in &reg_fits {
-                vb.extend_from_slice(&[f2.2 * sig(f2.1, v, true) + f2.3, f2.4 * sig(f2.1, v, false) + f2.5]);
+        // Vertex buffer: either the fitted position+uv layout, or (--render-vs) the game's own 17 vec4 per vertex.
+        let mut vb: Vec<f32> = Vec::new();
+        if let Some(p) = &vs_file {
+            let text = std::fs::read_to_string(p).expect("--render-vs file");
+            let mut got = 0usize;
+            for line in text.lines() {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                if f.len() != 6 || f[0] == "vs_out" { continue; }
+                let v: usize = f[0].parse().unwrap_or(usize::MAX);
+                let reg: usize = f[1].parse().unwrap_or(usize::MAX);
+                if v == usize::MAX || reg >= 17 { continue; }
+                let need = (v + 1) * 17 * 4;
+                if vb.len() < need { vb.resize(need, 0.0); }
+                for k in 0..4 {
+                    vb[(v * 17 + reg) * 4 + k] = f[2 + k].parse().unwrap_or(0.0);
+                }
+                got = got.max(v + 1);
+            }
+            println!("  --render-vs: {} vertices from {}", got, p);
+        } else {
+            vb.reserve(dr.positions.len() * (3 + 2 * nuv));
+            for v in 0..dr.positions.len() {
+                let base = v * dr.stride;
+                let f = |o: usize| f32::from_bits(be(&dr.vertices, base + o).unwrap_or(0));
+                vb.extend_from_slice(&[f(0), f(4), f(8)]);
+                for f2 in &reg_fits {
+                    vb.extend_from_slice(&[f2.2 * sig(f2.1, v, true) + f2.3, f2.4 * sig(f2.1, v, false) + f2.5]);
+                }
             }
         }
         let vbuf = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (vb.len() * 4) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
@@ -931,6 +1818,33 @@ fn main() {
             for (k, x) in v.iter().enumerate() {
                 ub[*reg as usize * 16 + k * 4..*reg as usize * 16 + k * 4 + 4].copy_from_slice(&x.to_le_bytes());
             }
+        }
+        // Probe (plan v15): what the render actually uploads for the constants the PS reads.
+        {
+            let read = |reg: usize, b: &Vec<u8>| -> [f32; 4] {
+                let mut v = [0f32; 4];
+                for c in 0..4 {
+                    v[c] = f32::from_le_bytes(b[reg * 16 + c * 4..reg * 16 + c * 4 + 4].try_into().unwrap());
+                }
+                v
+            };
+            println!(
+                "  uniform probe (render): consts[114] {:?}  ub[114] {:?}  ub[32] {:?}  consts count {}",
+                consts.get(&114),
+                read(114, &ub),
+                read(32, &ub),
+                consts.len()
+            );
+        }
+        // Plan v15: zero ONE constant to test whether it is additive or cancels. The dumped shader has
+        // `r0 = r1.yzx * r0 + (-c114)` followed by `out.c0 = r0 * r2.x + c114`, which is a lerp toward c114, not an
+        // additive floor -- this probe decides it by measurement instead of by reading.
+        if let Ok(s) = std::env::var("FM2_ZERO_CONST") {
+            let reg: usize = s.parse().unwrap_or(0);
+            for b in &mut ub[reg * 16..(reg + 1) * 16] {
+                *b = 0;
+            }
+            println!("  probe: zeroed constant c{reg} before upload");
         }
         let uniform = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: ub.len() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         queue.write_buffer(&uniform, 0, &ub);
@@ -993,15 +1907,24 @@ fn main() {
         let entries: Vec<wgpu::BindGroupEntry> = views.iter().enumerate().map(|(k, v)| wgpu::BindGroupEntry { binding: k as u32, resource: wgpu::BindingResource::TextureView(v) }).collect();
         let bg1 = device.create_bind_group(&wgpu::BindGroupDescriptor { label: None, layout: &bgl1, entries: &entries });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl0), Some(&bgl1)], immediate_size: 0 });
-        let mut attrs: Vec<wgpu::VertexAttribute> = vec![wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 }];
-        for k in 0..nuv {
-            attrs.push(wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x2,
-                offset: 12 + 8 * k as u64,
-                shader_location: k as u32 + 1,
-            });
+        let mut attrs: Vec<wgpu::VertexAttribute> = Vec::new();
+        let vstride: u64;
+        if vs_file.is_some() {
+            for k in 0..16u64 {
+                attrs.push(wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: k * 16, shader_location: k as u32 });
+            }
+            vstride = 17 * 16;
+        } else {
+            attrs.push(wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 });
+            for k in 0..nuv {
+                attrs.push(wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 12 + 8 * k as u64,
+                    shader_location: k as u32 + 1,
+                });
+            }
+            vstride = (3 + 2 * nuv) as u64 * 4;
         }
-        let vstride = (3 + 2 * nuv) as u64 * 4;
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: None,
             layout: Some(&pl),
@@ -1073,6 +1996,19 @@ fn main() {
         let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         let px = staging.slice(..).get_mapped_range().to_vec();
         // Write a PPM (no encoder needed) and report coverage + colour.
+        // `--out-space=srgb` encodes the shader's value to sRGB before writing; the default (raw) writes it as-is, which
+        // is the convention the game uses for its own framebuffer (plan v14 phase 0). Which one is right is measured,
+        // not assumed: the same draw is rendered both ways and compared with the reference.
+        let out_srgb = a.iter().any(|x| x == "--out-space=srgb");
+        let enc = |v: f32| -> u8 {
+            let x = v.clamp(0.0, 1.0);
+            let y = if out_srgb {
+                if x <= 0.0031308 { x * 12.92 } else { 1.055 * x.powf(1.0 / 2.4) - 0.055 }
+            } else {
+                x
+            };
+            (y * 255.0).round().clamp(0.0, 255.0) as u8
+        };
         let mut ppm = format!("P3\n{W} {H}\n255\n").into_bytes();
         let (mut covered, mut sum) = (0usize, [0.0f64; 3]);
         for y in 0..H {
@@ -1086,7 +2022,7 @@ fn main() {
                         sum[k] += c[k] as f64;
                     }
                 }
-                ppm.extend_from_slice(format!("{} {} {} ", (c[0].clamp(0.0, 1.0) * 255.0) as u8, (c[1].clamp(0.0, 1.0) * 255.0) as u8, (c[2].clamp(0.0, 1.0) * 255.0) as u8).as_bytes());
+                ppm.extend_from_slice(format!("{} {} {} ", enc(c[0]), enc(c[1]), enc(c[2])).as_bytes());
             }
         }
         std::fs::write("data/work/fm2_draw.ppm", &ppm).ok();
