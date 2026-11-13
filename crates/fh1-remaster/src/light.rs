@@ -290,7 +290,25 @@ fn setup_camera(mut commands: Commands, cams: Query<Entity, (With<FxPostCamera>,
             let intensity = bloom.and_then(|v| v.parse().ok()).unwrap_or(0.12);
             // P8-B: 256 px top mip (Bevy 512; 15's GPU analysis). FH1_RM_BLOOM_MIP=n, 512 = old.
             let mip = std::env::var("FH1_RM_BLOOM_MIP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(256).clamp(64, 2048);
-            c.insert(Bloom { intensity, max_mip_dimension: mip, ..Bloom::NATURAL });
+            // `FH1_FM2_BLOOM=1` (plan v12 phase 5.1, MODLOG 355): the track's own bloom numbers from TrackSettings.xml
+            // (bloomCutoff / bloomScale), mapped onto Bevy's bloom as threshold / additive amount. It is a MAPPING, not
+            // the game's algorithm: Bevy has no equivalent of `bloomPersist` (a temporal accumulation), and the game's
+            // three-pass shape is not reproduced. Measured before it is ever on by default.
+            if std::env::var("FH1_FM2_BLOOM").is_ok_and(|v| v == "1") {
+                let cutoff = env_f32("FH1_FM2_BLOOM_CUTOFF", 0.651).clamp(0.0, 4.0);
+                let scale = env_f32("FH1_FM2_BLOOM_SCALE", 0.25).clamp(0.0, 4.0);
+                let mut b = Bloom {
+                    intensity: scale,
+                    max_mip_dimension: mip,
+                    composite_mode: bevy::post_process::bloom::BloomCompositeMode::Additive,
+                    ..Bloom::NATURAL
+                };
+                b.prefilter.threshold = cutoff;
+                b.prefilter.threshold_softness = 0.0;
+                c.insert(b);
+            } else {
+                c.insert(Bloom { intensity, max_mip_dimension: mip, ..Bloom::NATURAL });
+            }
         }
         if atmosphere_on() {
             c.insert(remaster_atmosphere_settings());

@@ -361,6 +361,21 @@ fn setting_colour(settings: &ShaderSettings, technique: &str, names: &[&str]) ->
 
 /// A technique's `PaintScale` (x), the game's scale on the atlas colour (Corrado matte_colors 0.08 = the black rear
 /// panel; emblem 0.4; lamps 0.3-0.7). 1 when missing or with FH1_RM_PAINTSCALE=0.
+/// `FH1_RM_PAINT_GAME=1` (plan v11, docs/DESIGN.md §12): the game's **whole** car-lighting path at once -- SH diffuse
+/// instead of Bevy's ambient, both lobes from the paint settings, the cube with `CubeMultiplier`, the raw hemisphere
+/// and the car's sun ratio. The individual switches stay for isolated A/B; this one turns them all on together,
+/// because MODLOG 336's four variants each moved one axis and only the complete path was never measured.
+pub(crate) fn paint_game() -> bool {
+    std::env::var("FH1_RM_PAINT_GAME").is_ok_and(|v| v == "1")
+}
+
+/// `FH1_RM_PAINT_ABLATE=diffuse,lobes,cube,sun` (MODLOG 344): with the whole game path on, switch one term **off**
+/// at a time, to find which input owns the overshoot. An ablation is not a variant of the paint -- it is the
+/// complete path minus one term, so the difference it makes is that term's contribution *inside* the path.
+pub(crate) fn ablated(term: &str) -> bool {
+    std::env::var("FH1_RM_PAINT_ABLATE").is_ok_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(term)))
+}
+
 fn paint_scale(settings: &ShaderSettings, technique: &str) -> f32 {
     if std::env::var("FH1_RM_PAINTSCALE").is_ok_and(|v| v == "0") {
         return 1.0;
@@ -376,7 +391,11 @@ fn paint_scale(settings: &ShaderSettings, technique: &str) -> f32 {
 /// not "0"**, so the term cannot change anything before it has been measured; the variable may also be a number,
 /// overriding the amount.
 fn specular2(settings: &ShaderSettings, technique: &str) -> bevy::math::Vec3 {
-    let Ok(mode) = std::env::var("FH1_RM_PAINT_SPEC2") else { return bevy::math::Vec3::ZERO };
+    if ablated("lobes") {
+        return bevy::math::Vec3::ZERO;
+    }
+    let mode = std::env::var("FH1_RM_PAINT_SPEC2").ok().or_else(|| paint_game().then(|| "1".to_string()));
+    let Some(mode) = mode else { return bevy::math::Vec3::ZERO };
     if mode == "0" {
         return bevy::math::Vec3::ZERO;
     }
@@ -387,7 +406,17 @@ fn specular2(settings: &ShaderSettings, technique: &str) -> bevy::math::Vec3 {
     let amount = t.and_then(|t| t.get("SpecularAmount2")).map_or(0.0, |v| v[0]);
     let power = t.and_then(|t| t.get("SpecularPower2")).map_or(0.0, |v| v[0]);
     let colour = t.and_then(|t| t.get("SpecularColor")).map_or(1.0, |v| v[0]);
-    let amount = mode.parse::<f32>().unwrap_or(amount);
+    // `FH1_RM_PAINT_SPEC_COLOUR` overrides the lobe's SpecularColor for the ablation of MODLOG 344/345.
+    let colour = std::env::var("FH1_RM_PAINT_SPEC_COLOUR").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(colour);
+    // `"1"` is the SWITCH (MODLOG 350, correcting 347): the amount must stay whatever the car's own file says --
+    // for the R34 in every reference capture that is 4.0, and forcing 1.0 ran the game's lobe at a quarter of it.
+    // Any other number is an explicit amount override, for an ablation.
+    let amount = if mode.trim() == "1" { amount } else { mode.parse::<f32>().unwrap_or(amount) };
+    if std::env::var_os("FH1_RM_PAINT_LOG").is_some() {
+        // What the lobe actually resolves to for this car (MODLOG 347): the file chain can silently give a value
+        // other than the disc's own (the FM2 Corrado's own settings say Amount2 = 0).
+        println!("[paint] technique {technique}: amount2 {amount} power2 {power} colour {colour}");
+    }
     if amount <= 0.0 || power <= 0.0 {
         bevy::math::Vec3::ZERO
     } else {
@@ -399,7 +428,7 @@ fn specular2(settings: &ShaderSettings, technique: &str) -> bevy::math::Vec3 {
 /// sets the amount to 0 (a metallic paint's sheen is the second lobe), Normal.xml sets both lobes to 0 (the highlight
 /// is then the cube alone). Zero unless `FH1_RM_PAINT_SPEC2` is set, like [`specular2`].
 fn specular1(settings: &ShaderSettings, technique: &str) -> bevy::math::Vec2 {
-    if std::env::var("FH1_RM_PAINT_SPEC2").map_or(true, |v| v == "0") {
+    if ablated("lobes") || (!paint_game() && std::env::var("FH1_RM_PAINT_SPEC2").map_or(true, |v| v == "0")) {
         return bevy::math::Vec2::ZERO;
     }
     let t = settings
@@ -519,6 +548,11 @@ fn update_car_fill(tod: Option<Res<fh1_render::lighting::FxTimeOfDay>>, mut fill
         LinearRgba::rgb(v.x, v.y, v.z)
     };
     let want = CarFill { top, bottom: c("HLBottomColour"), raw_top: raw("HLTopColour"), raw_bottom: raw("HLBottomColour") };
+    if std::env::var_os("FH1_RM_CAR_FILL_LOG").is_some() {
+        // What the car's hemisphere actually is (MODLOG 346): the raw pair the specular lobes multiply, and the
+        // scaled pair the diffuse uses. For an FM2 map these come from the *fallback* TimeOfDay file.
+        println!("[car fill] raw top {:?} raw bottom {:?} scale k = {k}", want.raw_top.to_vec3(), want.raw_bottom.to_vec3());
+    }
     let moved = |a: LinearRgba, b: LinearRgba| {
         (a.to_vec3() - b.to_vec3()).abs().max_element() > 0.02 * b.to_vec3().max_element().max(1e-4) || (a.alpha - b.alpha).abs() > 0.01
     };
@@ -627,7 +661,7 @@ fn restyle_car_materials(
                         // `FH1_RM_PAINT_GAME_SPEC=1` (MODLOG 333): the game's body shader has no PBR specular -- its paint's
                         // highlights are the two game lobes plus the cube -- so driving the lobes and leaving Bevy's own
                         // specular on double-counts it (MODLOG 332 measured the double count). This turns Bevy's off.
-                        if std::env::var("FH1_RM_PAINT_GAME_SPEC").is_ok_and(|v| v == "1") {
+                        if paint_game() || std::env::var("FH1_RM_PAINT_GAME_SPEC").is_ok_and(|v| v == "1") {
                             base.metallic = 0.0;
                             base.reflectance = 0.0;
                             base.clearcoat = 0.0;
@@ -635,8 +669,15 @@ fn restyle_car_materials(
                         // Paint albedo scale. c3 (2026-10-06) measured the raw Combo_Colors colour ~0.6 EV too bright under
                         // the TrackSettings-shadow-azimuth sun; with the TOD sun + frame EV (2026-10-07) the raw colour
                         // matches faithful on sunlit panels (roof 0.82x, hood 0.90x vs 0.64x / 0.78x at 0.6).
-                        // FH1_RM_PAINT_ALBEDO=0.6 = old.
-                        colour = colour * env_f32("FH1_RM_PAINT_ALBEDO", 1.0);
+                        // 1.0 -> 0.85 on 2026-11-08 (PLAN P3, MODLOG 449): with the car measured at the GAME's own
+                        // car pixels (parity.py car_ratio), 0.85 improves three of the four reliable tracks
+                        // (1.50/1.66/1.18 -> 1.42/1.55/1.07) and the twelve-track band total 16.84 -> 16.67.
+                        // 0.85 -> 0.6 on 2026-11-09 (fifth pass, MODLOG 508): 0.85 was FITTED; 0.6 is the game's own
+                        // `ColorScale` for the `body` technique in FM2's Media/cars/ShaderSettings/Normal.xml
+                        // (MODLOG 10470). Tsukuba car luminance 1.42 -> 1.26 and sum |ln| 0.35 -> 0.23, every channel
+                        // better (R 1.45->1.40, G 1.20->1.12, B 1.18->1.03). Provenance over fit: darker values keep
+                        // improving the metric, but going below the game's own number would be a calibration.
+                        colour = colour * env_f32("FH1_RM_PAINT_ALBEDO", 0.6);
                         if matte {
                             base.metallic = 0.0;
                             base.perceptual_roughness = 0.7;
@@ -664,7 +705,7 @@ fn restyle_car_materials(
                         spec1: {
                             let l1 = if matte { bevy::math::Vec2::ZERO } else { specular1(&settings, &name.0) };
                             // z = the game-diffuse flag, w = its scale (`FH1_RM_PAINT_GAME_DIFFUSE` / `_DIFF_SH`).
-                            let flag = std::env::var("FH1_RM_PAINT_GAME_DIFFUSE").is_ok_and(|v| v == "1");
+                            let flag = (paint_game() && !ablated("diffuse")) || std::env::var("FH1_RM_PAINT_GAME_DIFFUSE").is_ok_and(|v| v == "1");
                             let scale = env_f32("FH1_RM_PAINT_DIFF_SH", 1.0);
                             bevy::math::Vec4::new(l1.x, l1.y, if flag { 1.0 } else { 0.0 }, scale)
                         },

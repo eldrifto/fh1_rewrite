@@ -62,6 +62,20 @@ fn to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3<f32>(0.0031308));
 }
 
+// FH1_RM_POST_CODED=1 (MODLOG 480): the FM2 combine's input is read as ALREADY gamma-coded (no sRGB encode on the way
+// in). The game's scene buffer is gamma-coded, and FM2 scenery outputs its display-coded product, so without this the
+// combine encodes it a second time -- which lifts shadows and crushes highlights.
+const RM_POST_CODED: f32 = RM_POST_CODED_V;
+// T3 (MODLOG 493): apply the combine's tint in linear light rather than on the codes.
+const RM_TINT_LINEAR: f32 = RM_TINT_LINEAR_V;
+
+fn to_code(c: vec3<f32>) -> vec3<f32> {
+    if (RM_POST_CODED > 0.5) {
+        return clamp(c, vec3<f32>(0.0), vec3<f32>(8.0));
+    }
+    return to_srgb(clamp(c, vec3<f32>(0.0), vec3<f32>(8.0)));
+}
+
 fn from_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
 }
@@ -81,10 +95,17 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
         // white point, gamma, boost).
         // The game's scene buffer holds gamma-coded values (a 360 render target written with the console's gamma), and the whole combine
         // (desaturate, tint, curve, the average that picks the curve) works on those codes: convert in, and back out for the display.
-        var x = to_srgb(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(8.0)));
+        var x = to_code(c.rgb);
         let l = dot(x, p.lum.xyz);
         // `p.m.w` (FH1_FM2_SAT, INFERRED): extra saturation about the luminance; the Xenia shots are about 1.4x as colourful as the plain combine.
-        x = (vec3<f32>(l) + (x - vec3<f32>(l)) * p.m.y) * p.tint.xyz;
+        x = vec3<f32>(l) + (x - vec3<f32>(l)) * p.m.y;
+        // The track's `DesatPostMod` tint. `FH1_FM2_TINT_LINEAR=1` (T3, MODLOG 493) applies it in linear light -- i.e. as
+        // tint^2.2 on the codes -- instead of a plain multiply on the codes, which is the other way the game could use it.
+        if RM_TINT_LINEAR > 0.5 {
+            x = to_code(from_srgb(clamp(x, vec3<f32>(0.0), vec3<f32>(1.0))) * p.tint.xyz);
+        } else {
+            x = x * p.tint.xyz;
+        }
         // The extra saturation turns about the true luminance, so it leaves the brightness the curve sees alone.
         let y0 = dot(x, vec3<f32>(0.2125, 0.7154, 0.0721));
         x = max(vec3<f32>(y0) + (x - vec3<f32>(y0)) * p.m.w, vec3<f32>(0.0));
@@ -98,7 +119,7 @@ fn fragment(in: VsOut) -> @location(0) vec4<f32> {
             for (var gy = 0; gy < 6; gy = gy + 1) {
                 for (var gx = 0; gx < 8; gx = gx + 1) {
                     let sc = textureSampleLevel(src, src_s, vec2<f32>((f32(gx) + 0.5) / 8.0, (f32(gy) + 0.5) / 6.0), 0.0).rgb;
-                    sum = sum + dot(to_srgb(clamp(sc, vec3<f32>(0.0), vec3<f32>(8.0))), vec3<f32>(0.2125, 0.7154, 0.0721));
+                    sum = sum + dot(to_code(sc), vec3<f32>(0.2125, 0.7154, 0.0721));
                 }
             }
             avg = sum / 48.0;
@@ -249,7 +270,11 @@ pub(crate) fn plugin(app: &mut App) {
     })
         .add_plugins(ExtractResourcePlugin::<GradeSettings>::default())
         .add_systems(PostUpdate, follow_lut);
-    let shader = app.world_mut().resource_mut::<Assets<Shader>>().add(Shader::from_wgsl(GRADE_WGSL, "fh1_remaster/grade.wgsl"));
+    // RM_POST_CODED_V is filled from the environment at start-up (see RM_POST_CODED in the shader).
+    let coded = if std::env::var("FH1_RM_POST_CODED").is_ok_and(|v| v == "1") { "1.0" } else { "0.0" };
+    let tint_lin = if std::env::var("FH1_FM2_TINT_LINEAR").is_ok_and(|v| v == "1") { "1.0" } else { "0.0" };
+    let src = GRADE_WGSL.replace("RM_POST_CODED_V", coded).replace("RM_TINT_LINEAR_V", tint_lin);
+    let shader = app.world_mut().resource_mut::<Assets<Shader>>().add(Shader::from_wgsl(src, "fh1_remaster/grade.wgsl"));
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
     let entries = [
         texture_2d(TextureSampleType::Float { filterable: true }).build(0, ShaderStages::FRAGMENT),

@@ -872,7 +872,9 @@ pub fn read_dds_bytes(b: &[u8]) -> Option<Image> {
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
         mipmap_filter: ImageFilterMode::Linear,
-        anisotropy_clamp: 8,
+        // The game's own sampler is aniso 8 (MODLOG, T2). `FH1_TEX_ANISO` tests other values: the near-field
+        // detail deficit is distance-dependent (far field 1.06, near 0.54), which is a mip-selection signature.
+        anisotropy_clamp: std::env::var("FH1_TEX_ANISO").ok().and_then(|v| v.parse().ok()).unwrap_or(8),
         ..ImageSamplerDescriptor::linear()
     });
     Some(image)

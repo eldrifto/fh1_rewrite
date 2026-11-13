@@ -151,7 +151,12 @@ impl RemasterScenery {
         let mut base = material::base(&r, mirrored);
         for (role, t) in r.tex.iter().enumerate() {
             if let Some(id) = t {
-                let srgb = r.srgb & (1 << role) != 0;
+                // The record's srgb word never sets bit 8 on any of the five tracks checked (MODLOG 480), so the lightmap
+                // is uploaded raw even though the game's lerp treats it as a display-coded value. FH1_RM_LM_SRGB=1 tests
+                // decoding it, which is what our linear pipeline needs if the value really is display-coded.
+                let lm_srgb = role == material::ROLE_LM
+                    && std::env::var("FH1_RM_LM_SRGB").is_ok_and(|v| v == "1");
+                let srgb = r.srgb & (1 << role) != 0 || lm_srgb;
                 let h = self.image(track, *id, srgb, role);
                 if role == ROLE_A && r.class == Class::Cutout {
                     base.base_color_texture = Some(h.clone());
@@ -191,6 +196,12 @@ impl RemasterScenery {
         let track = self.track(scenery_dir)?;
         let r = self.tracks[track].records.get(game_material as usize)?;
         let two_sided = r.flags & material::FLAG_TWO_SIDED != 0 || r.class == Class::Water;
+        // FH1_RM_MAT_DBG=1 (S2, MODLOG 458): one line per material record actually used, with what decides its
+        // brightness -- the class (Unlit is not lit at all), the texture it samples, and its flags.
+        if std::env::var_os("FH1_RM_MAT_DBG").is_some() {
+            info!("scenery mat {:5}: class {:?} two {} tex0 {:?} flags {:#06x}",
+                  game_material, r.class, two_sided, r.tex[0], r.flags);
+        }
         Some((r.class, two_sided))
     }
 

@@ -90,8 +90,12 @@ pub fn decal_mask_on() -> bool {
     *ON.get_or_init(|| std::env::var("FH1_RM_DECAL_MASK").is_ok_and(|v| v == "1"))
 }
 
-/// OPT-IN `FH1_RM_CUTOUT_A2C=1` (MODLOG 122/123): FM2 cut-outs (lightmap materials) use the game's own alpha-to-coverage (its draws set `D3DRS 0x150`)
-/// instead of an alpha test; needs MSAA (`FH1_AA=msaa4`), without it Bevy falls back to a plain 0.5 mask.
+/// FM2 cut-outs use the game's own alpha-to-coverage (its draws set `D3DRS 0x150`) instead of an alpha test.
+///
+/// **OPT-IN again since 2026-11-09 (MODLOG 465).** Enabling it as the default on 2026-11-09 (MODLOG 459) improved the
+/// Silverstone chain-link fence from 1.35x to 1.26x, but the same change took the Nordschleife tree canopy from **2.65x
+/// to 7.51x** -- one cutout better, another four times worse. It is reverted until the two can be separated.
+/// `FH1_RM_CUTOUT_A2C=1` still enables it for experiments.
 pub fn cutout_a2c() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("FH1_RM_CUTOUT_A2C").is_ok_and(|v| v == "1"))
@@ -413,6 +417,12 @@ fn wgsl() -> String {
     let mut decl_bindless = String::from("struct SceneryIndices {\n    material: u32,\n");
     let mut decl_plain = String::new();
     let mut samplers = String::new();
+    // `FH1_RM_MIP_BIAS` (<1 sharpens, >1 blurs): a multiplier on every texture gradient, i.e. a mip bias. Baked into
+    // the sampler helper here, at generation time: the helper string is built separately from `WGSL` and never passes
+    // through the `.replace` chain below, which is what made the first attempt fail to compile (MODLOG 537).
+    // DEFAULT 0.35 since MODLOG 540: twelve tracks, near-band detail median 0.92 with **8 of 12 at or above 0.85**
+    // (the gate), against 0.69 / 2 of 12 at 1.0, and the content-aware road mask unchanged (sum |ln| 5.02 vs 5.09).
+    let mip_bias: f32 = std::env::var("FH1_RM_MIP_BIAS").ok().and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.35).clamp(0.05, 8.0);
     for (k, name) in ROLES.iter().enumerate() {
         let (t, s) = (51 + 2 * k, 52 + 2 * k);
         decl_bindless += &format!("    {name}_texture: u32,\n    {name}_sampler: u32,\n");
@@ -423,9 +433,9 @@ fn wgsl() -> String {
             "fn sample_{name}(slot: u32, uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {{
 #ifdef BINDLESS
     let ix = scenery_indices[slot];
-    return textureSampleGrad(bindless_textures_2d[ix.{name}_texture], bindless_samplers_filtering[ix.{name}_sampler], uv, ddx, ddy);
+    return textureSampleGrad(bindless_textures_2d[ix.{name}_texture], bindless_samplers_filtering[ix.{name}_sampler], uv, ddx * {mip_bias:.4}, ddy * {mip_bias:.4});
 #else
-    return textureSampleGrad({name}_texture, {name}_sampler, uv, ddx, ddy);
+    return textureSampleGrad({name}_texture, {name}_sampler, uv, ddx * {mip_bias:.4}, ddy * {mip_bias:.4});
 #endif
 }}
 "
@@ -487,6 +497,12 @@ fn wgsl() -> String {
         .replace("RM_LM_LIGHT_FLOOR", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_FLOOR", 0.12)))
         .replace("RM_FM2_GAMMA_LM", &format!("{:.1}", wenv("FH1_RM_FM2_GAMMA_LM", 0.0)))
         .replace("RM_FM2_DBG", &format!("{:.1}", wenv("FH1_RM_FM2_DBG", 0.0)))
+        .replace("RM_SCENE_DBG", &format!("{:.1}", wenv("FH1_RM_SCENE_DBG", 0.0)))
+        .replace("RM_MATID", &format!("{:.1}", wenv("FH1_RM_MATID", 0.0)))
+        // MODLOG 481: write the scenery in linear light so the FM2 combine's to_srgb recovers the game's exact code.
+        .replace("RM_SCENE_LINEAR", &format!("{:.1}", wenv("FH1_RM_SCENE_LINEAR", 0.0)))
+        .replace("RM_LM_CODE", &format!("{:.1}", wenv("FH1_RM_LM_CODE", 0.0)))
+        .replace("RM_CUTOUT_ALPHA", &format!("{:.2}", wenv("FH1_RM_CUTOUT_ALPHA", 2.0)))
         .replace("RM_LM_LIGHT_EXPOSURE", &format!("{:.3}", wenv("FH1_RM_LM_LIGHT_EXPOSURE", 1.0)))
         // Plan v4 S1: the console worked in display-coded values; with raw textures the albedo is display-coded too.
         // Plan v4 S1b: 1 = raw albedo x display light term, converted to linear once; 2 = the same product passed through as
@@ -1056,6 +1072,10 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     // FM2 (FLAG_LM_LIGHT): the baked lightmap IS the lighting (it already contains the baked sun), so multiply the
     // albedo by it and output unlit below rather than adding Bevy's sun/ambient, which double-counts.
     let lm_light = (flags & FLAG_LM_LIGHT) != 0u;
+    // FH1_RM_SCENE_DBG (MODLOG 477): which branch this fragment takes. 0 = the material is not a lightmap material,
+    // 1 RAW>1.5, 2 RAW>0.5, 3 gamma, 4 linear (p3 set), 5 gain/bias fallback. Declared here, in the function's scope,
+    // so the debug block after the branch can read it (a nested declaration broke the pipeline, MODLOG 477).
+    var dbg_branch = 0.0;
     if lm_light {
         let albedo0 = col;
         // A draw without a lightmap tile (fences, trunks, signs, tree cards) gets a mid lightmap value: lit by the sun it would
@@ -1064,24 +1084,39 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
         if has(p, 8u) {
             lm = sample_lightmap(slot, ulm, dxl, dyl).rgb;
         }
+        // MODLOG 481: the lightmap is stored as a linear UNORM value, but the game's lerp(D, L, t) is done in display-
+        // code space, so t must be the sRGB code of it. Encoding here is the inverse of the decode that made the scene
+        // too dark; used with FH1_RM_POST_CODED=1, which stops the combine encoding the product a second time.
+        if RM_LM_CODE > 0.5 {
+            let cc = clamp(lm, vec3<f32>(0.0), vec3<f32>(1.0));
+            lm = select(1.055 * pow(cc, vec3<f32>(1.0 / 2.4)) - 0.055, cc * 12.92, cc <= vec3<f32>(0.0031308));
+        }
         // Setup carries the map's own lerp(DarkColor, LightColor, lightmap) as p1.xyz = dark, p3.yzw = light - dark (the
         // TrackSettings values, `fx_globals.json` V2LightmapColor1/2); tables built without it use the tuned gain / bias.
         if RM_FM2_RAW_TEX > 1.5 {
+            dbg_branch = 1.0;
             // S1b: pass the display-coded product straight through (tests the post's input convention).
             let lg = max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR));
             col = max(col * lg, vec3<f32>(0.0)) * RM_LM_LIGHT_EXPOSURE;
         } else if RM_FM2_RAW_TEX > 0.5 {
+            dbg_branch = 2.0;
             // The game's order: albedo is sampled raw (display-coded) and multiplied by the display-coded light term, then converted to
             // linear once. `col` here is the raw texture value because the material uploads it linear (FM2_RAW_TEX).
             let lg = max(lm * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR));
             col = pow(max(col * lg, vec3<f32>(0.0)), vec3<f32>(2.2)) * RM_LM_LIGHT_EXPOSURE;
         } else if any(p.p[3].yzw != vec3<f32>(0.0)) {
+            dbg_branch = 4.0;
             // FLOOR: the game also lights shadow with the sky / bounce light (TrackSettings SH ambient), which its lightmap colours
             // do not include: without it fully shadowed faces draw black.
-            if RM_FM2_GAMMA_LM > 0.5 {
+            if RM_FM2_GAMMA_LM > 0.5 && all(p.p[1].xyz >= vec3<f32>(0.0)) {
+                // MODLOG 474: the gamma-space product is the game's own order, but it only agrees with our linear
+                // double-precision when the track's lightmap DARK colour is non-negative. Maple's is (0.109, 0.087,
+                // 0.088) and gamma helps it; New York's, Tsukuba's and Mugello's are negative in at least one channel
+                // and gamma makes them 15-35 % too bright. The sign is data from the track's file, not a fit.
                 // The game multiplies gamma-space values: display = texture x lerp(dark, light, stored lightmap value). The sampler decodes both
                 // textures to linear, so redo the product in gamma space and return to linear: (tex^(1/2.2) x L(lm^(1/2.2)))^2.2.
                 let lmg = pow(max(lm, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+                dbg_branch = 3.0;
                 let lg = max(lmg * p.p[3].yzw + p.p[1].xyz, vec3<f32>(RM_LM_LIGHT_FLOOR));
                 col = pow(max(pow(max(col, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2)) * lg, vec3<f32>(0.0)), vec3<f32>(2.2)) * RM_LM_LIGHT_EXPOSURE;
             } else {
@@ -1236,13 +1271,56 @@ fn fragment(in: Out, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     }
     // FM2 cut-outs with alpha-to-coverage (RM_CUTOUT_A2C): no discard, the multisampled output alpha is the coverage.
     let a2c = RM_CUTOUT_A2C > 0.5 && cls == CLASS_CUTOUT && (flags & FLAG_LM_LIGHT) != 0u;
-    if !a2c && (cls == CLASS_CUTOUT || (flags & FLAG_DECAL_MASK) != 0u) && alpha < cutoff {
+    // Cut-out coverage (MODLOG 482, SHIPPED): the game's draws use alpha-to-coverage, which gives partial coverage to
+    // every texel with alpha > 0, while a hard 0.5 alpha test throws away all of them -- and thin geometry (fences,
+    // distant foliage) is exactly the geometry whose mip-averaged alpha sits below 0.5. Measured at Silverstone, the
+    // barrier's chain-link fence box is 28.4 % dark pixels in the game and was 3.5 % here; at this boost it is 25.0 %.
+    // `FH1_RM_CUTOUT_ALPHA=1` restores the old hard test.
+    var acov = alpha;
+    if RM_CUTOUT_ALPHA != 1.0 {
+        acov = clamp(alpha * RM_CUTOUT_ALPHA, 0.0, 1.0);
+    }
+    if !a2c && (cls == CLASS_CUTOUT || (flags & FLAG_DECAL_MASK) != 0u) && acov < cutoff {
         discard;
     }
-
+    alpha = acov;
     var out: FragmentOutput;
+    // FH1_RM_SCENE_DBG=1 (MODLOG 477): paint this shader's output flat magenta. If the scenery does not turn magenta,
+    // this shader is not the one drawing it -- which would explain why every branch in it measured as inert.
+    if RM_SCENE_DBG > 0.5 {
+        var c = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        if dbg_branch == 1.0 { c = vec4<f32>(1.0, 0.0, 0.0, 1.0); }
+        else if dbg_branch == 2.0 { c = vec4<f32>(0.0, 1.0, 0.0, 1.0); }
+        else if dbg_branch == 3.0 { c = vec4<f32>(0.0, 0.0, 1.0, 1.0); }
+        else if dbg_branch == 4.0 { c = vec4<f32>(1.0, 1.0, 0.0, 1.0); }
+        else if dbg_branch == 5.0 { c = vec4<f32>(0.0, 1.0, 1.0, 1.0); }
+        out.color = c;
+        return out;
+    }
+    // FH1_RM_MATID=1 (MODLOG 548): flat colour per surface class, for the per-material audit. The class is the game's
+    // own material class (opaque / cutout / decal / unlit / additive), read from the record.
+    if RM_MATID > 0.5 {
+        var c = vec4<f32>(1.0, 1.0, 1.0, 1.0);                                  // anything else
+        if cls == 0u { c = vec4<f32>(1.0, 0.0, 0.0, 1.0); }                     // opaque (red)
+        else if cls == CLASS_CUTOUT { c = vec4<f32>(0.0, 1.0, 0.0, 1.0); }      // green
+        else if cls == CLASS_DECAL { c = vec4<f32>(0.0, 0.0, 1.0, 1.0); }       // blue
+        else if cls == CLASS_WATER { c = vec4<f32>(0.0, 1.0, 1.0, 1.0); }       // cyan
+        else if cls == CLASS_UNLIT { c = vec4<f32>(1.0, 1.0, 0.0, 1.0); }       // yellow
+        else if cls == CLASS_ADDITIVE { c = vec4<f32>(1.0, 0.0, 1.0, 1.0); }    // magenta
+        out.color = c;
+        return out;
+    }
     if cls == CLASS_UNLIT || cls == CLASS_ADDITIVE || lm_light {
-        out.color = vec4<f32>(col, alpha);
+        var c = col;
+        if RM_SCENE_LINEAR > 0.5 {
+            // MODLOG 481: the game's shader writes display-coded values (raw albedo x the lightmap lerp), but the FM2
+            // combine in post.rs converts its input with to_srgb -- i.e. it expects THIS buffer to be linear. Without
+            // the conversion the combine encodes the scenery a second time, which lifts shadows and crushes highlights.
+            // Convert once here with the sRGB curve so the combine's to_srgb recovers exactly the game's code.
+            let cc = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+            c = select(pow((cc + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), cc / 12.92, cc <= vec3<f32>(0.04045));
+        }
+        out.color = vec4<f32>(c, alpha);
     } else {
         out.color = pbr_functions::apply_pbr_lighting(pbr);
     }
