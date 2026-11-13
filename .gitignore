@@ -57,3 +57,5 @@ keys.txt
 /tools/cargo-locked.*
 /tools/lock-holder.ps1
 /launch.bat
+# Local agent/editor config (per-machine, never committed)
+/.opencode/

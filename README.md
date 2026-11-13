@@ -110,18 +110,22 @@ whole-frame against Xenia captures. The instrument is `data/work/frame_diff.py`;
 [`MODLOG.md`](MODLOG.md), and the decision below is `docs/DESIGN.md` § "Phase H".
 
 **What works.** FM2 circuits import, render and drive: geometry, textures, sky, lightmaps, cars, HUD and the
-game's own shadow rule on car paint. The frames are the right brightness — road, sky and car within ~1.0× the
-reference — and the per-vertex car lighting is now the game's own (MODLOG 314, measured on 12 of 12 tracks).
+game's own shadow rule on car paint. **FM2's `CollObjs.xml` props (cones, poles, brake markers) import and draw**:
+19 of 19 placements spawn in the tile at the Nordschleife grid, and hiding them removes a measurable cone line
+(MODLOG 505). The frames are the right brightness — road, sky and car within ~1.0× the
+reference — and the per-vertex car lighting is now the game's own (MODLOG 314, measured on 12 of 12 tracks). The
+car's paint multiplier is FM2's own `ColorScale 0.6` rather than a fitted value (MODLOG 508; Tsukuba car luminance
+1.42 → 1.26).
 
-**What does not.** The frame differs from the original by **30.5 mean absolute levels out of 255**, with
-**1.36 %** of pixels within ±2. That is a visible difference, not a subtle one. It is also uniform: sky 29.25,
-road 30.55, scenery 30.14, car 30.18.
+**What does not.** The frame differs from the original by **30.29 mean absolute levels out of 255**, with
+**1.53 %** of pixels within ±2. That is a visible difference, not a subtle one. It is also uniform across regions.
 
 **The target this measurement supports** is not the 2.0 the plan originally set; that would require removing
-93 % of what remains, from mechanisms measured as unable to do it. The accepted ceiling for the current
-approach is **~30.5**, and three specific items are open with their unblocking conditions written down (car
-paint light units, the road's per-pixel detail, and the sky's per-track exposure). See `docs/DESIGN.md`
-"Phase H" for the table and the reasoning.
+93 % of what remains, from mechanisms measured as unable to do it. Plan v12 (2026-11-06) audited every value in the
+FM2 path — 21 of 33 were fitted, six are inert, three were making the frame worse — and its ranked residual is in
+`docs/DESIGN.md` §11a. Plan v13 supersedes it: the game's own per-draw constants can now be read from the running game
+(MODLOG 356), so the next work is transcription rather than inference, with one go/no-go measurement
+(a captured draw rendered with its captured constants must match the reference on 95 % of its pixels).
 
 ## How it works
 
